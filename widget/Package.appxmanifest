@@ -8,14 +8,14 @@
   IgnorableNamespaces="uap uap3 com rescap">
 
   <Identity
-    Name="YOUR_PARTNER_CENTER_IDENTITY_NAME"
-    Publisher="CN=YOUR_PARTNER_CENTER_PUBLISHER_ID"
+    Name="NetFlow.Widget"
+    Publisher="CN=Development"
     Version="0.1.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Net Flow</DisplayName>
-    <PublisherDisplayName>YOUR_OFFICIAL_PUBLISHER_DISPLAY_NAME</PublisherDisplayName>
+    <PublisherDisplayName>Net Flow Developers</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 

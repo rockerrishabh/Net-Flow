@@ -23,6 +23,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   WASDK_VERSION: "1.7.250310001"
+  STORE_PACKAGE_IDENTITY_NAME: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
+  STORE_PUBLISHER_ID: ${{ secrets.STORE_PUBLISHER_ID }}
+  STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
   PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
   PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
   PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
@@ -91,7 +94,13 @@ jobs:
             $ver = $matches[1]
             if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
           } else {
-            $ver = "1.0.0.0"
+            $cargoContent = Get-Content "Cargo.toml" -Raw
+            if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
+              $ver = $matches[1]
+              if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
+            } else {
+              $ver = "0.1.0.0"
+            }
           }
           Write-Host "Package Version: $ver"
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
@@ -115,11 +124,20 @@ jobs:
 
           Copy-Item "target/release/net-flow.exe" $layoutDir -Force
 
-          # Update version in manifest if from release tag
+          # Dynamically inject version and secrets into manifest
           $manifestContent = Get-Content "widget/Package.appxmanifest" -Raw
           $targetVer = "${{ steps.get_version.outputs.VERSION }}"
           if ($targetVer) {
             $manifestContent = $manifestContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $targetVer
+          }
+          if ($env:STORE_PACKAGE_IDENTITY_NAME) {
+            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sName=")[^"]+', $env:STORE_PACKAGE_IDENTITY_NAME
+          }
+          if ($env:STORE_PUBLISHER_ID) {
+            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sPublisher=")[^"]+', $env:STORE_PUBLISHER_ID
+          }
+          if ($env:STORE_PUBLISHER_DISPLAY_NAME) {
+            $manifestContent = $manifestContent -replace '(?<=<PublisherDisplayName>)[^<]+', $env:STORE_PUBLISHER_DISPLAY_NAME
           }
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText("$layoutDir/AppxManifest.xml", $manifestContent, $utf8NoBom)
@@ -162,9 +180,13 @@ jobs:
             if ($env:PFX_PASSWORD) { $password = $env:PFX_PASSWORD }
           } else {
             Write-Host "No PFX_BASE64 secret provided; generating CI self-signed certificate for sideloading..."
+            $publisher = "CN=Development"
+            if ($env:STORE_PUBLISHER_ID) {
+              $publisher = $env:STORE_PUBLISHER_ID
+            }
             $cert = New-SelfSignedCertificate `
               -Type Custom `
-              -Subject "CN=1B630904-509A-4585-BE9C-FFDF09FC28DC" `
+              -Subject "$publisher" `
               -KeyUsage DigitalSignature `
               -FriendlyName "Net Flow Sideload Signing" `
               -CertStoreLocation "Cert:\CurrentUser\My" `
@@ -187,7 +209,7 @@ jobs:
         shell: pwsh
         run: |
           $zipPath = "target/net-flow-windows-x64.zip"
-          Compress-Archive -Path "target/release/net-flow.exe", "widget/Assets", "README.md", "LICENSE" -DestinationPath $zipPath -Force
+          Compress-Archive -Path "target/release/net-flow.exe", "widget/Assets", "README.md", "LICENSE-MIT", "LICENSE-APACHE" -DestinationPath $zipPath -Force
           Write-Host "Created portable archive: $zipPath"
 
       - name: Create GitHub Release
@@ -204,11 +226,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Microsoft Store Developer CLI
-        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '')
+        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '') && (env.STORE_PRODUCT_ID != '')
         uses: microsoft/microsoft-store-apppublisher@v1.4
 
       - name: Publish to Microsoft Store
-        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '')
+        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '') && (env.STORE_PRODUCT_ID != '')
         shell: pwsh
         run: |
           Write-Host "Configuring Microsoft Store Developer CLI credentials..."

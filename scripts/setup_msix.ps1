@@ -83,7 +83,7 @@ if (-not $SkipCert) {
 
         if (-not $inTrustedPeople) {
             Write-Host "Adding certificate to Cert:\CurrentUser\TrustedPeople..." -ForegroundColor Cyan
-            Import-Certificate -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" -FilePath $PfxPath -Password $Password | Out-Null
+            Import-PfxCertificate -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" -FilePath $PfxPath -Password $Password | Out-Null
         }
 
         if (-not $inRoot) {
