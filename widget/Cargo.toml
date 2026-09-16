@@ -1,0 +1,19 @@
+[package]
+name = "net-flow"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+net-flow-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+windows-core = { workspace = true }
+windows-collections = { workspace = true }
+windows-reference = { workspace = true }
+windows-time = { workspace = true }
+
+[build-dependencies]
+windows-bindgen = "0.100.0"
+winres = "0.1.12"

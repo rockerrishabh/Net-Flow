@@ -1,0 +1,37 @@
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# Windows App SDK & WinMD Cache
+widget/winmd/
+windows-rs/
+
+# MSIX Packaging & Certificates
+*.msix
+*.appx
+*.appxbundle
+*.msixbundle
+*.cer
+*.pfx
+*.p7b
+*.pri
+*.nupkg
+*.zip
+
+# Visual Studio & VS Code
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS & Logs
+*.log
+*.tmp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+STORE_PUBLISHING.md

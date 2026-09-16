@@ -1,0 +1,223 @@
+name: Release & Publish to Microsoft Store
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish_to_store:
+        description: "Publish submission to Microsoft Store"
+        required: true
+        type: boolean
+        default: true
+      draft_release:
+        description: "Create draft GitHub release"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  WASDK_VERSION: "1.7.250310001"
+  PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+  PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+  PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+  PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+  STORE_PRODUCT_ID: ${{ secrets.STORE_PRODUCT_ID }}
+  PFX_BASE64: ${{ secrets.PFX_BASE64 }}
+  PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
+
+jobs:
+  build-and-publish:
+    name: Build, Package & Publish
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Rust & Cargo Cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            widget/winmd/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Download Windows App SDK WinMD
+        shell: pwsh
+        run: |
+          $winmdDir = "widget/winmd"
+          if (-not (Test-Path "$winmdDir/Microsoft.Windows.Widgets.winmd")) {
+            Write-Host "Downloading Microsoft.WindowsAppSDK $env:WASDK_VERSION..."
+            $tempNupkg = "$env:TEMP/wasdk.zip"
+            $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/$env:WASDK_VERSION/microsoft.windowsappsdk.$env:WASDK_VERSION.nupkg"
+            curl.exe -s -L $url -o $tempNupkg
+            $tempExtract = "$env:TEMP/wasdk_extracted"
+            New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
+            tar -xf $tempNupkg -C $tempExtract
+            $foundWinmd = Get-ChildItem $tempExtract -Recurse -Filter "Microsoft.Windows.Widgets.winmd" | Select-Object -First 1
+            if (-not $foundWinmd) { throw "WinMD not found in NuGet package!" }
+            New-Item -ItemType Directory -Force -Path $winmdDir | Out-Null
+            Copy-Item $foundWinmd.FullName $winmdDir -Force
+            Remove-Item $tempNupkg -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "Extracted WinMD to $winmdDir"
+          } else {
+            Write-Host "WinMD already present."
+          }
+
+      - name: Run Tests
+        run: cargo test --workspace --verbose
+
+      - name: Extract Tag / Version
+        id: get_version
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -match '^v?(\d+\.\d+\.\d+(\.\d+)?)$') {
+            $ver = $matches[1]
+            if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
+          } else {
+            $ver = "1.0.0.0"
+          }
+          Write-Host "Package Version: $ver"
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Build Release Binary
+        run: cargo build --release --workspace
+
+      - name: Stage & Pack MSIX
+        shell: pwsh
+        run: |
+          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+          $makeappx = Join-Path $sdkBin "makeappx.exe"
+          if (-not (Test-Path $makeappx)) {
+            $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $makeappx) { throw "makeappx.exe not found!" }
+
+          $layoutDir = "target/msix"
+          if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
+
+          Copy-Item "target/release/net-flow.exe" $layoutDir -Force
+
+          # Update version in manifest if from release tag
+          $manifestContent = Get-Content "widget/Package.appxmanifest" -Raw
+          $targetVer = "${{ steps.get_version.outputs.VERSION }}"
+          if ($targetVer) {
+            $manifestContent = $manifestContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $targetVer
+          }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText("$layoutDir/AppxManifest.xml", $manifestContent, $utf8NoBom)
+
+          if (Test-Path "widget/Assets") {
+            Copy-Item "widget/Assets" "$layoutDir/Assets" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path "$layoutDir/Public" | Out-Null
+
+          $makepri = Join-Path $sdkBin "makepri.exe"
+          if (-not (Test-Path $makepri)) {
+            $makepri = (Get-Command makepri.exe -ErrorAction SilentlyContinue).Source
+          }
+          if ($makepri) {
+            $priconfig = "$layoutDir/priconfig.xml"
+            & $makepri createconfig /cf $priconfig /dq "en-US" /pv "10.0.0" /o | Out-Null
+            & $makepri new /pr $layoutDir /cf $priconfig /of "$layoutDir/resources.pri" /o | Out-Null
+            Remove-Item $priconfig -Force -ErrorAction SilentlyContinue
+          }
+
+          & $makeappx pack /d $layoutDir /p "target/NetFlow.msix" /o
+          Write-Host "Packed target/NetFlow.msix"
+
+      - name: Sign MSIX (Secret Certificate or Self-Signed Sideload Cert)
+        shell: pwsh
+        run: |
+          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+          $signtool = Join-Path $sdkBin "signtool.exe"
+          if (-not (Test-Path $signtool)) {
+            $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $signtool) { throw "signtool.exe not found!" }
+
+          $pfxPath = "$env:TEMP/signing_cert.pfx"
+          $password = "NetFlowDev123!"
+
+          if ($env:PFX_BASE64) {
+            Write-Host "Using provided PFX_BASE64 secret..."
+            [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:PFX_BASE64))
+            if ($env:PFX_PASSWORD) { $password = $env:PFX_PASSWORD }
+          } else {
+            Write-Host "No PFX_BASE64 secret provided; generating CI self-signed certificate for sideloading..."
+            $cert = New-SelfSignedCertificate `
+              -Type Custom `
+              -Subject "CN=1B630904-509A-4585-BE9C-FFDF09FC28DC" `
+              -KeyUsage DigitalSignature `
+              -FriendlyName "Net Flow Sideload Signing" `
+              -CertStoreLocation "Cert:\CurrentUser\My" `
+              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+
+            $secPwd = ConvertTo-SecureString $password -AsPlainText -Force
+            Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPwd | Out-Null
+            
+            # Export public .cer for users to install for sideloading
+            $cerPath = "target/NetFlow_Sideload_Cert.cer"
+            [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            Write-Host "Exported public sideload cert to $cerPath"
+          }
+
+          & $signtool sign /fd SHA256 /f $pfxPath /p $password "target/NetFlow.msix"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed!" }
+          Write-Host "Signed target/NetFlow.msix successfully."
+
+      - name: Create Portable Zip Package
+        shell: pwsh
+        run: |
+          $zipPath = "target/net-flow-windows-x64.zip"
+          Compress-Archive -Path "target/release/net-flow.exe", "widget/Assets", "README.md", "LICENSE" -DestinationPath $zipPath -Force
+          Write-Host "Created portable archive: $zipPath"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        with:
+          files: |
+            target/NetFlow.msix
+            target/net-flow-windows-x64.zip
+            target/NetFlow_Sideload_Cert.cer
+          draft: ${{ github.event.inputs.draft_release == 'true' }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Microsoft Store Developer CLI
+        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '')
+        uses: microsoft/microsoft-store-apppublisher@v1.4
+
+      - name: Publish to Microsoft Store
+        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '')
+        shell: pwsh
+        run: |
+          Write-Host "Configuring Microsoft Store Developer CLI credentials..."
+          msstore reconfigure `
+            --tenantId "$env:PARTNER_CENTER_TENANT_ID" `
+            --sellerId "$env:PARTNER_CENTER_SELLER_ID" `
+            --clientId "$env:PARTNER_CENTER_CLIENT_ID" `
+            --clientSecret "$env:PARTNER_CENTER_CLIENT_SECRET"
+
+          Write-Host "Publishing submission for Product ID $env:STORE_PRODUCT_ID..."
+          msstore submission publish "$env:STORE_PRODUCT_ID" --packagePath "target/NetFlow.msix"
+          Write-Host "Submission published to Microsoft Store successfully!"

@@ -1,0 +1,174 @@
+#![allow(
+    non_snake_case,
+    non_camel_case_types,
+    non_upper_case_globals,
+    unused_variables,
+    unused_qualifications
+)]
+#![windows_subsystem = "windows"]
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::restriction,
+    clippy::correctness,
+    warnings
+)]
+
+mod bindings;
+mod factory;
+mod provider;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use windows_core::{GUID, HRESULT, IUnknown, Interface};
+
+use crate::bindings::Microsoft::Windows::Widgets::Providers::WidgetManager;
+use crate::factory::NetFlowClassFactory;
+use crate::provider::{InternalWidgetInfo, NetFlowWidgetProvider, ProviderState};
+use net_flow_core::card::WidgetConfig;
+
+// CLSID: {A8E4C976-3F5D-4B2E-9C1A-7D6E8F0B2A4C}
+pub const CLSID_NET_FLOW_WIDGET_PROVIDER: GUID =
+    GUID::from_u128(0xA8E4C976_3F5D_4B2E_9C1A_7D6E8F0B2A4C);
+
+const COINIT_MULTITHREADED: u32 = 0x0;
+const CLSCTX_LOCAL_SERVER: u32 = 0x4;
+const REGCLS_MULTIPLEUSE: u32 = 0x1;
+
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoInitializeEx(pv_reserved: *const core::ffi::c_void, dw_co_init: u32) -> HRESULT;
+    fn CoRegisterClassObject(
+        rclsid: *const GUID,
+        p_unk: *mut core::ffi::c_void,
+        dw_cls_context: u32,
+        flags: u32,
+        lpdw_register: *mut u32,
+    ) -> HRESULT;
+    fn CoRevokeClassObject(dw_register: u32) -> HRESULT;
+    fn CoUninitialize();
+}
+
+fn main() -> windows_core::Result<()> {
+    // 1. Initialize COM MTA
+    unsafe {
+        let hr = CoInitializeEx(core::ptr::null(), COINIT_MULTITHREADED);
+        if hr.0 < 0 {
+            return Err(windows_core::Error::from_hresult(hr));
+        }
+    }
+
+    let state = Arc::new(Mutex::new(ProviderState::new()));
+
+    // 2. Recovery: restore existing widgets from WidgetManager
+    match WidgetManager::GetDefault() {
+        Ok(manager) => match manager.GetWidgetInfos() {
+            Ok(infos) => {
+                let mut s = state.lock().unwrap();
+                for info in infos.as_slice().iter().flatten() {
+                    if let Ok(ctx) = info.WidgetContext()
+                        && let (Ok(id), Ok(size)) = (ctx.Id(), ctx.Size())
+                    {
+                        let id_str = id.to_string_lossy();
+                        let is_active = ctx.IsActive().unwrap_or(false);
+                        if is_active {
+                            s.active_count += 1;
+                        }
+
+                        // Parse persisted config from CustomState
+                        let custom_state_str = info
+                            .CustomState()
+                            .map(|cs| cs.to_string_lossy())
+                            .unwrap_or_default();
+                        let config: WidgetConfig = if custom_state_str.is_empty() {
+                            WidgetConfig::default()
+                        } else {
+                            serde_json::from_str(&custom_state_str).unwrap_or_default()
+                        };
+
+                        s.widgets.insert(
+                            id_str.clone(),
+                            InternalWidgetInfo {
+                                id: id_str,
+                                size,
+                                is_active,
+                                in_customization: false,
+                                custom_state: config,
+                                draft_state: None,
+                            },
+                        );
+                    }
+                }
+            }
+            Err(_) => {}
+        },
+        Err(_) => {}
+    }
+
+    // 3. Start worker if any active widgets were recovered
+    let provider_helper = NetFlowWidgetProvider::new(Arc::clone(&state));
+    provider_helper.ensure_worker();
+
+    // 4. Register COM Class Factory
+    let factory = NetFlowClassFactory::new(Arc::clone(&state));
+    let factory_unk: IUnknown = factory.into();
+    let mut registration_cookie: u32 = 0;
+
+    unsafe {
+        let hr = CoRegisterClassObject(
+            &CLSID_NET_FLOW_WIDGET_PROVIDER,
+            Interface::as_raw(&factory_unk),
+            CLSCTX_LOCAL_SERVER,
+            REGCLS_MULTIPLEUSE,
+            &mut registration_cookie,
+        );
+        hr.ok()?;
+    }
+
+    // 5. Keep server alive until termination signal
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let r = Arc::clone(&running);
+    let _ = ctrlc_handler(move || {
+        r.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // 6. Cleanup
+    unsafe {
+        let _ = CoRevokeClassObject(registration_cookie);
+        CoUninitialize();
+    }
+
+    Ok(())
+}
+
+fn ctrlc_handler<F: FnOnce() + Send + 'static>(handler: F) -> bool {
+    unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
+        if ctrl_type == 0 || ctrl_type == 2 {
+            if let Some(h) = GLOBAL_HANDLER.lock().unwrap().take() {
+                h();
+            }
+            1
+        } else {
+            0
+        }
+    }
+
+    static GLOBAL_HANDLER: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+    *GLOBAL_HANDLER.lock().unwrap() = Some(Box::new(handler));
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler_routine: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), 1) != 0 }
+}

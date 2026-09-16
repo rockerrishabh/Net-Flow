@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  WASDK_VERSION: "1.7.250310001"
+
+jobs:
+  test-and-build:
+    name: Test & Build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Rust & Cargo Cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            widget/winmd/
+          key: ${{ runner.os }}-cargo-ci-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-ci-
+
+      - name: Download Windows App SDK WinMD
+        shell: pwsh
+        run: |
+          $winmdDir = "widget/winmd"
+          if (-not (Test-Path "$winmdDir/Microsoft.Windows.Widgets.winmd")) {
+            Write-Host "Downloading Microsoft.WindowsAppSDK $env:WASDK_VERSION..."
+            $tempNupkg = "$env:TEMP/wasdk.zip"
+            $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/$env:WASDK_VERSION/microsoft.windowsappsdk.$env:WASDK_VERSION.nupkg"
+            curl.exe -s -L $url -o $tempNupkg
+            $tempExtract = "$env:TEMP/wasdk_extracted"
+            New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
+            tar -xf $tempNupkg -C $tempExtract
+            $foundWinmd = Get-ChildItem $tempExtract -Recurse -Filter "Microsoft.Windows.Widgets.winmd" | Select-Object -First 1
+            if (-not $foundWinmd) { throw "WinMD not found in NuGet package!" }
+            New-Item -ItemType Directory -Force -Path $winmdDir | Out-Null
+            Copy-Item $foundWinmd.FullName $winmdDir -Force
+            Remove-Item $tempNupkg -Force -ErrorAction SilentlyContinue
+            Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "Extracted WinMD to $winmdDir"
+          } else {
+            Write-Host "WinMD already present."
+          }
+
+      - name: Run Tests
+        run: cargo test --workspace --verbose
+
+      - name: Build Release Binary
+        run: cargo build --release --workspace
+
+      - name: Package MSIX
+        shell: pwsh
+        run: |
+          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+          $makeappx = Join-Path $sdkBin "makeappx.exe"
+          if (-not (Test-Path $makeappx)) {
+            $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $makeappx) { throw "makeappx.exe not found!" }
+
+          $layoutDir = "target/msix"
+          if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
+
+          Copy-Item "target/release/net-flow.exe" $layoutDir -Force
+          Copy-Item "widget/Package.appxmanifest" "$layoutDir/AppxManifest.xml" -Force
+          if (Test-Path "widget/Assets") {
+            Copy-Item "widget/Assets" "$layoutDir/Assets" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path "$layoutDir/Public" | Out-Null
+
+          & $makeappx pack /d $layoutDir /p "target/NetFlow.msix" /o
+          Write-Host "Packaged target/NetFlow.msix successfully."
+
+      - name: Upload MSIX Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: NetFlow-MSIX
+          path: target/NetFlow.msix
+          if-no-files-found: error
