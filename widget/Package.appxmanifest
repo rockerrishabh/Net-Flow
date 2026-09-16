@@ -8,14 +8,14 @@
   IgnorableNamespaces="uap uap3 com rescap">
 
   <Identity
-    Name="rockerrishabh.NetFlow"
-    Publisher="CN=1B630904-509A-4585-BE9C-FFDF09FC28DC"
+    Name="YOUR_PARTNER_CENTER_IDENTITY_NAME"
+    Publisher="CN=YOUR_PARTNER_CENTER_PUBLISHER_ID"
     Version="0.1.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Net Flow</DisplayName>
-    <PublisherDisplayName>rockerrishabh</PublisherDisplayName>
+    <PublisherDisplayName>YOUR_OFFICIAL_PUBLISHER_DISPLAY_NAME</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 
