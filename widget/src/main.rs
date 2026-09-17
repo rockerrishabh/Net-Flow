@@ -1,32 +1,28 @@
-#![allow(
+#![windows_subsystem = "windows"]
+
+#[allow(
     non_snake_case,
     non_camel_case_types,
     non_upper_case_globals,
     unused_variables,
-    unused_qualifications
-)]
-#![windows_subsystem = "windows"]
-#![allow(
+    unused_qualifications,
     clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::restriction,
-    clippy::correctness,
     warnings
 )]
-
 mod bindings;
 mod factory;
 mod provider;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows_core::{GUID, HRESULT, IUnknown, Interface};
 
 use crate::bindings::Microsoft::Windows::Widgets::Providers::WidgetManager;
 use crate::factory::NetFlowClassFactory;
-use crate::provider::{InternalWidgetInfo, NetFlowWidgetProvider, ProviderState};
+use crate::provider::{
+    InternalWidgetInfo, LockExt, NetFlowWidgetProvider, ProviderState, log_widget,
+};
 use net_flow_core::card::WidgetConfig;
 
 // CLSID: {A8E4C976-3F5D-4B2E-9C1A-7D6E8F0B2A4C}
@@ -63,48 +59,51 @@ fn main() -> windows_core::Result<()> {
     let state = Arc::new(Mutex::new(ProviderState::new()));
 
     // 2. Recovery: restore existing widgets from WidgetManager
-    match WidgetManager::GetDefault() {
-        Ok(manager) => match manager.GetWidgetInfos() {
-            Ok(infos) => {
-                let mut s = state.lock().unwrap();
-                for info in infos.as_slice().iter().flatten() {
-                    if let Ok(ctx) = info.WidgetContext()
-                        && let (Ok(id), Ok(size)) = (ctx.Id(), ctx.Size())
-                    {
-                        let id_str = id.to_string_lossy();
-                        let is_active = ctx.IsActive().unwrap_or(false);
-                        if is_active {
-                            s.active_count += 1;
-                        }
-
-                        // Parse persisted config from CustomState
-                        let custom_state_str = info
-                            .CustomState()
-                            .map(|cs| cs.to_string_lossy())
-                            .unwrap_or_default();
-                        let config: WidgetConfig = if custom_state_str.is_empty() {
-                            WidgetConfig::default()
-                        } else {
-                            serde_json::from_str(&custom_state_str).unwrap_or_default()
-                        };
-
-                        s.widgets.insert(
-                            id_str.clone(),
-                            InternalWidgetInfo {
-                                id: id_str,
-                                size,
-                                is_active,
-                                in_customization: false,
-                                custom_state: config,
-                                draft_state: None,
-                            },
-                        );
-                    }
+    if let Ok(manager) = WidgetManager::GetDefault()
+        && let Ok(infos) = manager.GetWidgetInfos()
+    {
+        let mut s = state.lock_safe();
+        for info in infos.as_slice().iter().flatten() {
+            if let Ok(ctx) = info.WidgetContext()
+                && let (Ok(id), Ok(size)) = (ctx.Id(), ctx.Size())
+            {
+                let id_str = id.to_string_lossy();
+                let is_active = ctx.IsActive().unwrap_or(false);
+                if is_active {
+                    s.active_count += 1;
                 }
+
+                // Parse persisted config from CustomState
+                let custom_state_str = info
+                    .CustomState()
+                    .map(|cs| cs.to_string_lossy())
+                    .unwrap_or_default();
+                let config: WidgetConfig = if custom_state_str.is_empty() {
+                    WidgetConfig::default()
+                } else {
+                    serde_json::from_str(&custom_state_str).unwrap_or_default()
+                };
+
+                s.widgets.insert(
+                    id_str.clone(),
+                    InternalWidgetInfo {
+                        id: id_str,
+                        size,
+                        is_active,
+                        in_customization: false,
+                        custom_state: config,
+                        draft_state: None,
+                        customization_requested_at: None,
+                    },
+                );
             }
-            Err(_) => {}
-        },
-        Err(_) => {}
+        }
+        s.has_had_widgets = !s.widgets.is_empty();
+        s.last_empty_at = if s.widgets.is_empty() {
+            Some(Instant::now())
+        } else {
+            None
+        };
     }
 
     // 3. Start worker if any active widgets were recovered
@@ -127,7 +126,7 @@ fn main() -> windows_core::Result<()> {
         hr.ok()?;
     }
 
-    // 5. Keep server alive until termination signal
+    // 5. Keep server alive until termination signal or idle timeout
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = Arc::clone(&running);
     let _ = ctrlc_handler(move || {
@@ -136,11 +135,71 @@ fn main() -> windows_core::Result<()> {
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(500));
+
+        let (is_empty, has_had, last_empty) = {
+            let s = state.lock_safe();
+            (s.widgets.is_empty(), s.has_had_widgets, s.last_empty_at)
+        };
+
+        if is_empty {
+            let grace = if has_had {
+                Duration::from_secs(30)
+            } else {
+                Duration::from_secs(60)
+            };
+
+            if let Some(t) = last_empty
+                && t.elapsed() >= grace
+            {
+                log_widget("Idle timeout reached with 0 widgets; initiating clean shutdown");
+                // Revoke class object first so Windows does not route new calls to shutting-down server
+                unsafe {
+                    let _ = CoRevokeClassObject(registration_cookie);
+                }
+                registration_cookie = 0;
+
+                // Double check if any widget was added concurrently before revoke
+                let still_empty = {
+                    let s = state.lock_safe();
+                    s.widgets.is_empty()
+                };
+
+                if !still_empty {
+                    log_widget("Widget registered during shutdown; re-registering class factory");
+                    let mut new_cookie = 0;
+                    let hr = unsafe {
+                        CoRegisterClassObject(
+                            &CLSID_NET_FLOW_WIDGET_PROVIDER,
+                            Interface::as_raw(&factory_unk),
+                            CLSCTX_LOCAL_SERVER,
+                            REGCLS_MULTIPLEUSE,
+                            &mut new_cookie,
+                        )
+                    };
+                    if hr.0 >= 0 {
+                        registration_cookie = new_cookie;
+                        continue;
+                    }
+                }
+
+                break;
+            }
+        }
     }
 
     // 6. Cleanup
+    let worker = {
+        let mut s = state.lock_safe();
+        s.worker.take()
+    };
+    if let Some(w) = worker {
+        w.stop();
+    }
+
     unsafe {
-        let _ = CoRevokeClassObject(registration_cookie);
+        if registration_cookie != 0 {
+            let _ = CoRevokeClassObject(registration_cookie);
+        }
         CoUninitialize();
     }
 
@@ -150,7 +209,7 @@ fn main() -> windows_core::Result<()> {
 fn ctrlc_handler<F: FnOnce() + Send + 'static>(handler: F) -> bool {
     unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 0 || ctrl_type == 2 {
-            if let Some(h) = GLOBAL_HANDLER.lock().unwrap().take() {
+            if let Some(h) = GLOBAL_HANDLER.lock_safe().take() {
                 h();
             }
             1
@@ -160,7 +219,7 @@ fn ctrlc_handler<F: FnOnce() + Send + 'static>(handler: F) -> bool {
     }
 
     static GLOBAL_HANDLER: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
-    *GLOBAL_HANDLER.lock().unwrap() = Some(Box::new(handler));
+    *GLOBAL_HANDLER.lock_safe() = Some(Box::new(handler));
 
     #[link(name = "kernel32")]
     unsafe extern "system" {

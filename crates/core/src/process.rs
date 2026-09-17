@@ -455,7 +455,7 @@ pub fn get_process_native_icon(full_path: &str) -> Option<String> {
     }
 
     {
-        let cache = ICON_CACHE.lock().unwrap();
+        let cache = ICON_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = cache.get(full_path) {
             return cached.clone();
         }
@@ -464,7 +464,10 @@ pub fn get_process_native_icon(full_path: &str) -> Option<String> {
     let icon_data_uri = extract_native_icon_data_uri(full_path);
 
     {
-        let mut cache = ICON_CACHE.lock().unwrap();
+        let mut cache = ICON_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= 256 {
+            cache.clear();
+        }
         cache.insert(full_path.to_string(), icon_data_uri.clone());
     }
 

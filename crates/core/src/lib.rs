@@ -28,7 +28,7 @@ pub use backend::{
     InterfaceLuid, InterfaceSample, NetworkBackend, NetworkSnapshot, classify_interface,
     compute_delta, query_interfaces,
 };
-pub use card::{WidgetConfig, build_adaptive_card, build_settings_card};
+pub use card::{WidgetConfig, build_adaptive_card, build_settings_card, build_settings_card_for_size};
 pub use chart::{Track, render_chart_data_uris, render_chart_png};
 pub use format::{SpeedUnit, format_bandwidth, format_bandwidth_with_unit, format_bytes};
 pub use icons::app_glyph_for_emoji;

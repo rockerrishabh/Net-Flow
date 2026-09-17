@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub type InterfaceLuid = u64;
 
@@ -116,11 +116,56 @@ pub struct InterfaceSample {
     pub tx_bps: f64,
 }
 
-/// A single point in the rolling history buffer.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+/// A single bucket in the rolling history buffer representing a fixed-duration time interval.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySample {
+    /// Authoritative byte integral received during this bucket interval.
+    #[serde(default)]
+    pub rx_bytes: u64,
+    /// Authoritative byte integral transmitted during this bucket interval.
+    #[serde(default)]
+    pub tx_bytes: u64,
+    /// Duration of this bucket in nanoseconds (e.g. 500_000_000 ns for 500ms).
+    #[serde(default)]
+    pub duration_ns: u64,
+    /// Derived download transfer rate (B/s) over this bucket interval.
     pub rx_bps: u64,
+    /// Derived upload transfer rate (B/s) over this bucket interval.
     pub tx_bps: u64,
+}
+
+impl HistorySample {
+    pub fn new(rx_bytes: u64, tx_bytes: u64, duration_ns: u64) -> Self {
+        let rx_bps = if duration_ns > 0 {
+            ((rx_bytes as u128 * 1_000_000_000) / duration_ns as u128) as u64
+        } else {
+            0
+        };
+        let tx_bps = if duration_ns > 0 {
+            ((tx_bytes as u128 * 1_000_000_000) / duration_ns as u128) as u64
+        } else {
+            0
+        };
+        Self {
+            rx_bytes,
+            tx_bytes,
+            duration_ns,
+            rx_bps,
+            tx_bps,
+        }
+    }
+
+    pub fn from_bps(rx_bps: u64, tx_bps: u64, duration_ns: u64) -> Self {
+        let rx_bytes = ((rx_bps as u128 * duration_ns as u128) / 1_000_000_000) as u64;
+        let tx_bytes = ((tx_bps as u128 * duration_ns as u128) / 1_000_000_000) as u64;
+        Self {
+            rx_bytes,
+            tx_bytes,
+            duration_ns,
+            rx_bps,
+            tx_bps,
+        }
+    }
 }
 
 /// Persisted session state across widget restarts.
@@ -181,12 +226,280 @@ pub fn save_persisted_session_state(state: &SessionState) {
     }
 }
 
+/// Deterministic interval-based telemetry accumulator with cumulative proportional boundary allocation.
+/// Partitions variable sampling intervals into discrete fixed-duration buckets (e.g. 500ms)
+/// with exact byte conservation and zero clock phase drift.
+#[derive(Clone, Debug, Default)]
+pub struct RateAccumulator {
+    time_acc_ns: u64,
+    bytes_rx_acc: u64,
+    bytes_tx_acc: u64,
+}
+
+impl RateAccumulator {
+    pub fn new() -> Self {
+        Self {
+            time_acc_ns: 0,
+            bytes_rx_acc: 0,
+            bytes_tx_acc: 0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.time_acc_ns = 0;
+        self.bytes_rx_acc = 0;
+        self.bytes_tx_acc = 0;
+    }
+
+    pub fn time_acc_ns(&self) -> u64 {
+        self.time_acc_ns
+    }
+
+    pub fn bytes_rx_acc(&self) -> u64 {
+        self.bytes_rx_acc
+    }
+
+    pub fn bytes_tx_acc(&self) -> u64 {
+        self.bytes_tx_acc
+    }
+
+    /// Push an observed measurement interval (elapsed_ns, delta_rx, delta_tx) and emit
+    /// any completed buckets of size slot_ns.
+    ///
+    /// Slices are distributed using cumulative proportional allocation to guarantee
+    /// each boundary receives its exact proportional share under piecewise-constant interpolation.
+    pub fn push_sample(
+        &mut self,
+        elapsed_ns: u64,
+        delta_rx: u64,
+        delta_tx: u64,
+        slot_ns: u64,
+    ) -> Vec<HistorySample> {
+        if elapsed_ns == 0 || slot_ns == 0 {
+            return Vec::new();
+        }
+
+        let needed_ns = slot_ns.saturating_sub(self.time_acc_ns);
+
+        // If the sample interval does not cross the current bucket boundary,
+        // simply accumulate and return.
+        if elapsed_ns < needed_ns {
+            self.time_acc_ns += elapsed_ns;
+            self.bytes_rx_acc += delta_rx;
+            self.bytes_tx_acc += delta_tx;
+            return Vec::new();
+        }
+
+        let mut emitted = Vec::new();
+        let mut consumed_time_ns = 0u64;
+        let mut consumed_rx = 0u64;
+        let mut consumed_tx = 0u64;
+
+        // 1. Complete the currently in-progress bucket
+        let cum_boundary_1 = needed_ns;
+        let target_rx_1 = ((delta_rx as u128 * cum_boundary_1 as u128) / elapsed_ns as u128) as u64;
+        let target_tx_1 = ((delta_tx as u128 * cum_boundary_1 as u128) / elapsed_ns as u128) as u64;
+
+        let slice_rx_1 = target_rx_1 - consumed_rx;
+        let slice_tx_1 = target_tx_1 - consumed_tx;
+
+        let bucket_rx_1 = self.bytes_rx_acc + slice_rx_1;
+        let bucket_tx_1 = self.bytes_tx_acc + slice_tx_1;
+        emitted.push(HistorySample::new(bucket_rx_1, bucket_tx_1, slot_ns));
+
+        consumed_rx += slice_rx_1;
+        consumed_tx += slice_tx_1;
+        consumed_time_ns += needed_ns;
+
+        self.time_acc_ns = 0;
+        self.bytes_rx_acc = 0;
+        self.bytes_tx_acc = 0;
+
+        // 2. Emit any full buckets contained within the remainder of this interval
+        while (elapsed_ns - consumed_time_ns) >= slot_ns {
+            let cum_boundary = consumed_time_ns + slot_ns;
+            let target_rx = ((delta_rx as u128 * cum_boundary as u128) / elapsed_ns as u128) as u64;
+            let target_tx = ((delta_tx as u128 * cum_boundary as u128) / elapsed_ns as u128) as u64;
+
+            let slice_rx = target_rx - consumed_rx;
+            let slice_tx = target_tx - consumed_tx;
+
+            emitted.push(HistorySample::new(slice_rx, slice_tx, slot_ns));
+
+            consumed_rx += slice_rx;
+            consumed_tx += slice_tx;
+            consumed_time_ns += slot_ns;
+        }
+
+        // 3. Stash remaining residual fraction in accumulator
+        let rem_time_ns = elapsed_ns - consumed_time_ns;
+        let rem_rx = delta_rx - consumed_rx;
+        let rem_tx = delta_tx - consumed_tx;
+
+        self.time_acc_ns = rem_time_ns;
+        self.bytes_rx_acc = rem_rx;
+        self.bytes_tx_acc = rem_tx;
+
+        emitted
+    }
+}
+
+/// A single timestamped cumulative counter point for rolling window rate calculation.
+#[derive(Clone, Copy, Debug)]
+pub struct CounterPoint {
+    pub timestamp: Instant,
+    pub total_rx: u64,
+    pub total_tx: u64,
+}
+
+/// Rolling window rate calculator that interpolates exact counter values at window boundaries.
+#[derive(Clone, Debug)]
+pub struct RollingRateWindow {
+    points: VecDeque<CounterPoint>,
+    window: Duration,
+}
+
+impl RollingRateWindow {
+    pub fn new(window_ns: u64) -> Self {
+        Self {
+            points: VecDeque::new(),
+            window: Duration::from_nanos(window_ns),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.points.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
+    pub fn record_sample(&mut self, now: Instant, total_rx: u64, total_tx: u64) {
+        // If there is a massive time gap (> 5s), reset the window
+        if let Some(last) = self.points.back()
+            && now.saturating_duration_since(last.timestamp) > Duration::from_secs(5)
+        {
+            self.points.clear();
+        }
+        self.points.push_back(CounterPoint {
+            timestamp: now,
+            total_rx,
+            total_tx,
+        });
+
+        // Prune points that are older than window + extra buffer, but retain at least 1 point
+        // older than (now - window) so we can always bracket the boundary.
+        if let Some(target_time) = now.checked_sub(self.window) {
+            while self.points.len() >= 2 {
+                // If the second point is also <= target_time, the first point is unneeded
+                if self.points[1].timestamp <= target_time {
+                    self.points.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Calculate the rolling rate over the specified window (default 1s) ending at `now`.
+    /// Reconstructs the counter at (now - window) using piecewise-constant interpolation.
+    pub fn current_rate(&self, now: Instant) -> (f64, f64) {
+        let latest = match self.points.back() {
+            Some(p) => p,
+            None => return (0.0, 0.0),
+        };
+
+        let target_time = match now.checked_sub(self.window) {
+            Some(t) => t,
+            None => return (0.0, 0.0),
+        };
+
+        // If we only have 1 point, or the oldest point is newer than target_time:
+        let oldest = &self.points[0];
+        if self.points.len() == 1 || oldest.timestamp >= target_time {
+            let elapsed = now
+                .saturating_duration_since(oldest.timestamp)
+                .as_secs_f64();
+            if elapsed > 0.0 {
+                let rx = (latest.total_rx.saturating_sub(oldest.total_rx)) as f64 / elapsed;
+                let tx = (latest.total_tx.saturating_sub(oldest.total_tx)) as f64 / elapsed;
+                return (rx, tx);
+            } else {
+                return (0.0, 0.0);
+            }
+        }
+
+        // Find the bracket: points[i].timestamp <= target_time <= points[i+1].timestamp
+        let mut bracket = None;
+        for i in 0..self.points.len() - 1 {
+            if self.points[i].timestamp <= target_time
+                && self.points[i + 1].timestamp >= target_time
+            {
+                bracket = Some((&self.points[i], &self.points[i + 1]));
+                break;
+            }
+        }
+
+        let (p_start, p_end) = match bracket {
+            Some(b) => b,
+            None => {
+                // Fallback to earliest point
+                let elapsed = now
+                    .saturating_duration_since(oldest.timestamp)
+                    .as_secs_f64();
+                if elapsed > 0.0 {
+                    let rx = (latest.total_rx.saturating_sub(oldest.total_rx)) as f64 / elapsed;
+                    let tx = (latest.total_tx.saturating_sub(oldest.total_tx)) as f64 / elapsed;
+                    return (rx, tx);
+                } else {
+                    return (0.0, 0.0);
+                }
+            }
+        };
+
+        let bracket_duration = p_end
+            .timestamp
+            .saturating_duration_since(p_start.timestamp)
+            .as_secs_f64();
+        let (interp_rx, interp_tx) = if bracket_duration > 0.0 {
+            let fraction = (target_time
+                .saturating_duration_since(p_start.timestamp)
+                .as_secs_f64()
+                / bracket_duration)
+                .clamp(0.0, 1.0);
+            let rx_delta = (p_end.total_rx.saturating_sub(p_start.total_rx)) as f64;
+            let tx_delta = (p_end.total_tx.saturating_sub(p_start.total_tx)) as f64;
+            (
+                p_start.total_rx as f64 + fraction * rx_delta,
+                p_start.total_tx as f64 + fraction * tx_delta,
+            )
+        } else {
+            (p_start.total_rx as f64, p_start.total_tx as f64)
+        };
+
+        let window_secs = self.window.as_secs_f64();
+        let rx_bps = ((latest.total_rx as f64 - interp_rx) / window_secs).max(0.0);
+        let tx_bps = ((latest.total_tx as f64 - interp_tx) / window_secs).max(0.0);
+        (rx_bps, tx_bps)
+    }
+}
+
 /// Complete snapshot returned by `NetworkBackend::sample()`.
 /// Contains everything the presentation layer needs.
 #[derive(Debug, Clone)]
 pub struct NetworkSnapshot {
+    /// 1-second rolling download rate (in B/s), smoothly matching the UI refresh cadence.
     pub rx_bps: f64,
+    /// 1-second rolling upload rate (in B/s), smoothly matching the UI refresh cadence.
     pub tx_bps: f64,
+    /// Download rate represented by the latest 500ms completed bucket (in B/s).
+    pub rx_bps_500ms: u64,
+    /// Upload rate represented by the latest 500ms completed bucket (in B/s).
+    pub tx_bps_500ms: u64,
+    /// Instantaneous measurement interval rate (for internal telemetry / app bandwidth reconciliation).
+    pub instant_rx_bps: f64,
+    pub instant_tx_bps: f64,
     pub session_rx: u64,
     pub session_tx: u64,
     pub session_duration_secs: u64,
@@ -233,6 +546,10 @@ impl Default for NetworkSnapshot {
         Self {
             rx_bps: 0.0,
             tx_bps: 0.0,
+            rx_bps_500ms: 0,
+            tx_bps_500ms: 0,
+            instant_rx_bps: 0.0,
+            instant_tx_bps: 0.0,
             session_rx: 0,
             session_tx: 0,
             session_duration_secs: 0,
@@ -271,6 +588,14 @@ pub struct NetworkBackend {
     history: VecDeque<HistorySample>,
     /// State tracker for per-process realtime bandwidth and connection counts.
     pub process_tracker: crate::process::ProcessTracker,
+    /// Timestamp of the last raw process table sampling pass.
+    last_process_sample: Option<Instant>,
+    /// Cached pre-reconciliation raw output from ProcessTracker.
+    cached_raw_apps: (Vec<crate::process::ActiveAppInfo>, usize),
+    /// Deterministic integer-nanosecond interval accumulator with cumulative proportional allocation.
+    pub accumulator: RateAccumulator,
+    /// 1-second rolling rate window with boundary counter interpolation.
+    pub rolling_window: RollingRateWindow,
 }
 
 impl Default for NetworkBackend {
@@ -300,6 +625,10 @@ impl NetworkBackend {
             session_start_unix: now_unix,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
             process_tracker: crate::process::ProcessTracker::new(),
+            last_process_sample: None,
+            cached_raw_apps: (Vec::new(), 0),
+            accumulator: RateAccumulator::new(),
+            rolling_window: RollingRateWindow::new(1_000_000_000),
         }
     }
 
@@ -325,6 +654,10 @@ impl NetworkBackend {
             },
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
             process_tracker: crate::process::ProcessTracker::new(),
+            last_process_sample: None,
+            cached_raw_apps: (Vec::new(), 0),
+            accumulator: RateAccumulator::new(),
+            rolling_window: RollingRateWindow::new(1_000_000_000),
         }
     }
 
@@ -353,7 +686,11 @@ impl NetworkBackend {
             .unwrap_or(0);
         self.session_start_unix = now_unix;
         self.history.clear();
+        self.accumulator.reset();
+        self.rolling_window.reset();
         self.process_tracker.reset();
+        self.last_process_sample = None;
+        self.cached_raw_apps = (Vec::new(), 0);
         save_persisted_session_state(&SessionState {
             session_rx: 0,
             session_tx: 0,
@@ -368,7 +705,20 @@ impl NetworkBackend {
         let interfaces = query_interfaces()?;
         let now = Instant::now();
         let mut snapshot = self.sample_from_interfaces(&interfaces, now);
-        let (mut active_apps, active_conns) = self.process_tracker.sample(now);
+
+        let need_process_sample = match self.last_process_sample {
+            Some(last) => now.duration_since(last) >= Duration::from_millis(1000),
+            None => true,
+        };
+
+        if need_process_sample {
+            self.cached_raw_apps = self.process_tracker.sample(now);
+            self.last_process_sample = Some(now);
+        }
+
+        // Always clone the pre-reconciliation raw output and reconcile fresh
+        // against this tick's network totals, avoiding directional-mismatch distortion!
+        let (mut active_apps, active_conns) = self.cached_raw_apps.clone();
         crate::process::reconcile_app_bandwidth(&mut active_apps, snapshot.rx_bps, snapshot.tx_bps);
         snapshot.active_apps = active_apps;
         snapshot.active_connections_count = active_conns;
@@ -382,12 +732,12 @@ impl NetworkBackend {
         interfaces: &[InterfaceInfo],
         now: Instant,
     ) -> NetworkSnapshot {
-        let elapsed_secs = match self.prev_time {
-            Some(prev) => {
-                let duration = now.saturating_duration_since(prev).as_secs_f64();
-                if duration > 0.0 { duration } else { 0.0 }
-            }
-            None => 0.0, // First sample establishes baseline
+        let (elapsed_secs, elapsed_ns) = match self.prev_time {
+            Some(prev) => match now.checked_duration_since(prev) {
+                Some(duration) => (duration.as_secs_f64(), duration.as_nanos() as u64),
+                None => (0.0, 0), // Clock jitter or backward step
+            },
+            None => (0.0, 0), // First sample establishes baseline
         };
         self.prev_time = Some(now);
 
@@ -511,60 +861,54 @@ impl NetworkBackend {
         self.session_rx += total_delta_in;
         self.session_tx += total_delta_out;
 
-        let rx_bps = if elapsed_secs > 0.0 {
+        let instant_rx_bps = if elapsed_secs > 0.0 {
             total_delta_in as f64 / elapsed_secs
         } else {
             0.0
         };
-        let tx_bps = if elapsed_secs > 0.0 {
+        let instant_tx_bps = if elapsed_secs > 0.0 {
             total_delta_out as f64 / elapsed_secs
         } else {
             0.0
         };
 
-        if rx_bps > self.peak_rx {
-            self.peak_rx = rx_bps;
-        }
-        if tx_bps > self.peak_tx {
-            self.peak_tx = tx_bps;
-        }
-
         // Time cadence synchronization:
-        // Ensure each history slot strictly represents SAMPLING_INTERVAL_MS (500ms).
-        // Only record timed intervals. The first sample after start/reset
-        // is a baseline (elapsed = 0) and must not consume a chart slot.
-        let sampling_sec = crate::SAMPLING_INTERVAL_MS as f64 / 1000.0;
-        let intervals = if elapsed_secs > 0.0 {
-            (elapsed_secs / sampling_sec).round() as usize
-        } else {
-            0
-        };
-
-        let sample_point = HistorySample {
-            rx_bps: rx_bps as u64,
-            tx_bps: tx_bps as u64,
-        };
-
-        if intervals >= HISTORY_CAPACITY {
-            // Gap exceeded maximum capacity (e.g. PC suspended/slept for >60s).
-            // Stale history is purged so pre-sleep peaks do not linger on the live chart.
+        // Use integer-nanosecond RateAccumulator with cumulative proportional boundary allocation.
+        // A gap > 5 seconds (e.g. PC suspended/slept) represents a new telemetry segment.
+        let slot_ns = crate::SAMPLING_INTERVAL_MS * 1_000_000;
+        if elapsed_ns > 5_000_000_000 {
             self.history.clear();
-            self.history.push_back(sample_point);
-        } else if intervals > 1 {
-            // Gap was between 1.0s and 60.0s (e.g. slight delay or pause).
-            // Advance history by the actual number of elapsed intervals so 1 slot always equals SAMPLING_INTERVAL_MS.
-            for _ in 0..intervals {
+            self.accumulator.reset();
+            self.rolling_window.reset();
+            self.rolling_window
+                .record_sample(now, self.session_rx, self.session_tx);
+        } else if elapsed_ns > 0 {
+            let emitted =
+                self.accumulator
+                    .push_sample(elapsed_ns, total_delta_in, total_delta_out, slot_ns);
+            for bucket in emitted {
+                if (bucket.rx_bps as f64) > self.peak_rx {
+                    self.peak_rx = bucket.rx_bps as f64;
+                }
+                if (bucket.tx_bps as f64) > self.peak_tx {
+                    self.peak_tx = bucket.tx_bps as f64;
+                }
                 if self.history.len() >= HISTORY_CAPACITY {
                     self.history.pop_front();
                 }
-                self.history.push_back(sample_point);
+                self.history.push_back(bucket);
             }
-        } else if elapsed_secs > 0.0 {
-            if self.history.len() >= HISTORY_CAPACITY {
-                self.history.pop_front();
-            }
-            self.history.push_back(sample_point);
+            self.rolling_window
+                .record_sample(now, self.session_rx, self.session_tx);
+        } else {
+            // First sample establishes initial baseline point
+            self.rolling_window
+                .record_sample(now, self.session_rx, self.session_tx);
         }
+
+        let (rx_bps, tx_bps) = self.rolling_window.current_rate(now);
+        let rx_bps_500ms = self.history.back().map(|s| s.rx_bps).unwrap_or(0);
+        let tx_bps_500ms = self.history.back().map(|s| s.tx_bps).unwrap_or(0);
 
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -587,6 +931,10 @@ impl NetworkBackend {
         NetworkSnapshot {
             rx_bps,
             tx_bps,
+            rx_bps_500ms,
+            tx_bps_500ms,
+            instant_rx_bps,
+            instant_tx_bps,
             session_rx: self.session_rx,
             session_tx: self.session_tx,
             session_duration_secs,
@@ -737,11 +1085,10 @@ pub fn query_active_wifi_ssid() -> Option<String> {
                         if ssid_len > 0 && ssid_len <= 32 {
                             let bytes =
                                 &conn_attrs.wlanAssociationAttributes.dot11Ssid.ucSSID[..ssid_len];
-                            if let Ok(ssid_str) = std::str::from_utf8(bytes) {
-                                let trimmed = ssid_str.trim();
-                                if !trimmed.is_empty() {
-                                    found_ssid = Some(trimmed.to_string());
-                                }
+                            let ssid_lossy = String::from_utf8_lossy(bytes);
+                            let trimmed = ssid_lossy.trim_matches(['\0', ' ']);
+                            if !trimmed.is_empty() {
+                                found_ssid = Some(trimmed.to_string());
                             }
                         }
                         if found_ssid.is_none() {
@@ -1455,7 +1802,7 @@ mod tests {
         }
         assert_eq!(backend.history.len(), 5);
 
-        // Simulate 120-second suspend/sleep gap (> MAX_CHART_WINDOW_SECS of 60s)
+        // Simulate 120-second suspend/sleep gap (> 5s threshold)
         let t_sleep = t0 + Duration::from_millis(5 * 500) + Duration::from_secs(120);
         let ifaces_wake = vec![mock_iface(
             1,
@@ -1466,8 +1813,167 @@ mod tests {
             50_000,
         )];
         let snap_wake = backend.sample_from_interfaces(&ifaces_wake, t_sleep);
-        // Old stale samples from before sleep must be cleared!
-        assert_eq!(snap_wake.history.len(), 1);
+        // Stale samples from before sleep are cleared, and wake establishes a clean new baseline
+        assert_eq!(snap_wake.history.len(), 0);
+        assert_eq!(backend.accumulator.time_acc_ns(), 0);
+        assert_eq!(backend.accumulator.bytes_rx_acc(), 0);
+
+        // Next 500ms sample after wake starts fresh without incorporating pre-suspend data
+        let t_after_wake = t_sleep + Duration::from_millis(500);
+        let ifaces_after_wake = vec![mock_iface(
+            1,
+            InterfaceCategory::Physical,
+            InterfaceMedium::Ethernet,
+            1,
+            105_000,
+            52_500,
+        )];
+        let snap_after_wake = backend.sample_from_interfaces(&ifaces_after_wake, t_after_wake);
+        assert_eq!(snap_after_wake.history.len(), 1);
+        assert_eq!(snap_after_wake.history[0].rx_bytes, 5000);
+        assert_eq!(snap_after_wake.history[0].tx_bytes, 2500);
+        assert_eq!(snap_after_wake.history[0].rx_bps, 10_000);
+        assert_eq!(snap_after_wake.history[0].tx_bps, 5_000);
+    }
+
+    #[test]
+    fn test_adversarial_fractional_allocation() {
+        let mut acc = RateAccumulator::new();
+        // 10 bytes transferred across 3 ns with 1-ns boundaries
+        let emitted = acc.push_sample(3, 10, 20, 1);
+        assert_eq!(emitted.len(), 3);
+        // Under cumulative proportional allocation:
+        // boundary 1 (1/3 of 10 = 3) -> 3
+        // boundary 2 (2/3 of 10 = 6 - 3 = 3) -> 3
+        // boundary 3 (3/3 of 10 = 10 - 6 = 4) -> 4
+        assert_eq!(emitted[0].rx_bytes, 3);
+        assert_eq!(emitted[1].rx_bytes, 3);
+        assert_eq!(emitted[2].rx_bytes, 4);
+
+        // TX (20 bytes across 3 ns):
+        // boundary 1 (1/3 of 20 = 6) -> 6
+        // boundary 2 (2/3 of 20 = 13 - 6 = 7) -> 7
+        // boundary 3 (3/3 of 20 = 20 - 13 = 7) -> 7
+        assert_eq!(emitted[0].tx_bytes, 6);
+        assert_eq!(emitted[1].tx_bytes, 7);
+        assert_eq!(emitted[2].tx_bytes, 7);
+
+        assert_eq!(acc.time_acc_ns(), 0);
+        assert_eq!(acc.bytes_rx_acc(), 0);
+        assert_eq!(acc.bytes_tx_acc(), 0);
+    }
+
+    #[test]
+    fn test_exact_byte_conservation_under_jitter() {
+        let mut acc = RateAccumulator::new();
+        let slot_ns = 500_000_000; // 500ms
+
+        // 4 jittered intervals summing to exactly 2000ms (4 completed 500ms slots)
+        let intervals = [
+            (450_000_000, 10_000, 5_000),
+            (550_000_000, 20_000, 10_000),
+            (480_000_000, 15_000, 7_500),
+            (520_000_000, 25_000, 12_500),
+        ];
+
+        let mut total_input_rx = 0u64;
+        let mut total_input_tx = 0u64;
+        let mut emitted_all = Vec::new();
+
+        for (dt, rx, tx) in intervals {
+            total_input_rx += rx;
+            total_input_tx += tx;
+            let mut buckets = acc.push_sample(dt, rx, tx, slot_ns);
+            emitted_all.append(&mut buckets);
+        }
+
+        assert_eq!(emitted_all.len(), 4);
+        assert_eq!(acc.time_acc_ns(), 0);
+        assert_eq!(acc.bytes_rx_acc(), 0);
+        assert_eq!(acc.bytes_tx_acc(), 0);
+
+        let sum_emitted_rx: u64 = emitted_all.iter().map(|b| b.rx_bytes).sum();
+        let sum_emitted_tx: u64 = emitted_all.iter().map(|b| b.tx_bytes).sum();
+
+        // Exact integral conservation invariant
+        assert_eq!(sum_emitted_rx, total_input_rx);
+        assert_eq!(sum_emitted_tx, total_input_tx);
+
+        for b in &emitted_all {
+            assert_eq!(b.duration_ns, slot_ns);
+            assert_eq!(b.rx_bps, b.rx_bytes * 2);
+            assert_eq!(b.tx_bps, b.tx_bytes * 2);
+        }
+    }
+
+    #[test]
+    fn test_long_running_phase_stability() {
+        let mut acc = RateAccumulator::new();
+        let slot_ns = 500_000_000;
+
+        let mut total_input_time = 0u64;
+        let mut total_input_rx = 0u64;
+        let mut total_emitted_rx = 0u64;
+        let mut total_emitted_slots = 0u64;
+
+        // Run 10,000 jittered intervals alternating around 500ms
+        for i in 0..10_000u64 {
+            let jitter_offset = (i % 7) * 5_000_000; // 0ms to 30ms
+            let dt = if i % 2 == 0 {
+                485_000_000 + jitter_offset
+            } else {
+                515_000_000 - jitter_offset
+            };
+            let rx = 1000 + (i % 100);
+
+            total_input_time += dt;
+            total_input_rx += rx;
+
+            let buckets = acc.push_sample(dt, rx, 0, slot_ns);
+            total_emitted_slots += buckets.len() as u64;
+            for b in buckets {
+                total_emitted_rx += b.rx_bytes;
+            }
+        }
+
+        // Timing phase invariant: emitted time + residual time == total input time
+        let emitted_time = total_emitted_slots * slot_ns;
+        assert_eq!(emitted_time + acc.time_acc_ns(), total_input_time);
+
+        // Byte flux conservation invariant: emitted bytes + residual bytes == total input bytes
+        assert_eq!(total_emitted_rx + acc.bytes_rx_acc(), total_input_rx);
+    }
+
+    #[test]
+    fn test_rolling_rate_window_boundary_interpolation() {
+        let mut window = RollingRateWindow::new(1_000_000_000); // 1-second window
+        let t0 = Instant::now();
+
+        // Feed points:
+        // 0.0s -> 0 bytes
+        // 0.4s -> 400 bytes
+        // 0.9s -> 900 bytes
+        // 1.4s -> 1400 bytes
+        window.record_sample(t0, 0, 0);
+        window.record_sample(t0 + Duration::from_millis(400), 400, 0);
+        window.record_sample(t0 + Duration::from_millis(900), 900, 0);
+        window.record_sample(t0 + Duration::from_millis(1400), 1400, 0);
+
+        // At t = 1.4s, the 1-second window looks back to t = 0.4s.
+        // Counter at 0.4s is exactly 400.
+        // Rate = (1400 - 400) / 1.0s = 1000 B/s.
+        let (rate_rx, _) = window.current_rate(t0 + Duration::from_millis(1400));
+        assert!((rate_rx - 1000.0).abs() < 1e-4);
+
+        // Now advance to t = 1.5s (1500 bytes)
+        // 1-second window looks back to t = 0.5s.
+        // t = 0.5s falls between 0.4s (400 bytes) and 0.9s (900 bytes).
+        // dt = 0.5s, fraction = (0.5 - 0.4) / 0.5 = 0.2.
+        // Interpolated counter = 400 + 0.2 * 500 = 500 bytes.
+        // Rate = (1500 - 500) / 1.0s = 1000 B/s!
+        window.record_sample(t0 + Duration::from_millis(1500), 1500, 0);
+        let (rate_rx_interp, _) = window.current_rate(t0 + Duration::from_millis(1500));
+        assert!((rate_rx_interp - 1000.0).abs() < 1e-4);
     }
 
     #[test]

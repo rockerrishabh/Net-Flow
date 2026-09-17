@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use std::sync::{Arc, Mutex};
 use windows_core::{Error, GUID, HRESULT, IUnknown, Interface, Ref, RuntimeName, implement};
 

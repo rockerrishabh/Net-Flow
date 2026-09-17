@@ -35,5 +35,4 @@ Desktop.ini
 .DS_Store
 
 # Private Local Publishing Handbooks & Store Assets
-STORE_PUBLISHING.md
-store_assets/
+private/

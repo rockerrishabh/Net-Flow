@@ -45,5 +45,5 @@ Net Flow is designed with a defense-in-depth security model:
 
 1. **Non-Admin Execution**: Net Flow runs entirely in user-mode as a standard user process. It never requires or requests administrative elevation (UAC).
 2. **Read-Only System APIs**: Network transfer statistics are collected via read-only Windows IP Helper APIs (`GetIfTable2`). It does not install system filter drivers or modify network routing.
-3. **Memory Safety**: The core telemetry rasteriser, JSON card templating engine, and state tracking are implemented in pure Rust, providing compiler-enforced guarantees against memory corruption, buffer overflows, and use-after-free vulnerabilities.
+3. **Memory Safety**: The core telemetry engine, rate calculation accumulator, and JSON card templating are implemented in safe Rust with compiler-enforced memory safety guarantees. A bounded set of `unsafe` blocks interact with native Win32 APIs (IP Helper, WLAN, GDI icon extraction, Process Status) and are documented and unit-tested.
 4. **Zero Remote Attack Surface**: Net Flow opens no listening network sockets and makes no outbound network connections.

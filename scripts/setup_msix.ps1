@@ -5,12 +5,17 @@ param(
     [string]$WasdkVersion = "1.7.250310001",
     [string]$CertSubject = "CN=NetFlow-Dev-Test",
     [string]$PfxPath = (Join-Path $env:TEMP "NetFlow_Dev_Signing.pfx"),
-    [System.Security.SecureString]$Password = (ConvertTo-SecureString "NetFlowDev123!" -AsPlainText -Force),
+    [System.Security.SecureString]$Password = $null,
     [switch]$SkipCert,
     [switch]$SkipBuild,
     [switch]$SkipPackage,
     [switch]$SkipInstall
 )
+
+if ($null -eq $Password) {
+    $rawPass = if ($env:NETFLOW_CERT_PASSWORD) { $env:NETFLOW_CERT_PASSWORD } else { [System.Guid]::NewGuid().ToString("N") }
+    $Password = ConvertTo-SecureString $rawPass -AsPlainText -Force
+}
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -141,7 +146,9 @@ if (-not $SkipBuild) {
 }
 
 # 4. Find Windows SDK Tools
-$sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+$sdkVer = if ($env:NETFLOW_SDK_VERSION) { $env:NETFLOW_SDK_VERSION } elseif ($env:WindowsSDKVersion) { $env:WindowsSDKVersion } else { "10.0.26100.0" }
+$sdkVer = $sdkVer.Trim('\', '/')
+$sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\$sdkVer\x64"
 $makeappx = Join-Path $sdkBin "makeappx.exe"
 $signtool = Join-Path $sdkBin "signtool.exe"
 

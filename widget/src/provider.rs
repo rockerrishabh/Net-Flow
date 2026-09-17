@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -14,9 +13,33 @@ use crate::bindings::Microsoft::Windows::Widgets::Providers::{
 };
 use crate::bindings::Microsoft::Windows::Widgets::WidgetSize;
 use net_flow_core::backend::{AggregateMode, NetworkBackend, NetworkSnapshot};
-use net_flow_core::card::{WidgetConfig, build_adaptive_card, build_settings_card};
+use net_flow_core::card::{WidgetConfig, build_adaptive_card, build_settings_card_for_size};
 use net_flow_core::format::SpeedUnit;
 use net_flow_core::{SAMPLING_INTERVAL_MS, UPDATE_INTERVAL_MS};
+
+pub trait LockExt<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn lock_safe(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+pub trait RwLockExt<T> {
+    fn read_safe(&self) -> std::sync::RwLockReadGuard<'_, T>;
+    fn write_safe(&self) -> std::sync::RwLockWriteGuard<'_, T>;
+}
+
+impl<T> RwLockExt<T> for RwLock<T> {
+    fn read_safe(&self) -> std::sync::RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(|e| e.into_inner())
+    }
+    fn write_safe(&self) -> std::sync::RwLockWriteGuard<'_, T> {
+        self.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 pub fn widget_size_to_str(size: WidgetSize) -> &'static str {
     match size {
@@ -26,12 +49,6 @@ pub fn widget_size_to_str(size: WidgetSize) -> &'static str {
     }
 }
 
-/// Commands sent from COM callbacks to the worker thread.
-pub enum WorkerCommand {
-    ResetSession,
-    Shutdown,
-}
-
 pub struct InternalWidgetInfo {
     pub id: String,
     pub size: WidgetSize,
@@ -39,13 +56,15 @@ pub struct InternalWidgetInfo {
     pub in_customization: bool,
     pub custom_state: WidgetConfig,
     pub draft_state: Option<WidgetConfig>,
+    pub customization_requested_at: Option<Instant>,
 }
 
 pub struct ProviderState {
     pub widgets: HashMap<String, InternalWidgetInfo>,
     pub active_count: usize,
+    pub has_had_widgets: bool,
+    pub last_empty_at: Option<Instant>,
     pub worker: Option<WorkerHandle>,
-    pub cmd_tx: Option<mpsc::Sender<WorkerCommand>>,
     pub backend: Arc<Mutex<NetworkBackend>>,
     pub latest_snapshot: Arc<RwLock<NetworkSnapshot>>,
     /// Set when session/chart state must be pushed before the next 1s UI tick.
@@ -58,14 +77,15 @@ impl ProviderState {
             AggregateMode::PhysicalTransport,
         )));
         let initial_snapshot = {
-            let mut b = backend.lock().unwrap();
+            let mut b = backend.lock_safe();
             b.sample().unwrap_or_default()
         };
         Self {
             widgets: HashMap::new(),
             active_count: 0,
+            has_had_widgets: false,
+            last_empty_at: Some(Instant::now()),
             worker: None,
-            cmd_tx: None,
             backend,
             latest_snapshot: Arc::new(RwLock::new(initial_snapshot)),
             ui_dirty: Arc::new(AtomicBool::new(false)),
@@ -81,7 +101,7 @@ pub struct WorkerHandle {
 impl WorkerHandle {
     pub fn stop(self) {
         let (lock, cvar) = &*self.shutdown;
-        *lock.lock().unwrap() = true;
+        *lock.lock_safe() = true;
         cvar.notify_all();
         let _ = self.handle.join();
     }
@@ -105,7 +125,7 @@ impl NetFlowWidgetProvider {
     }
 
     pub fn ensure_worker(&self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock_safe();
         if state.worker.is_none() {
             let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
             let shutdown_clone = Arc::clone(&shutdown);
@@ -114,9 +134,6 @@ impl NetFlowWidgetProvider {
             let snapshot_ref = Arc::clone(&state.latest_snapshot);
             let ui_dirty = Arc::clone(&state.ui_dirty);
 
-            let (cmd_tx, cmd_rx) = mpsc::channel();
-            state.cmd_tx = Some(cmd_tx);
-
             let handle = std::thread::spawn(move || {
                 worker_loop(
                     shutdown_clone,
@@ -124,7 +141,6 @@ impl NetFlowWidgetProvider {
                     backend_clone,
                     snapshot_ref,
                     ui_dirty,
-                    cmd_rx,
                 );
             });
             state.worker = Some(WorkerHandle { handle, shutdown });
@@ -141,10 +157,23 @@ pub fn matches_widget_id(stored_id: &str, target_id: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
 
+static LOG_MUTEX: Mutex<()> = Mutex::new(());
+
 pub fn log_widget(msg: &str) {
     use std::io::Write;
+    let _guard = LOG_MUTEX.lock_safe();
     if let Ok(temp) = std::env::var("TEMP") {
         let path = std::path::Path::new(&temp).join("netflow_widget.log");
+        let old_path = std::path::Path::new(&temp).join("netflow_widget.log.old");
+
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() >= 1024 * 1024 {
+                if old_path.exists() {
+                    let _ = std::fs::remove_file(&old_path);
+                }
+                let _ = std::fs::rename(&path, &old_path);
+            }
+
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -152,6 +181,18 @@ pub fn log_widget(msg: &str) {
         {
             let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now(), msg);
         }
+    }
+}
+
+pub fn log_widget_verbose(msg: &str) {
+    static VERBOSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let is_verbose = *VERBOSE.get_or_init(|| {
+        std::env::var("NETFLOW_VERBOSE_LOG")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    });
+    if is_verbose {
+        log_widget(msg);
     }
 }
 
@@ -165,7 +206,11 @@ fn update_widget(
     snapshot: &NetworkSnapshot,
 ) {
     let (template, custom_state_json) = if in_customization {
-        let settings_card = build_settings_card(config);
+        let settings_card = build_settings_card_for_size(
+            config,
+            widget_size_to_str(size),
+            snapshot.session_duration_secs,
+        );
         let state_json = serde_json::to_string(config).unwrap_or_else(|_| "{}".to_string());
         (settings_card, state_json)
     } else {
@@ -180,10 +225,20 @@ fn update_widget(
             let _ = opts.SetData(&HSTRING::from("{}"));
             let _ = opts.SetCustomState(&HSTRING::from(&custom_state_json));
             let res = manager.UpdateWidget(&opts);
-            log_widget(&format!(
-                "UpdateWidget id={} in_custom={}: {:?}",
-                widget_id, in_customization, res
-            ));
+            match res {
+                Ok(()) => {
+                    log_widget_verbose(&format!(
+                        "UpdateWidget id={} in_custom={}: Ok",
+                        widget_id, in_customization
+                    ));
+                }
+                Err(ref e) => {
+                    log_widget(&format!(
+                        "UpdateWidget id={} in_custom={} failed: {:?}",
+                        widget_id, in_customization, e
+                    ));
+                }
+            }
         }
         Err(e) => {
             log_widget(&format!("CreateInstance failed id={}: {:?}", widget_id, e));
@@ -199,7 +254,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
         log_widget(&format!("CreateWidget id={id} size={size:?}"));
 
         let config = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock_safe();
             state
                 .widgets
                 .get(&id)
@@ -208,7 +263,9 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
         };
 
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_safe();
+            state.has_had_widgets = true;
+            state.last_empty_at = None;
             state.widgets.insert(
                 id.clone(),
                 InternalWidgetInfo {
@@ -218,14 +275,15 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     in_customization: false,
                     custom_state: config.clone(),
                     draft_state: None,
+                    customization_requested_at: None,
                 },
             );
         }
 
         // Push initial card from latest snapshot
         let snapshot = {
-            let state = self.state.lock().unwrap();
-            state.latest_snapshot.read().unwrap().clone()
+            let state = self.state.lock_safe();
+            state.latest_snapshot.read_safe().clone()
         };
 
         if let Ok(manager) = WidgetManager::GetDefault() {
@@ -244,7 +302,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
         let id = widget_id.to_string_lossy();
         log_widget(&format!("DeleteWidget id={id}"));
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_safe();
             let mut removed_active = false;
             state.widgets.retain(|wid, w| {
                 if matches_widget_id(wid, &id) {
@@ -258,6 +316,9 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
             });
             if removed_active && state.active_count > 0 {
                 state.active_count -= 1;
+            }
+            if state.widgets.is_empty() {
+                state.last_empty_at = Some(Instant::now());
             }
         }
         Ok(())
@@ -281,7 +342,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
             "save_settings" => {
                 let mut target_id = widget_id.clone();
                 let new_config = {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.lock_safe();
                     let current = state
                         .widgets
                         .iter()
@@ -290,27 +351,51 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                             target_id = id.clone();
                             w.custom_state.clone()
                         })
+                        .or_else(|| {
+                            if state.widgets.len() == 1 {
+                                state.widgets.iter().next().map(|(id, w)| {
+                                    target_id = id.clone();
+                                    w.custom_state.clone()
+                                })
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or_default();
                     parse_settings_form(&data_json, &current)
                 };
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock_safe();
                     let mut found = false;
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &target_id) {
                             w.custom_state = new_config.clone();
                             w.in_customization = false;
                             w.draft_state = None;
+                            w.customization_requested_at = None;
                             target_id = id.clone();
                             found = true;
+                            break;
                         }
                     }
                     if !found {
-                        for (id, w) in state.widgets.iter_mut() {
-                            w.custom_state = new_config.clone();
-                            w.in_customization = false;
-                            w.draft_state = None;
-                            target_id = id.clone();
+                        if state.widgets.len() == 1 {
+                            if let Some((id, w)) = state.widgets.iter_mut().next() {
+                                log_widget(&format!(
+                                    "save_settings fallback: id={widget_id} not found, applying to unique widget {id}"
+                                ));
+                                w.custom_state = new_config.clone();
+                                w.in_customization = false;
+                                w.draft_state = None;
+                                w.customization_requested_at = None;
+                                target_id = id.clone();
+                            }
+                        } else {
+                            log_widget(&format!(
+                                "save_settings warning: id={widget_id} not found among {} registered widgets; ignoring",
+                                state.widgets.len()
+                            ));
+                            return Ok(());
                         }
                     }
                     state.ui_dirty.store(true, Ordering::SeqCst);
@@ -325,61 +410,145 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
             }
             "toggle_apps" => {
                 let mut target_id = widget_id.clone();
+                let mut found = false;
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock_safe();
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.custom_state.apps_expanded = !w.custom_state.apps_expanded;
                             w.custom_state.apps_page = 0;
                             target_id = id.clone();
+                            found = true;
+                            break;
                         }
                     }
+                    if !found && state.widgets.len() == 1
+                        && let Some((id, w)) = state.widgets.iter_mut().next() {
+                            w.custom_state.apps_expanded = !w.custom_state.apps_expanded;
+                            w.custom_state.apps_page = 0;
+                            target_id = id.clone();
+                            found = true;
+                        }
                 }
-                self.push_current_card(&target_id);
+                if found {
+                    self.push_current_card(&target_id);
+                }
             }
             "next_apps_page" => {
                 let mut target_id = widget_id.clone();
+                let mut found = false;
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock_safe();
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.custom_state.apps_page = w.custom_state.apps_page.saturating_add(1);
                             target_id = id.clone();
+                            found = true;
+                            break;
                         }
                     }
+                    if !found && state.widgets.len() == 1
+                        && let Some((id, w)) = state.widgets.iter_mut().next() {
+                            w.custom_state.apps_page = w.custom_state.apps_page.saturating_add(1);
+                            target_id = id.clone();
+                            found = true;
+                        }
                 }
-                self.push_current_card(&target_id);
+                if found {
+                    self.push_current_card(&target_id);
+                }
             }
             "prev_apps_page" => {
                 let mut target_id = widget_id.clone();
+                let mut found = false;
                 {
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock_safe();
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.custom_state.apps_page = w.custom_state.apps_page.saturating_sub(1);
                             target_id = id.clone();
+                            found = true;
+                            break;
                         }
                     }
+                    if !found && state.widgets.len() == 1
+                        && let Some((id, w)) = state.widgets.iter_mut().next() {
+                            w.custom_state.apps_page = w.custom_state.apps_page.saturating_sub(1);
+                            target_id = id.clone();
+                            found = true;
+                        }
                 }
-                self.push_current_card(&target_id);
+                if found {
+                    self.push_current_card(&target_id);
+                }
             }
             "reset_session" => {
                 let mut target_id = widget_id.clone();
+                let mut found = false;
                 {
-                    let state = self.state.lock().unwrap();
+                    let state = self.state.lock_safe();
                     if let Some((id, _)) = state
                         .widgets
                         .iter()
                         .find(|(id, _)| matches_widget_id(id, &widget_id))
                     {
                         target_id = id.clone();
-                    }
-                    {
-                        let mut backend = state.backend.lock().unwrap();
+                        found = true;
+                    } else if state.widgets.len() == 1
+                        && let Some((id, _)) = state.widgets.iter().next() {
+                            target_id = id.clone();
+                            found = true;
+                        }
+                    if found {
+                        let mut backend = state.backend.lock_safe();
                         backend.reset_session();
                         let s = backend.sample().unwrap_or_default();
-                        let mut snap_write = state.latest_snapshot.write().unwrap();
+                        let mut snap_write = state.latest_snapshot.write_safe();
                         *snap_write = s;
+                        state.ui_dirty.store(true, Ordering::SeqCst);
+                        if let Some(worker) = &state.worker {
+                            worker.shutdown.1.notify_all();
+                        }
+                    }
+                }
+                if found {
+                    self.push_current_card(&target_id);
+                }
+            }
+            "open_settings" => {
+                log_widget(&format!("Handling open_settings for id={widget_id}"));
+                let mut target_id = widget_id.clone();
+                let mut found = false;
+                {
+                    let mut state = self.state.lock_safe();
+                    for (id, w) in state.widgets.iter_mut() {
+                        if matches_widget_id(id, &widget_id) {
+                            w.in_customization = true;
+                            w.draft_state = Some(w.custom_state.clone());
+                            w.customization_requested_at = None;
+                            target_id = id.clone();
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        if state.widgets.len() == 1 {
+                            if let Some((id, w)) = state.widgets.iter_mut().next() {
+                                log_widget(&format!(
+                                    "open_settings fallback: id={widget_id} not found, applying to unique widget {id}"
+                                ));
+                                w.in_customization = true;
+                                w.draft_state = Some(w.custom_state.clone());
+                                w.customization_requested_at = None;
+                                target_id = id.clone();
+                            }
+                        } else {
+                            log_widget(&format!(
+                                "open_settings warning: id={widget_id} not found among {} registered widgets; ignoring",
+                                state.widgets.len()
+                            ));
+                            return Ok(());
+                        }
                     }
                     state.ui_dirty.store(true, Ordering::SeqCst);
                     if let Some(worker) = &state.worker {
@@ -387,39 +556,43 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     }
                 }
                 self.push_current_card(&target_id);
-            }
-            "open_settings" => {
-                let mut target_id = widget_id.clone();
-                {
-                    let mut state = self.state.lock().unwrap();
-                    for (id, w) in state.widgets.iter_mut() {
-                        if matches_widget_id(id, &widget_id) {
-                            w.in_customization = true;
-                            target_id = id.clone();
-                        }
-                    }
+                if target_id != widget_id {
+                    self.push_current_card(&widget_id);
                 }
-                self.push_current_card(&target_id);
             }
             "cancel_settings" | "cancel" | "exit" | "exitCustomization" | "dismiss" => {
                 log_widget(&format!("Handling cancel_settings for id={widget_id}"));
                 let mut target_id = widget_id.clone();
+                let mut found = false;
                 {
-                    let mut state = self.state.lock().unwrap();
-                    let mut found = false;
+                    let mut state = self.state.lock_safe();
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.in_customization = false;
                             w.draft_state = None;
+                            w.customization_requested_at = None;
                             target_id = id.clone();
                             found = true;
+                            break;
                         }
                     }
                     if !found {
-                        for (id, w) in state.widgets.iter_mut() {
-                            w.in_customization = false;
-                            w.draft_state = None;
-                            target_id = id.clone();
+                        if state.widgets.len() == 1 {
+                            if let Some((id, w)) = state.widgets.iter_mut().next() {
+                                log_widget(&format!(
+                                    "cancel_settings fallback: id={widget_id} not found, applying to unique widget {id}"
+                                ));
+                                w.in_customization = false;
+                                w.draft_state = None;
+                                w.customization_requested_at = None;
+                                target_id = id.clone();
+                            }
+                        } else {
+                            log_widget(&format!(
+                                "cancel_settings warning: id={widget_id} not found among {} registered widgets; ignoring",
+                                state.widgets.len()
+                            ));
+                            return Ok(());
                         }
                     }
                     state.ui_dirty.store(true, Ordering::SeqCst);
@@ -454,11 +627,12 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
 
         let mut target_id = id.clone();
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_safe();
             for (wid, w) in state.widgets.iter_mut() {
                 if matches_widget_id(wid, &id) {
                     w.size = new_size;
                     target_id = wid.clone();
+                    break;
                 }
             }
         }
@@ -475,7 +649,9 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
 
         let mut target_id = id.clone();
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_safe();
+            state.has_had_widgets = true;
+            state.last_empty_at = None;
             let mut became_active = false;
             let mut found = false;
             for (wid, w) in state.widgets.iter_mut() {
@@ -485,8 +661,12 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         became_active = true;
                     }
                     w.size = size;
+                    // Transition to active flyout (or normal activation) is complete.
+                    // Clear the pending transition timestamp so future deactivations reset cleanly.
+                    w.customization_requested_at = None;
                     target_id = wid.clone();
                     found = true;
+                    break;
                 }
             }
             if !found {
@@ -499,6 +679,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         in_customization: false,
                         custom_state: WidgetConfig::default(),
                         draft_state: None,
+                        customization_requested_at: None,
                     },
                 );
                 became_active = true;
@@ -521,7 +702,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
         let id = widget_id.to_string_lossy();
         log_widget(&format!("Deactivate id={id}"));
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_safe();
             let mut became_inactive = false;
             for (wid, w) in state.widgets.iter_mut() {
                 if matches_widget_id(wid, &id) {
@@ -529,10 +710,25 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         w.is_active = false;
                         became_inactive = true;
                     }
-                    // When the widget is deactivated (e.g. board closed or widget hidden),
-                    // reset customization mode so reopening never stays stuck in settings!
-                    w.in_customization = false;
-                    w.draft_state = None;
+                    // If OnCustomizationRequested was fired within the last 1.5 seconds,
+                    // this Deactivate is Windows 11 transitioning from the board widget
+                    // to the modal customization flyout. Do NOT reset in_customization!
+                    let is_opening_flyout = w
+                        .customization_requested_at
+                        .map(|t| t.elapsed() < Duration::from_millis(1500))
+                        .unwrap_or(false);
+
+                    if is_opening_flyout {
+                        log_widget(&format!(
+                            "Deactivate id={id} during flyout opening transition; keeping in_customization=true"
+                        ));
+                    } else {
+                        // When the widget is deactivated (e.g. board closed or customization flyout dismissed),
+                        // reset customization mode so reopening never stays stuck in settings!
+                        w.in_customization = false;
+                        w.draft_state = None;
+                        w.customization_requested_at = None;
+                    }
                 }
             }
             if became_inactive && state.active_count > 0 {
@@ -563,7 +759,7 @@ impl IWidgetProvider2_Impl for NetFlowWidgetProvider_Impl {
 
         let mut target_id = id.clone();
         let parsed_config: WidgetConfig = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock_safe();
             state
                 .widgets
                 .iter()
@@ -581,36 +777,66 @@ impl IWidgetProvider2_Impl for NetFlowWidgetProvider_Impl {
                 })
         };
 
-        {
-            let mut state = self.state.lock().unwrap();
+        let (board_size, board_config) = {
+            let mut state = self.state.lock_safe();
+            state.has_had_widgets = true;
+            state.last_empty_at = None;
             let mut found = false;
+            let mut current_size = WidgetSize::Medium;
             for (wid, w) in state.widgets.iter_mut() {
                 if matches_widget_id(wid, &id) {
                     w.in_customization = true;
+                    w.customization_requested_at = Some(Instant::now());
                     w.draft_state = Some(parsed_config.clone());
                     w.custom_state = parsed_config.clone();
+                    current_size = w.size;
                     target_id = wid.clone();
                     found = true;
+                    break;
                 }
             }
             if !found {
+                current_size = ctx.Size().unwrap_or(WidgetSize::Medium);
                 state.widgets.insert(
                     id.clone(),
                     InternalWidgetInfo {
                         id: id.clone(),
-                        size: ctx.Size().unwrap_or(WidgetSize::Medium),
+                        size: current_size,
                         is_active: true,
                         in_customization: true,
                         custom_state: parsed_config.clone(),
-                        draft_state: Some(parsed_config),
+                        draft_state: Some(parsed_config.clone()),
+                        customization_requested_at: Some(Instant::now()),
                     },
                 );
             }
-        }
+            state.ui_dirty.store(true, Ordering::SeqCst);
+            if let Some(worker) = &state.worker {
+                worker.shutdown.1.notify_all();
+            }
+            (current_size, parsed_config)
+        };
 
-        self.push_current_card(&target_id);
-        if target_id != id {
-            self.push_current_card(&id);
+        // Render the live dashboard to the background board widget before Windows deactivates it
+        // and displays the modal customization flyout over it!
+        // This guarantees that behind the flyout, the user sees their live dashboard,
+        // while the upcoming Activate call sends the settings card directly into the flyout.
+        let snapshot = {
+            let state = self.state.lock_safe();
+            state.latest_snapshot.read_safe().clone()
+        };
+        if let Ok(manager) = WidgetManager::GetDefault() {
+            update_widget(
+                &manager,
+                &target_id,
+                board_size,
+                &board_config,
+                false,
+                &snapshot,
+            );
+            if target_id != id {
+                update_widget(&manager, &id, board_size, &board_config, false, &snapshot);
+            }
         }
         Ok(())
     }
@@ -620,7 +846,7 @@ impl NetFlowWidgetProvider_Impl {
     /// Push the correct card for a widget based on its current state.
     fn push_current_card(&self, widget_id: &str) {
         let (actual_id, size, config, in_customization) = {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock_safe();
             let found = state
                 .widgets
                 .iter()
@@ -637,31 +863,39 @@ impl NetFlowWidgetProvider_Impl {
             match found {
                 Some(data) => data,
                 None => {
-                    if let Some((id, w)) = state.widgets.iter().next() {
-                        (
-                            id.clone(),
-                            w.size,
-                            w.custom_state.clone(),
-                            w.in_customization,
-                        )
+                    if state.widgets.len() == 1 {
+                        if let Some((id, w)) = state.widgets.iter().next() {
+                            log_widget(&format!(
+                                "push_current_card mismatch: widget_id={} not found, falling back to unique widget {}",
+                                widget_id, id
+                            ));
+                            (
+                                id.clone(),
+                                w.size,
+                                w.custom_state.clone(),
+                                w.in_customization,
+                            )
+                        } else {
+                            return;
+                        }
                     } else {
-                        (
-                            widget_id.to_string(),
-                            WidgetSize::Medium,
-                            WidgetConfig::default(),
-                            false,
-                        )
+                        log_widget(&format!(
+                            "push_current_card warning: widget_id={} not found among {} registered widgets; ignoring",
+                            widget_id,
+                            state.widgets.len()
+                        ));
+                        return;
                     }
                 }
             }
         };
 
         let snapshot = {
-            let state = self.state.lock().unwrap();
-            state.latest_snapshot.read().unwrap().clone()
+            let state = self.state.lock_safe();
+            state.latest_snapshot.read_safe().clone()
         };
 
-        log_widget(&format!(
+        log_widget_verbose(&format!(
             "push_current_card req_id={} -> actual_id={} size={:?} in_custom={}",
             widget_id, actual_id, size, in_customization
         ));
@@ -747,7 +981,6 @@ fn worker_loop(
     backend: Arc<Mutex<NetworkBackend>>,
     snapshot_ref: Arc<RwLock<NetworkSnapshot>>,
     ui_dirty: Arc<AtomicBool>,
-    cmd_rx: mpsc::Receiver<WorkerCommand>,
 ) {
     let sample_period = Duration::from_millis(SAMPLING_INTERVAL_MS);
     let ui_period = Duration::from_millis(UPDATE_INTERVAL_MS);
@@ -757,29 +990,12 @@ fn worker_loop(
     let mut last_persist = Instant::now();
 
     loop {
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                WorkerCommand::ResetSession => {
-                    let mut b = backend.lock().unwrap();
-                    b.reset_session();
-                    let s = b.sample().unwrap_or_default();
-                    let mut snap_write = snapshot_ref.write().unwrap();
-                    *snap_write = s;
-                    ui_dirty.store(true, Ordering::SeqCst);
-                }
-                WorkerCommand::Shutdown => {
-                    if let Ok(b) = backend.lock() {
-                        b.persist_session();
-                    }
-                    return;
-                }
-            }
-        }
-
         let wait = next_sample.saturating_duration_since(Instant::now());
         let (lock, cvar) = &*shutdown;
-        let guard = lock.lock().unwrap();
-        let (guard, _) = cvar.wait_timeout(guard, wait).unwrap();
+        let guard = lock.lock_safe();
+        let (guard, _) = cvar
+            .wait_timeout(guard, wait)
+            .unwrap_or_else(|e| e.into_inner());
         if *guard {
             break;
         }
@@ -787,13 +1003,10 @@ fn worker_loop(
 
         let started = Instant::now();
         {
-            let mut b = backend.lock().unwrap();
-            match b.sample() {
-                Ok(s) => {
-                    let mut snap_write = snapshot_ref.write().unwrap();
-                    *snap_write = s;
-                }
-                Err(_) => {}
+            let mut b = backend.lock_safe();
+            if let Ok(s) = b.sample() {
+                let mut snap_write = snapshot_ref.write_safe();
+                *snap_write = s;
             }
             if last_persist.elapsed() >= persist_period {
                 b.persist_session();
@@ -814,10 +1027,10 @@ fn worker_loop(
         }
         last_ui_update = Instant::now();
 
-        let snapshot = snapshot_ref.read().unwrap().clone();
+        let snapshot = snapshot_ref.read_safe().clone();
 
         let targets: Vec<WidgetTarget> = {
-            let s = state.lock().unwrap();
+            let s = state.lock_safe();
             s.widgets
                 .values()
                 .filter(|w| w.is_active)
@@ -851,7 +1064,149 @@ fn worker_loop(
         }
     }
 
-    if let Ok(b) = backend.lock() {
-        b.persist_session();
+    let b = backend.lock_safe();
+    b.persist_session();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lock_safe_recovers_from_poison() {
+        let lock = Arc::new(Mutex::new(42));
+        let lock_clone = Arc::clone(&lock);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = lock_clone.lock_safe();
+            panic!("intentional panic to poison lock");
+        });
+        assert!(lock.is_poisoned());
+        let guard = lock.lock_safe();
+        assert_eq!(*guard, 42);
+    }
+
+    #[test]
+    fn test_matches_widget_id() {
+        assert!(matches_widget_id("123", "123"));
+        assert!(matches_widget_id("ABC", "abc"));
+        assert!(matches_widget_id("{123-456}", "123-456"));
+        assert!(matches_widget_id("123-456", "{123-456}"));
+        assert!(matches_widget_id("{ABC-DEF}", "abc-def"));
+        assert!(!matches_widget_id("123", "456"));
+    }
+
+    #[test]
+    fn test_parse_settings_form() {
+        let current = WidgetConfig::default();
+        // Empty data returns current
+        let unchanged = parse_settings_form("", &current);
+        assert_eq!(unchanged.speed_unit, current.speed_unit);
+        assert_eq!(unchanged.chart_window, current.chart_window);
+
+        // Valid update
+        let json_data = r#"{"speed_unit":"mb","chart_window":"60","apps_expanded":"true"}"#;
+        let updated = parse_settings_form(json_data, &current);
+        assert_eq!(updated.speed_unit, SpeedUnit::Megabytes);
+        assert_eq!(updated.chart_window, 60);
+        assert!(updated.apps_expanded);
+
+        // Invalid JSON retains current config
+        let bad_json = "not a json string";
+        let fallback = parse_settings_form(bad_json, &current);
+        assert_eq!(fallback.speed_unit, current.speed_unit);
+    }
+
+    #[test]
+    fn test_flyout_transition_lifecycle() {
+        let mut widget = InternalWidgetInfo {
+            id: "test-widget-1".to_string(),
+            size: WidgetSize::Medium,
+            is_active: true,
+            in_customization: false,
+            custom_state: WidgetConfig::default(),
+            draft_state: None,
+            customization_requested_at: None,
+        };
+
+        // Step 1: OnCustomizationRequested triggers
+        widget.in_customization = true;
+        widget.customization_requested_at = Some(Instant::now());
+        widget.draft_state = Some(WidgetConfig::default());
+
+        // Step 2: Windows immediately calls Deactivate (opening transition)
+        let is_opening = widget
+            .customization_requested_at
+            .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false);
+        assert!(is_opening, "Should detect flyout opening transition");
+
+        if !is_opening {
+            widget.in_customization = false;
+        }
+        assert!(
+            widget.in_customization,
+            "in_customization must be preserved during transition"
+        );
+
+        // Step 3: Windows activates the flyout host
+        // Activate marks transition complete by clearing customization_requested_at
+        widget.customization_requested_at = None;
+        assert!(
+            widget.in_customization,
+            "Flyout must receive in_customization = true"
+        );
+
+        // Step 4: User dismisses the flyout (clicks X or outside) -> Deactivate fires
+        let is_opening_after_dismiss = widget
+            .customization_requested_at
+            .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false);
+        assert!(
+            !is_opening_after_dismiss,
+            "Dismissal is not an opening transition"
+        );
+
+        if !is_opening_after_dismiss {
+            widget.in_customization = false;
+            widget.draft_state = None;
+            widget.customization_requested_at = None;
+        }
+        assert!(
+            !widget.in_customization,
+            "in_customization must be reset to false on dismissal"
+        );
+        assert!(widget.draft_state.is_none());
+    }
+
+    #[test]
+    fn test_expired_transition_resets_safely() {
+        let mut widget = InternalWidgetInfo {
+            id: "test-widget-2".to_string(),
+            size: WidgetSize::Medium,
+            is_active: true,
+            in_customization: true,
+            custom_state: WidgetConfig::default(),
+            draft_state: Some(WidgetConfig::default()),
+            // Simulated stale transition older than 1.5s
+            customization_requested_at: Some(Instant::now() - Duration::from_secs(5)),
+        };
+
+        let is_opening = widget
+            .customization_requested_at
+            .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false);
+        assert!(
+            !is_opening,
+            "Stale transition must not be treated as opening"
+        );
+
+        if !is_opening {
+            widget.in_customization = false;
+            widget.draft_state = None;
+            widget.customization_requested_at = None;
+        }
+        assert!(!widget.in_customization);
+        assert!(widget.draft_state.is_none());
+        assert!(widget.customization_requested_at.is_none());
     }
 }

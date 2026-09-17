@@ -219,12 +219,18 @@ fn icon_button_column(url: &str, verb: &str, tooltip: &str) -> Value {
     icon_button_column_sized(url, 18, verb, tooltip)
 }
 
-fn icon_button_column_sized(url: &str, px: u32, verb: &str, tooltip: &str) -> Value {
+fn icon_button_column_spaced(
+    url: &str,
+    px: u32,
+    verb: &str,
+    tooltip: &str,
+    spacing: &str,
+) -> Value {
     json!({
         "type": "Column",
         "width": "auto",
         "verticalContentAlignment": "Center",
-        "spacing": "Small",
+        "spacing": spacing,
         "selectAction": {
             "type": "Action.Execute",
             "verb": verb,
@@ -235,7 +241,11 @@ fn icon_button_column_sized(url: &str, px: u32, verb: &str, tooltip: &str) -> Va
     })
 }
 
-/// Header: medium glyph, interface name, live connection count.
+fn icon_button_column_sized(url: &str, px: u32, verb: &str, tooltip: &str) -> Value {
+    icon_button_column_spaced(url, px, verb, tooltip, "Small")
+}
+
+/// Header: medium glyph, interface name, live connection count, and settings button.
 fn header_row(snapshot: &NetworkSnapshot) -> Value {
     let active_count = if snapshot.active_connections_count > 0 {
         snapshot.active_connections_count
@@ -282,7 +292,8 @@ fn header_row(snapshot: &NetworkSnapshot) -> Value {
                         "wrap": false
                     }
                 ]
-            }
+            },
+            icon_button_column_spaced(icons::SETTINGS, 15, "open_settings", "Customize widget", "Medium")
         ]
     })
 }
@@ -683,164 +694,262 @@ fn build_card(snapshot: &NetworkSnapshot, config: &WidgetConfig, layout: &Layout
 }
 
 /// Build the settings (customization) card displayed when the user picks
-/// "Customize widget" from the widget's native overflow menu.
+/// "Customize widget" from the widget's native overflow menu or the in-card gear icon.
 pub fn build_settings_card(current_config: &WidgetConfig) -> String {
-    let card = json!({
-        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-        "type": "AdaptiveCard",
-        "version": "1.6",
-        "body": [
+    build_settings_card_for_size(current_config, "Medium", 0)
+}
+
+/// Build the size-tailored settings card.
+/// On Small widgets, only essential speed units are displayed to fit within the 160px height.
+/// On Medium/Large widgets, full settings with compact spacing are displayed to fit within 340px.
+pub fn build_settings_card_for_size(
+    current_config: &WidgetConfig,
+    size: &str,
+    _session_duration_secs: u64,
+) -> String {
+    let header = json!({
+        "type": "ColumnSet",
+        "spacing": "None",
+        "columns": [
             {
-                "type": "ColumnSet",
-                "spacing": "None",
-                "columns": [
-                    {
-                        "type": "Column",
-                        "width": "stretch",
-                        "verticalContentAlignment": "Center",
-                        "items": [
-                            {
-                                "type": "TextBlock",
-                                "text": "Net Flow Settings",
-                                "weight": "Bolder",
-                                "size": "Medium",
-                                "wrap": false
-                            }
-                        ]
-                    },
-                    {
-                        "type": "Column",
-                        "width": "auto",
-                        "verticalContentAlignment": "Center",
-                        "selectAction": {
-                            "type": "Action.Execute",
-                            "verb": "cancel_settings",
-                            "title": "Done",
-                            "tooltip": "Done",
-                            "associatedInputs": "none"
-                        },
-                        "items": [
-                            {
-                                "type": "TextBlock",
-                                "text": "Done",
-                                "weight": "Bolder",
-                                "size": "Small",
-                                "color": "Accent"
-                            }
-                        ]
-                    }
-                ]
-            },
-            {
-                "type": "TextBlock",
-                "text": "Units, history window, and app list behaviour.",
-                "size": "Small",
-                "isSubtle": true,
-                "spacing": "None",
-                "wrap": true
-            },
-            {
-                "type": "Container",
-                "spacing": "Medium",
-                "separator": true,
+                "type": "Column",
+                "width": "stretch",
+                "verticalContentAlignment": "Center",
                 "items": [
                     {
                         "type": "TextBlock",
-                        "text": "Speed units",
+                        "text": "Net Flow Settings",
                         "weight": "Bolder",
-                        "size": "Small",
+                        "size": if size == "Small" { "Default" } else { "Medium" },
                         "wrap": false
-                    },
-                    {
-                        "type": "Input.ChoiceSet",
-                        "id": "speed_unit",
-                        "style": "compact",
-                        "spacing": "Small",
-                        "value": current_config.speed_unit.to_str_value(),
-                        "choices": [
-                            { "title": "Auto (adaptive)", "value": "auto" },
-                            { "title": "Bytes (B/s)", "value": "b" },
-                            { "title": "Kilobytes (KB/s)", "value": "kb" },
-                            { "title": "Megabytes (MB/s)", "value": "mb" },
-                            { "title": "Gigabytes (GB/s)", "value": "gb" }
-                        ]
                     }
                 ]
             },
             {
-                "type": "Container",
-                "spacing": "Medium",
-                "separator": true,
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
+                "spacing": "Small",
+                "selectAction": {
+                    "type": "Action.Execute",
+                    "verb": "cancel_settings",
+                    "title": "Cancel",
+                    "tooltip": "Cancel",
+                    "associatedInputs": "none"
+                },
                 "items": [
                     {
                         "type": "TextBlock",
-                        "text": "History window",
-                        "weight": "Bolder",
+                        "text": "Cancel",
                         "size": "Small",
-                        "wrap": false
-                    },
-                    {
-                        "type": "Input.ChoiceSet",
-                        "id": "chart_window",
-                        "style": "compact",
-                        "spacing": "Small",
-                        "value": current_config.chart_window.to_string(),
-                        "choices": [
-                            { "title": "15 seconds", "value": "15" },
-                            { "title": "30 seconds", "value": "30" },
-                            { "title": "60 seconds", "value": "60" }
-                        ]
+                        "isSubtle": true
                     }
                 ]
             },
             {
-                "type": "Container",
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
                 "spacing": "Medium",
-                "separator": true,
+                "selectAction": {
+                    "type": "Action.Execute",
+                    "verb": "save_settings",
+                    "title": "Save",
+                    "tooltip": "Save"
+                },
                 "items": [
                     {
                         "type": "TextBlock",
-                        "text": "Active apps",
+                        "text": "Save",
                         "weight": "Bolder",
                         "size": "Small",
-                        "wrap": false
-                    },
-                    {
-                        "type": "Input.Toggle",
-                        "id": "apps_expanded",
-                        "spacing": "Small",
-                        "title": "Expand the app list by default",
-                        "value": if current_config.apps_expanded { "true" } else { "false" },
-                        "valueOn": "true",
-                        "valueOff": "false"
-                    }
-                ]
-            },
-            {
-                "type": "ActionSet",
-                "spacing": "Medium",
-                "actions": [
-                    {
-                        "type": "Action.Execute",
-                        "title": "Save",
-                        "verb": "save_settings",
-                        "style": "positive"
-                    },
-                    {
-                        "type": "Action.Execute",
-                        "title": "Reset session",
-                        "verb": "reset_session",
-                        "associatedInputs": "none"
-                    },
-                    {
-                        "type": "Action.Execute",
-                        "title": "Back",
-                        "verb": "cancel_settings",
-                        "associatedInputs": "none"
+                        "color": "Accent"
                     }
                 ]
             }
         ]
+    });
+
+    let mut body = vec![header];
+
+    if size == "Small" {
+        // Small widget (~160px): 2-column compact grid for Units and History
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Units",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "speed_unit",
+                            "style": "compact",
+                            "spacing": "None",
+                            "value": current_config.speed_unit.to_str_value(),
+                            "choices": [
+                                { "title": "Auto", "value": "auto" },
+                                { "title": "B/s", "value": "b" },
+                                { "title": "KB/s", "value": "kb" },
+                                { "title": "MB/s", "value": "mb" },
+                                { "title": "GB/s", "value": "gb" }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "spacing": "Small",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "History",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "chart_window",
+                            "style": "compact",
+                            "spacing": "None",
+                            "value": current_config.chart_window.to_string(),
+                            "choices": [
+                                { "title": "15s", "value": "15" },
+                                { "title": "30s", "value": "30" },
+                                { "title": "60s", "value": "60" }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+
+        // Note: Reset session and Expand apps are omitted on Small to fit within the 160px height
+        // and because Small widget does not display active apps or session totals.
+    } else {
+        // Medium & Large (~340px): 3 balanced rows for clear organization and no truncation
+        // Row 1: 2-column layout for Speed units and History window
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Speed units",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "speed_unit",
+                            "style": "compact",
+                            "spacing": "Small",
+                            "value": current_config.speed_unit.to_str_value(),
+                            "choices": [
+                                { "title": "Auto", "value": "auto" },
+                                { "title": "B/s", "value": "b" },
+                                { "title": "KB/s", "value": "kb" },
+                                { "title": "MB/s", "value": "mb" },
+                                { "title": "GB/s", "value": "gb" }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "spacing": "Medium",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "History window",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "chart_window",
+                            "style": "compact",
+                            "spacing": "Small",
+                            "value": current_config.chart_window.to_string(),
+                            "choices": [
+                                { "title": "15 seconds", "value": "15" },
+                                { "title": "30 seconds", "value": "30" },
+                                { "title": "60 seconds", "value": "60" }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+
+        // Row 2: Active apps section
+        body.push(json!({
+            "type": "TextBlock",
+            "text": "Active apps",
+            "weight": "Bolder",
+            "size": "Small",
+            "spacing": "Medium",
+            "wrap": false
+        }));
+        body.push(json!({
+            "type": "Input.Toggle",
+            "id": "apps_expanded",
+            "spacing": "Small",
+            "title": "Expand apps",
+            "value": if current_config.apps_expanded { "true" } else { "false" },
+            "valueOn": "true",
+            "valueOff": "false"
+        }));
+
+        // Row 3: Compact left-aligned Reset session button
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Medium",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "auto",
+                    "items": [
+                        {
+                            "type": "ActionSet",
+                            "spacing": "None",
+                            "actions": [
+                                {
+                                    "type": "Action.Execute",
+                                    "title": "Reset session",
+                                    "verb": "reset_session",
+                                    "associatedInputs": "none"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+    }
+
+    let card = json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.6",
+        "body": body
     });
 
     serde_json::to_string(&card).unwrap_or_else(|_| "{}".to_string())
@@ -856,6 +965,10 @@ mod tests {
         NetworkSnapshot {
             rx_bps: 10485760.0, // 10 MB/s
             tx_bps: 2097152.0,  // 2 MB/s
+            rx_bps_500ms: 10485760,
+            tx_bps_500ms: 2097152,
+            instant_rx_bps: 10485760.0,
+            instant_tx_bps: 2097152.0,
             session_rx: 104857600,
             session_tx: 20971520,
             active_interfaces: 2,
@@ -867,26 +980,11 @@ mod tests {
             timestamp: Instant::now(),
             per_interface: vec![],
             history: vec![
-                HistorySample {
-                    rx_bps: 1000,
-                    tx_bps: 500,
-                },
-                HistorySample {
-                    rx_bps: 2000,
-                    tx_bps: 1000,
-                },
-                HistorySample {
-                    rx_bps: 5000,
-                    tx_bps: 3000,
-                },
-                HistorySample {
-                    rx_bps: 3000,
-                    tx_bps: 2000,
-                },
-                HistorySample {
-                    rx_bps: 8000,
-                    tx_bps: 4000,
-                },
+                HistorySample::from_bps(1000, 500, 500_000_000),
+                HistorySample::from_bps(2000, 1000, 500_000_000),
+                HistorySample::from_bps(5000, 3000, 500_000_000),
+                HistorySample::from_bps(3000, 2000, 500_000_000),
+                HistorySample::from_bps(8000, 4000, 500_000_000),
             ],
             primary_medium: crate::backend::InterfaceMedium::Wifi,
             primary_name: "Wi-Fi".to_string(),
@@ -983,8 +1081,26 @@ mod tests {
         assert!(json_str.contains(icons::MEDIUM_WIFI));
         assert!(json_str.contains("Wi-Fi"));
         assert!(json_str.contains("11 conns"));
-        // Settings live in the host's native overflow menu, not on the card.
-        assert!(!json_str.contains("open_settings"));
+        assert!(json_str.contains(icons::SETTINGS));
+        assert!(json_str.contains("open_settings"));
+    }
+
+    #[test]
+    fn settings_button_is_present_on_all_card_sizes() {
+        let snap = snapshot_fixture();
+        for size in ["Small", "Medium", "Large"] {
+            let json_str = build_adaptive_card(&snap, size, &WidgetConfig::default());
+            assert!(
+                json_str.contains("open_settings"),
+                "Size {} missing open_settings verb",
+                size
+            );
+            assert!(
+                json_str.contains(icons::SETTINGS),
+                "Size {} missing settings icon",
+                size
+            );
+        }
     }
 
     #[test]
@@ -1113,6 +1229,32 @@ mod tests {
     }
 
     #[test]
+    fn settings_card_adapts_to_small_and_large_sizes() {
+        let small_json = build_settings_card_for_size(&WidgetConfig::default(), "Small", 185);
+        assert!(small_json.contains("speed_unit"));
+        assert!(small_json.contains("chart_window"));
+        assert!(
+            !small_json.contains("apps_expanded"),
+            "Small settings card must omit apps_expanded to stay minimal"
+        );
+        assert!(
+            !small_json.contains("reset_session"),
+            "Small settings card must omit reset_session to avoid clipping"
+        );
+        assert!(small_json.contains("save_settings"));
+        assert!(small_json.contains("cancel_settings"));
+
+        let med_json = build_settings_card_for_size(&WidgetConfig::default(), "Medium", 0);
+        assert!(med_json.contains("speed_unit"));
+        assert!(med_json.contains("chart_window"));
+        assert!(med_json.contains("apps_expanded"));
+        assert!(med_json.contains("save_settings"));
+        assert!(med_json.contains("cancel_settings"));
+        assert!(med_json.contains("reset_session"));
+        assert!(med_json.contains("\"title\":\"Reset session\""));
+    }
+
+    #[test]
     fn widget_config_json_roundtrip() {
         let config = WidgetConfig {
             speed_unit: SpeedUnit::Megabytes,
@@ -1185,15 +1327,14 @@ mod tests {
         snap.tx_bps = 5_000.0;
         // Clear history and push an old giant peak followed by small traffic
         snap.history.clear();
-        snap.history.push(HistorySample {
-            rx_bps: 100_000_000,
-            tx_bps: 50_000_000,
-        });
+        snap.history.push(HistorySample::from_bps(
+            100_000_000,
+            50_000_000,
+            500_000_000,
+        ));
         for _ in 0..10 {
-            snap.history.push(HistorySample {
-                rx_bps: 10_000,
-                tx_bps: 5_000,
-            });
+            snap.history
+                .push(HistorySample::from_bps(10_000, 5_000, 500_000_000));
         }
         // If window is 5 samples, the old peak (index 0) is excluded
         let (peak_rx, peak_tx) = snap.chart_window_peak(5);
@@ -1210,8 +1351,8 @@ mod tests {
     fn manifest_version_matches_cargo_pkg_version() {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../widget/Package.appxmanifest");
-        let content = std::fs::read_to_string(&manifest_path)
-            .expect("Package.appxmanifest must be readable");
+        let content =
+            std::fs::read_to_string(&manifest_path).expect("Package.appxmanifest must be readable");
 
         // Expected 4-part MSIX version: e.g. "0.1.0" -> "0.1.0.0"
         let pkg_ver = env!("CARGO_PKG_VERSION");

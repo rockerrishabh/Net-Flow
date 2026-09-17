@@ -622,9 +622,12 @@ mod tests {
 
     fn history(n: usize) -> Vec<HistorySample> {
         (0..n)
-            .map(|i| HistorySample {
-                rx_bps: ((i % 10) as u64) * 1000,
-                tx_bps: ((i % 7) as u64) * 400,
+            .map(|i| {
+                HistorySample::from_bps(
+                    ((i % 10) as u64) * 1000,
+                    ((i % 7) as u64) * 400,
+                    500_000_000,
+                )
             })
             .collect()
     }
@@ -662,10 +665,7 @@ mod tests {
     #[test]
     fn download_draws_above_the_axis_and_upload_below() {
         let hist: Vec<HistorySample> = (0..40)
-            .map(|_| HistorySample {
-                rx_bps: 1_000_000,
-                tx_bps: 1_000_000,
-            })
+            .map(|_| HistorySample::from_bps(1_000_000, 1_000_000, 500_000_000))
             .collect();
         let png = render_unified_dual_chart_png(&hist, 40, 60, 40).unwrap();
         let (w, h, rgba) = decode(&png);
@@ -687,10 +687,7 @@ mod tests {
     fn tracks_share_one_scale() {
         // Upload is a tenth of download, so it must stay visibly shorter.
         let hist: Vec<HistorySample> = (0..40)
-            .map(|_| HistorySample {
-                rx_bps: 1_000_000,
-                tx_bps: 100_000,
-            })
+            .map(|_| HistorySample::from_bps(1_000_000, 100_000, 500_000_000))
             .collect();
         let png = render_unified_dual_chart_png(&hist, 40, 60, 40).unwrap();
         let (w, h, rgba) = decode(&png);
@@ -710,10 +707,7 @@ mod tests {
     #[test]
     fn idle_traffic_keeps_both_rails_visible() {
         let hist: Vec<HistorySample> = (0..40)
-            .map(|_| HistorySample {
-                rx_bps: 0,
-                tx_bps: 0,
-            })
+            .map(|_| HistorySample::from_bps(0, 0, 500_000_000))
             .collect();
         let png = render_unified_dual_chart_png(&hist, 40, 60, 40).unwrap();
         let (w, h, rgba) = decode(&png);
