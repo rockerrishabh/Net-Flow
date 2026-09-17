@@ -4,10 +4,18 @@ members = ["crates/*", "widget"]
 exclude = ["windows-rs"]
 
 [workspace.package]
-edition = "2024"
 version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
 authors = ["Rishabh Kumar <admin@rockerrishabh.me>"]
 license = "MIT OR Apache-2.0"
+description = "Real-time network bandwidth telemetry monitor and native Windows 11 widget"
+repository = "https://github.com/rockerrishabh/net-flow"
+homepage = "https://github.com/rockerrishabh/net-flow"
+documentation = "https://github.com/rockerrishabh/net-flow"
+readme = "README.md"
+keywords = ["network", "bandwidth", "windows11", "widget", "telemetry"]
+categories = ["network-programming", "os::windows-apis"]
 
 
 [workspace.dependencies]

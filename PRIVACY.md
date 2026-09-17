@@ -1,6 +1,6 @@
 # Privacy Policy for Net Flow
 
-**Last Updated**: September 16, 2026  
+**Last Updated**: September 17, 2026  
 **Author / Maintainer**: Rishabh Kumar ([admin@rockerrishabh.me](mailto:admin@rockerrishabh.me))
 
 Net Flow is an open-source, non-commercial, individual-maintained network telemetry monitor and native Windows 11 widget. This Privacy Policy outlines how Net Flow operates and explains our strict commitment to user privacy, data minimization, and transparency.
@@ -45,6 +45,7 @@ Net Flow persists minimal state locally on your computer to support its widget c
 
 - **Widget Configuration**: User preferences configured in the card settings (selected speed unit, chart timeframe, and interface filters) are saved locally using standard Windows App SDK widget state storage.
 - **Cumulative Session Counters**: Total bytes sent and received during the current session are saved locally in `%LocalAppData%` so your cumulative totals persist across system reboots or widget reloads.
+- **Diagnostic Logging**: A lightweight, thread-safe diagnostic log (`%TEMP%\netflow_widget.log`) records widget lifecycle events (initialization, activation, shutdown). It is capped at 1 MB, automatically rotates to `.old`, is never transmitted off your machine, and can be deleted at any time.
 - **Inline Reset**: You can clear cumulative session totals at any time by clicking the inline **Reset** button directly on the widget card.
 - **Data Deletion**: Uninstalling the Net Flow package completely removes all associated local settings and session data from your machine.
 

@@ -10,6 +10,7 @@
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/Version-0.1.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](ms-windows-store://pdp/?productid=9PCR54NGJ94J)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
@@ -23,11 +24,56 @@
 - **🪟 Native Windows 11 Widgets Board Integration**: First-class widget integration (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 support across **Small**, **Medium**, and **Large** card dimensions.
 - **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline (in vibrant cyan `#38D9F0`) and upload traffic below (in warm amber `#FFB020`) on a shared scale with glowing pulse nodes.
 - **🌊 50 KB/s Scale Floor & Headroom**: A vertical scale floor keeps sub-kilobyte background network noise proportional, while 18% vertical headroom cushions traffic spikes from card boundaries.
-- **⚡ Ultra-Low Resource Usage**: Uses native Windows `IP Helper` (`GetIfTable2`) APIs and asynchronous Rust for near-zero CPU (< 0.1%) and RAM consumption.
-- **🛜 Smart Active Adapter Detection**: Auto-detects the primary active network adapter with contextual badges (Wi-Fi, Ethernet, Cellular, VPN).
+- **⚡ Ultra-Low Resource Usage**: Uses native Windows `IP Helper` (`GetIfTable2`) APIs and asynchronous Rust for near-zero CPU (< 0.1%) and negligible RAM footprint (< 15 MB).
+- **🛜 Smart Active Adapter Detection**: Auto-detects the primary active network adapter with contextual badges (Wi-Fi with friendly SSID, Ethernet, Cellular, VPN).
 - **📱 Per-App Bandwidth Attribution**: Tracks active applications consuming network bandwidth with compact rate formatting (`↓ 11.1 ↑ 9.1 KB/s (37)`) and generous 22-character name budgets.
 - **📊 Session Usage Tracking**: Monitors cumulative upload/download data transferred and active session duration with an inline **Reset** button.
 - **⚙️ In-Card Customization**: Configurable speed units (Auto-scaled, Bytes/s, KB/s, MB/s, Gbps) and adjustable waveform time windows (15s, 30s, 60s, 120s) directly inside the widget card.
+
+---
+
+## 📥 Installation
+
+### 1. Microsoft Store (Recommended)
+Net Flow is available directly through the Microsoft Store with seamless background updates:
+
+👉 **[Get Net Flow on the Microsoft Store (Product ID: 9PCR54NGJ94J)](ms-windows-store://pdp/?productid=9PCR54NGJ94J)**
+
+### 2. Local Developer Sideloading
+If building from source or testing modifications locally:
+
+```powershell
+# Clone the repository
+git clone https://github.com/rockerrishabh/net-flow.git
+cd net-flow
+
+# One-command build, packaging, self-signing, and sideload registration
+powershell -ExecutionPolicy Bypass -File scripts/setup_msix.ps1
+```
+
+Once installed:
+1. Press <kbd>Win</kbd> + <kbd>W</kbd> to open the **Windows Widgets Board**.
+2. Click **+** (**Add Widgets**) in the top-right corner.
+3. Select **Net Flow** and pin your preferred size (Small, Medium, or Large).
+
+### 3. Portable Archive
+Download the standalone `net-flow-windows-x64.zip` directly from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases).
+
+---
+
+## ⚡ Performance & Architectural Hardening
+
+Net Flow is engineered from the ground up for zero distraction, extreme reliability, and minimal system impact:
+
+| Metric / Component | Implementation | Impact |
+| :--- | :--- | :--- |
+| **Release Binary Size** | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`) | **1.24 MB** standalone executable |
+| **CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing | **< 0.1% CPU** during active monitoring |
+| **Memory Footprint** | Bounded caches & in-memory rasterization | **< 15 MB** working set |
+| **Process Sampling** | Decoupled 1.0s process inspection + 500ms network throughput polling | Zero system scheduler jitter or scaling distortion |
+| **COM Lifetime** | Automatic idle detection with 30s grace period and `CoRevokeClassObject` | **Zero zombie background processes** when unpinned |
+| **Lock Poison-Safety** | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"` |
+| **Log Management** | Thread-safe 1MB rotating logger in `%TEMP%` | Prevents disk bloat; quiet by default |
 
 ---
 
@@ -67,7 +113,7 @@ net-flow/
 │       │   ├── chart.rs               # In-memory dual-stream waveform rasteriser
 │       │   ├── format.rs              # Bandwidth scaling & humanized unit formatting
 │       │   ├── icons.rs               # Embedded vector glyphs (PNG data URIs)
-│       │   └── process.rs             # Active process network attribution
+│       │   └── process.rs             # Active process network attribution & bounded icon cache
 ├── widget/                            # net-flow (Windows App SDK COM widget provider)
 │   ├── Assets/                        # Master branding, high-DPI logos, app.ico, and favicon pack
 │   │   ├── MasterLogo.png             # 816x816 high-res squircle master logo
@@ -76,16 +122,16 @@ net-flow/
 │   │   ├── StoreLogo.png              # 100x100 Microsoft Store logo
 │   │   ├── app.ico                    # Multi-res Windows executable icon (256, 128, 64, 48, 32, 16)
 │   │   └── favicon.ico                # Web & docs favicon suite (48, 32, 16)
-│   ├── Package.appxmanifest           # MSIX package identity & widget provider declaration
+│   ├── Package.appxmanifest           # Open-source generic manifest template
 │   ├── build.rs                       # Resource compilation & icon embedding
 │   └── src/
 │       ├── bindings.rs                # Windows App SDK WinMD bindings
-│       ├── com.rs                     # Out-of-proc COM server lifetime management
-│       ├── main.rs                    # WinMain entry point & COM factory
-│       └── provider.rs                # IWidgetProvider2 widget lifecycle handler
+│       ├── factory.rs                 # Out-of-proc COM ClassFactory implementation
+│       ├── main.rs                    # WinMain entry point, COM lifecycle & idle shutdown
+│       └── provider.rs                # IWidgetProvider2 handler with poison-resilient locks
 ├── scripts/
-│   └── setup_msix.ps1                 # Local dev build, MSIX packaging, test signing & sideload
-├── Cargo.toml                         # Workspace manifest & single source of truth for versioning
+│   └── setup_msix.ps1                 # Local developer build, test-signing & sideloading
+├── Cargo.toml                         # Workspace manifest & LTO release profile
 ├── CHANGELOG.md                       # Release notes & version history
 ├── CODE_OF_CONDUCT.md                 # Contributor Covenant v2.1
 ├── CONTRIBUTING.md                     # Contributor guide & developer workflow
@@ -97,31 +143,9 @@ net-flow/
 
 ---
 
-## 🚀 Quick Start (Local Sideloading)
-
-### Prerequisites
-- **Windows 11** (Build 22000 or newer)
-- **Rust Toolchain** (Stable): `rustup default stable`
-- **Windows 10/11 SDK** (Includes `makeappx.exe` and `signtool.exe`)
-- **PowerShell 7+ or Windows PowerShell 5.1**
-
-### One-Command Setup
-To compile the release binaries, automatically package the MSIX, sign it, and register the widget with Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/setup_msix.ps1
-```
-
-Once installed:
-1. Press <kbd>Win</kbd> + <kbd>W</kbd> to open the **Windows Widgets Board**.
-2. Click **+** (**Add Widgets**) in the top-right corner.
-3. Select **Net Flow** and pin your preferred size (Small, Medium, or Large).
-
----
-
 ## 🧪 Testing & Verification
 
-Run all 64 workspace unit tests:
+Run all 75 workspace unit tests:
 ```powershell
 cargo test --workspace
 ```
@@ -131,14 +155,19 @@ Run Clippy with strict zero-warnings enforcement:
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+Build the optimized release binary (1.24 MB):
+```powershell
+cargo build --release --workspace
+```
+
 ---
 
 ## 📦 CI/CD & Microsoft Store Publishing
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all unit tests, and verifies MSIX layout packaging.
-2. **`publish.yml`**: Triggered on Git tags (e.g. `v0.1.0`) or manual dispatch. Builds, signs, publishes GitHub Releases, and submits the package to the **Microsoft Store** via the Partner Center API.
+1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 75 unit tests, and verifies MSIX layout packaging.
+2. **`publish.yml`**: Triggered on Git tags (e.g. `v0.1.0`) or manual workflow dispatch. Builds the optimized binary, injects Partner Center secrets into the manifest, packages the MSIX, publishes GitHub Releases, and submits the update to the **Microsoft Store** via the Store Submission API.
 
 ---
 
