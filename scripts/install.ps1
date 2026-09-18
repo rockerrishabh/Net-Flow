@@ -61,7 +61,8 @@ function Install-SideloadCert {
     if (Test-Path $cer) {
         try {
             $certObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cer)
-        } catch {}
+        }
+        catch {}
     }
 
     # Extract certificate from signed MSIX if separate .cer file is missing
@@ -71,7 +72,8 @@ function Install-SideloadCert {
             if ($sig -and $sig.SignerCertificate) {
                 $certObj = $sig.SignerCertificate
             }
-        } catch {}
+        }
+        catch {}
     }
 
     if (-not $certObj) {
@@ -79,24 +81,65 @@ function Install-SideloadCert {
     }
 
     $thumb = $certObj.Thumbprint
-    $inTrustedPeople = Get-ChildItem Cert:\CurrentUser\TrustedPeople -ErrorAction SilentlyContinue |
-        Where-Object { $_.Thumbprint -eq $thumb }
-    $inRoot = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-        Where-Object { $_.Thumbprint -eq $thumb }
+    $inLocalRoot = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+    Where-Object { $_.Thumbprint -eq $thumb }
+    $inLocalTrusted = Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue |
+    Where-Object { $_.Thumbprint -eq $thumb }
 
-    if (-not $inTrustedPeople -and -not $inRoot) {
-        Write-Host "Adding package certificate ($($certObj.Subject)) to Cert:\CurrentUser\TrustedPeople..." -ForegroundColor Cyan
+    # Also check and ensure in CurrentUser\TrustedPeople
+    $inCurrentTrusted = Get-ChildItem Cert:\CurrentUser\TrustedPeople -ErrorAction SilentlyContinue |
+    Where-Object { $_.Thumbprint -eq $thumb }
+    if (-not $inCurrentTrusted) {
         try {
             $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "CurrentUser")
             $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
             $store.Add($certObj)
             $store.Close()
-            Write-Host "Certificate trusted successfully." -ForegroundColor Green
-        } catch {
-            Write-Warning "Could not automatically import certificate to TrustedPeople: $_"
         }
-    } else {
-        Write-Host "Package signing certificate is trusted." -ForegroundColor Green
+        catch {}
+    }
+
+    if (-not $inLocalRoot -and -not $inLocalTrusted) {
+        # Prepare a valid file path for Import-Certificate
+        $resolvedCer = $cer
+        $isTempCer = $false
+        if (-not $resolvedCer -or -not (Test-Path $resolvedCer)) {
+            $resolvedCer = Join-Path $env:TEMP ("netflow_cert_" + $thumb + ".cer")
+            [System.IO.File]::WriteAllBytes($resolvedCer, $certObj.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            $isTempCer = $true
+        }
+
+        # Attempt direct machine store import (works if terminal is elevated)
+
+        try {
+            Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath $resolvedCer -ErrorAction Stop | Out-Null
+            Import-Certificate -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -FilePath $resolvedCer -ErrorAction SilentlyContinue | Out-Null
+       
+            Write-Host "Certificate installed to LocalMachine\Root." -ForegroundColor Green
+        }
+        catch {
+            # Standard user: Request UAC elevation to trust self-signed root cert for AppX
+            Write-Host "Sideloading requires trusting the package certificate in LocalMachine\Root." -ForegroundColor Yellow
+            Write-Host "Prompting for administrator approval to trust certificate..." -ForegroundColor Cyan
+            try {
+                $argList = "-NoProfile -ExecutionPolicy Bypass -Command `"Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\Root' -FilePath '$resolvedCer'; Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -FilePath '$resolvedCer'`""
+                $proc = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList $argList
+                if ($proc.ExitCode -eq 0) {
+                    
+                    Write-Host "Certificate installed to LocalMachine\Root successfully." -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Warning "Could not elevate to install certificate. Please right-click install.ps1 -> Run with PowerShell as Administrator."
+            }
+        }
+
+        if ($isTempCer -and (Test-Path $resolvedCer)) {
+            Remove-Item $resolvedCer -Force -ErrorAction SilentlyContinue
+        }
+    }
+    else {
+        Write-Host "Package signing certificate is trusted in machine root." -ForegroundColor Green
     }
 }
 
@@ -108,7 +151,8 @@ function Get-Status {
     if ($msix) {
         $msixSize = [math]::Round(((Get-Item $msix).Length / 1MB), 2)
         Write-Host "MSIX Package    : [FOUND] $msix ($msixSize MB)" -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host "MSIX Package    : [NOT FOUND]" -ForegroundColor Yellow
     }
 
@@ -116,7 +160,8 @@ function Get-Status {
     if ($appx) {
         Write-Host "Widget Package  : [INSTALLED] $($appx.PackageFullName)" -ForegroundColor Green
         Write-Host "Install Location: $($appx.InstallLocation)" -ForegroundColor Gray
-    } else {
+    }
+    else {
         Write-Host "Widget Package  : [NOT INSTALLED]" -ForegroundColor Yellow
     }
 
@@ -153,7 +198,8 @@ function Install-Package {
     try {
         Add-AppxPackage -Path $msixToInstall -ForceApplicationShutdown
         Write-Host "Net Flow package installed successfully!" -ForegroundColor Green
-    } catch {
+    }
+    catch {
         Write-Host "Installation failed: $_" -ForegroundColor Red
         Write-Host "Tip: Sideloading requires developer mode or trusting the certificate." -ForegroundColor Yellow
         throw $_
