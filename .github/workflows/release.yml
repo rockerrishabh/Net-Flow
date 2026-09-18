@@ -18,7 +18,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   WASDK_VERSION: "1.7.250310001"
-  PFX_BASE64: ${{ secrets.PFX_BASE64 }}
   PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
 
 jobs:
@@ -32,19 +31,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Rust & Cargo Cache
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache Windows App SDK WinMD
         uses: actions/cache@v6
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-            widget/winmd/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-
+          path: widget/winmd/
+          key: ${{ runner.os }}-wasdk-winmd-${{ env.WASDK_VERSION }}
 
       - name: Download Windows App SDK WinMD
         shell: pwsh
@@ -95,63 +89,41 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --workspace
 
-      - name: Prepare Signing Certificate
+      - name: Generate Code Signing Certificate
         id: prep_cert
         shell: pwsh
         run: |
-          $pfxPath = "$env:TEMP/signing_cert.pfx"
-          $password = "NetFlowDev123!"
-
-          if ($env:PFX_BASE64) {
-            Write-Host "Using provided PFX_BASE64 secret..."
-            $b64Clean = ($env:PFX_BASE64 -replace '\s+', '').Trim()
-            [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($b64Clean))
-
-            if ($env:PFX_PASSWORD) {
-              $password = $env:PFX_PASSWORD.Trim().Trim('"').Trim("'")
-            }
-
-            # Verify password and extract Subject
-            $cert = $null
-            try {
-              $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $password)
-            } catch {
-              Write-Warning "Failed with provided PFX_PASSWORD. Attempting fallback to NetFlowDev123!..."
-              $password = "NetFlowDev123!"
-              $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($pfxPath, $password)
-            }
-
-            $publisher = $cert.Subject
-            Write-Host "Certificate loaded with Subject: $publisher"
-
-            $cerPath = "target/NetFlow_Sideload_Cert.cer"
-            New-Item -ItemType Directory -Force -Path "target" | Out-Null
-            [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-            Write-Host "Exported public sideload cert to $cerPath"
-          } else {
-            Write-Host "No PFX_BASE64 secret provided; generating CI self-signed certificate for sideloading..."
-            $publisher = "CN=Development"
-            $manifestSrc = "widget/Package.appxmanifest"
-            if (Test-Path $manifestSrc) {
-              $mContent = Get-Content $manifestSrc -Raw
-              if ($mContent -match 'Publisher="([^"]+)"') { $publisher = $matches[1] }
-            }
-            $cert = New-SelfSignedCertificate `
-              -Type Custom `
-              -Subject "$publisher" `
-              -KeyUsage DigitalSignature `
-              -FriendlyName "Net Flow Sideload Signing" `
-              -CertStoreLocation "Cert:\CurrentUser\My" `
-              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-
-            $secPwd = ConvertTo-SecureString $password -AsPlainText -Force
-            Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPwd | Out-Null
-
-            $cerPath = "target/NetFlow_Sideload_Cert.cer"
-            New-Item -ItemType Directory -Force -Path "target" | Out-Null
-            [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-            Write-Host "Exported public sideload cert to $cerPath"
+          if ([string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) {
+            throw "Secret PFX_PASSWORD is not configured! Please configure PFX_PASSWORD in repository secrets."
           }
+          $password = $env:PFX_PASSWORD.Trim().Trim('"').Trim("'")
+
+          # Read publisher directly from manifest to ensure 100% sync
+          $publisher = "CN=Development"
+          $manifestSrc = "widget/Package.appxmanifest"
+          if (Test-Path $manifestSrc) {
+            $mContent = Get-Content $manifestSrc -Raw
+            if ($mContent -match 'Publisher="([^"]+)"') { $publisher = $matches[1] }
+          }
+          Write-Host "Generating code signing certificate with Subject: $publisher..."
+
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject "$publisher" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Net Flow Sideload Signing" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+
+          $pfxPath = "$env:TEMP/signing_cert.pfx"
+          $secPwd = ConvertTo-SecureString $password -AsPlainText -Force
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPwd | Out-Null
+          Write-Host "Exported encrypted PFX to $pfxPath"
+
+          $cerPath = "target/NetFlow_Sideload_Cert.cer"
+          New-Item -ItemType Directory -Force -Path "target" | Out-Null
+          [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+          Write-Host "Exported public sideload cert to $cerPath"
 
           echo "PUBLISHER=$publisher" >> $env:GITHUB_OUTPUT
           echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
