@@ -181,6 +181,15 @@ if (-not $SkipZip) {
         Copy-Item $regScript (Join-Path $portableStage "register.ps1") -Force
     }
 
+    $manifestPath = Join-Path $layoutDir "AppxManifest.xml"
+    if (Test-Path $manifestPath) {
+        Copy-Item $manifestPath (Join-Path $portableStage "AppxManifest.xml") -Force
+    }
+    $priPath = Join-Path $layoutDir "resources.pri"
+    if (Test-Path $priPath) {
+        Copy-Item $priPath (Join-Path $portableStage "resources.pri") -Force
+    }
+
     if (Test-Path $cerPath) {
         Copy-Item $cerPath (Join-Path $portableStage "NetFlow_Sideload_Cert.cer") -Force
     }

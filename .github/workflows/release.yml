@@ -210,6 +210,12 @@ jobs:
           if (Test-Path "scripts/register.ps1") {
             Copy-Item "scripts/register.ps1" (Join-Path $zipStage "register.ps1") -Force
           }
+          if (Test-Path "target/msix/AppxManifest.xml") {
+            Copy-Item "target/msix/AppxManifest.xml" (Join-Path $zipStage "AppxManifest.xml") -Force
+          }
+          if (Test-Path "target/msix/resources.pri") {
+            Copy-Item "target/msix/resources.pri" (Join-Path $zipStage "resources.pri") -Force
+          }
           if (Test-Path "target/NetFlow_Sideload_Cert.cer") {
             Copy-Item "target/NetFlow_Sideload_Cert.cer" (Join-Path $zipStage "NetFlow_Sideload_Cert.cer") -Force
           }

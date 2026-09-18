@@ -1,9 +1,9 @@
 # Net Flow - Portable / Standalone Registration Helper
-# Enables running and registering the Net Flow widget provider directly from the portable archive.
+# Registers the Net Flow widget provider directly into the Windows 11 Widgets Board.
 
 param(
-    [switch]$RegisterCOM,
-    [switch]$UnregisterCOM,
+    [switch]$Register,
+    [switch]$Unregister,
     [switch]$InstallCert,
     [switch]$Status,
     [switch]$RestartWidgets
@@ -12,64 +12,51 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ExePath = Join-Path $ScriptDir "net-flow.exe"
-$Clsid = "{A8E4C976-3F5D-4B2E-9C1A-7D6E8F0B2A4C}"
-$RegKey = "HKCU:\Software\Classes\CLSID\$Clsid"
+$ManifestPath = Join-Path $ScriptDir "AppxManifest.xml"
 
 function Show-Header {
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host " 📊 Net Flow - Portable Registration Helper" -ForegroundColor Cyan
+    Write-Host " 📊 Net Flow - Windows 11 Widget Registration" -ForegroundColor Cyan
     Write-Host "=================================================" -ForegroundColor Cyan
 }
 
 function Get-Status {
     Show-Header
-    Write-Host "Executable Path : $ExePath"
+    Write-Host "Location        : $ScriptDir"
     $exeExists = Test-Path $ExePath
     Write-Host "Executable Found: $(if ($exeExists) { '[YES]' } else { '[NO]' })" -ForegroundColor $(if ($exeExists) { 'Green' } else { 'Red' })
 
-    $isComRegistered = Test-Path $RegKey
-    Write-Host "COM Registered  : $(if ($isComRegistered) { '[YES]' } else { '[NO]' })" -ForegroundColor $(if ($isComRegistered) { 'Green' } else { 'Yellow' })
-    if ($isComRegistered) {
-        $serverPath = (Get-ItemProperty -Path "$RegKey\LocalServer32" -ErrorAction SilentlyContinue).'(default)'
-        Write-Host "Registered Path : $serverPath" -ForegroundColor DarkGray
-    }
+    $manifestExists = Test-Path $ManifestPath
+    Write-Host "Manifest Found  : $(if ($manifestExists) { '[YES]' } else { '[NO]' })" -ForegroundColor $(if ($manifestExists) { 'Green' } else { 'Red' })
 
     $appx = Get-AppxPackage "*NetFlow*" -ErrorAction SilentlyContinue
-    Write-Host "MSIX Installed  : $(if ($appx) { '[YES] ' + $appx.PackageFullName } else { '[NO]' })" -ForegroundColor $(if ($appx) { 'Green' } else { 'Gray' })
+    Write-Host "Widget Package  : $(if ($appx) { '[REGISTERED] ' + $appx.PackageFullName } else { '[NOT REGISTERED]' })" -ForegroundColor $(if ($appx) { 'Green' } else { 'Yellow' })
 
     $runningProc = Get-Process -Name "net-flow" -ErrorAction SilentlyContinue
-    Write-Host "Process Running : $(if ($runningProc) { '[RUNNING] (PID: ' + $runningProc.Id + ')' } else { '[STOPPED]' })" -ForegroundColor $(if ($runningProc) { 'Green' } else { 'Gray' })
+    Write-Host "Widget Process  : $(if ($runningProc) { '[RUNNING] (PID: ' + $runningProc.Id + ')' } else { '[IDLE]' })" -ForegroundColor $(if ($runningProc) { 'Green' } else { 'Gray' })
     Write-Host ""
 }
 
-function Register-ComServer {
+function Register-Package {
     Show-Header
-    if (-not (Test-Path $ExePath)) {
-        throw "net-flow.exe not found at $ExePath!"
+    if (-not (Test-Path $ManifestPath)) {
+        throw "AppxManifest.xml not found in $ScriptDir! Required for Windows Widgets Board registration."
     }
 
-    Write-Host "Registering COM LocalServer32 in HKCU..." -ForegroundColor Cyan
-    New-Item -Path $RegKey -Force | Out-Null
-    Set-ItemProperty -Path $RegKey -Name "(default)" -Value "Net Flow Widget COM Provider"
-    
-    $localServerKey = "$RegKey\LocalServer32"
-    New-Item -Path $localServerKey -Force | Out-Null
-    Set-ItemProperty -Path $localServerKey -Name "(default)" -Value "`"$ExePath`""
+    Write-Host "Registering Net Flow widget in Windows 11 Widgets Board..." -ForegroundColor Cyan
+    Get-AppxPackage "*NetFlow*" -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 400
 
-    Write-Host "COM class $Clsid registered successfully to: $ExePath" -ForegroundColor Green
+    Add-AppxPackage -Register $ManifestPath -ForceApplicationShutdown
+    Write-Host "Net Flow widget package registered successfully!" -ForegroundColor Green
     Restart-WidgetBoard
 }
 
-function Unregister-ComServer {
+function Unregister-Package {
     Show-Header
-    if (Test-Path $RegKey) {
-        Write-Host "Removing COM registration: $RegKey..." -ForegroundColor Yellow
-        Remove-Item -Path $RegKey -Recurse -Force
-        Write-Host "COM registration removed." -ForegroundColor Green
-    }
-    else {
-        Write-Host "No HKCU COM registration found for $Clsid." -ForegroundColor Gray
-    }
+    Write-Host "Removing Net Flow widget registration..." -ForegroundColor Yellow
+    Get-AppxPackage "*NetFlow*" -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue
+    Write-Host "Net Flow widget unregistered." -ForegroundColor Green
     Restart-WidgetBoard
 }
 
@@ -90,15 +77,15 @@ function Restart-WidgetBoard {
     Write-Host "Restarting Windows Widgets Board processes..." -ForegroundColor Cyan
     Stop-Process -Name "WidgetBoard", "WidgetService", "Widgets" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 600
-    Write-Host "Widgets Board refreshed. Press Win + W to open your Widgets Board." -ForegroundColor Green
+    Write-Host "Widgets Board refreshed! Press Win + W to open your Widgets Board." -ForegroundColor Green
 }
 
 # Main Execution Dispatch
-if ($RegisterCOM) {
-    Register-ComServer
+if ($Register) {
+    Register-Package
 }
-elseif ($UnregisterCOM) {
-    Unregister-ComServer
+elseif ($Unregister) {
+    Unregister-Package
 }
 elseif ($InstallCert) {
     Install-SideloadCert
@@ -107,11 +94,18 @@ elseif ($RestartWidgets) {
     Restart-WidgetBoard
 }
 else {
+    # Default behavior: If not registered, prompt to register; if registered, show status
     Get-Status
-    Write-Host "Usage options:" -ForegroundColor White
-    Write-Host "  .\register.ps1 -RegisterCOM     Register local net-flow.exe as COM widget provider"
-    Write-Host "  .\register.ps1 -UnregisterCOM   Remove COM registration"
-    Write-Host "  .\register.ps1 -InstallCert     Install bundled public certificate for sideloading"
-    Write-Host "  .\register.ps1 -RestartWidgets  Restart Windows Widgets Board service"
-    Write-Host "  .\register.ps1 -Status          Display current registration and process state"
+    $appx = Get-AppxPackage "*NetFlow*" -ErrorAction SilentlyContinue
+    if (-not $appx) {
+        Write-Host "Net Flow is not registered yet in your Widgets Board." -ForegroundColor Yellow
+        Write-Host "Registering now..." -ForegroundColor Cyan
+        Register-Package
+    } else {
+        Write-Host "Usage commands:" -ForegroundColor White
+        Write-Host "  .\register.ps1 -Register        Register this folder in Windows Widgets Board"
+        Write-Host "  .\register.ps1 -Unregister      Remove widget registration"
+        Write-Host "  .\register.ps1 -RestartWidgets  Restart Windows Widgets Board service"
+        Write-Host "  .\register.ps1 -Status          Display current registration and process state"
+    }
 }
