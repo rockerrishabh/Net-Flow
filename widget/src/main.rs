@@ -26,6 +26,7 @@ use crate::provider::{
 use net_flow_core::card::WidgetConfig;
 
 // CLSID: {A8E4C976-3F5D-4B2E-9C1A-7D6E8F0B2A4C}
+// Registered in appxmanifest as the out-of-process COM server for the widget
 pub const CLSID_NET_FLOW_WIDGET_PROVIDER: GUID =
     GUID::from_u128(0xA8E4C976_3F5D_4B2E_9C1A_7D6E8F0B2A4C);
 
@@ -48,7 +49,7 @@ unsafe extern "system" {
 }
 
 fn main() -> windows_core::Result<()> {
-    // 1. Initialize COM MTA
+    // 1. Initialize COM MTA (Multi-Threaded Apartment) for widget IPC
     unsafe {
         let hr = CoInitializeEx(core::ptr::null(), COINIT_MULTITHREADED);
         if hr.0 < 0 {
@@ -58,7 +59,7 @@ fn main() -> windows_core::Result<()> {
 
     let state = Arc::new(Mutex::new(ProviderState::new()));
 
-    // 2. Recovery: restore existing widgets from WidgetManager
+    // 2. Query WidgetManager to recover any widgets already pinned to the user's board
     if let Ok(manager) = WidgetManager::GetDefault()
         && let Ok(infos) = manager.GetWidgetInfos()
     {
@@ -106,11 +107,11 @@ fn main() -> windows_core::Result<()> {
         };
     }
 
-    // 3. Start worker if any active widgets were recovered
+    // 3. Spin up the background telemetry worker thread
     let provider_helper = NetFlowWidgetProvider::new(Arc::clone(&state));
     provider_helper.ensure_worker();
 
-    // 4. Register COM Class Factory
+    // 4. Register the COM Class Factory with OLE so Windows can activate the widget provider
     let factory = NetFlowClassFactory::new(Arc::clone(&state));
     let factory_unk: IUnknown = factory.into();
     let mut registration_cookie: u32 = 0;
@@ -126,7 +127,7 @@ fn main() -> windows_core::Result<()> {
         hr.ok()?;
     }
 
-    // 5. Keep server alive until termination signal or idle timeout
+    // 5. Keep the server running until signaled or until an idle timeout expires
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = Arc::clone(&running);
     let _ = ctrlc_handler(move || {
@@ -141,6 +142,8 @@ fn main() -> windows_core::Result<()> {
             (s.widgets.is_empty(), s.has_had_widgets, s.last_empty_at)
         };
 
+        // If no widgets are pinned, shut down cleanly after a grace period (30-60s)
+        // to avoid consuming background system resources
         if is_empty {
             let grace = if has_had {
                 Duration::from_secs(30)
@@ -187,7 +190,7 @@ fn main() -> windows_core::Result<()> {
         }
     }
 
-    // 6. Cleanup
+    // 6. Stop background worker and release COM registration
     let worker = {
         let mut s = state.lock_safe();
         s.worker.take()

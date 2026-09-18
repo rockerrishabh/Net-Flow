@@ -1,39 +1,38 @@
-//! Bandwidth telemetry rendering.
+//! Realtime bandwidth sparkline rendering.
 //!
-//! The chart is drawn by hand into a supersampled RGBA buffer rather than by a
-//! plotting library: the widget needs a mirrored, gradient-filled sparkline on a
-//! transparent background, which is a poor fit for chart frameworks and was the
-//! source of the hard edges and grid noise in the previous renderer.
+//! Net-Flow draws its sparkline directly into an in-memory RGBA buffer with
+//! supersampling and analytic edge anti-aliasing. This produces a mirrored,
+//! gradient-filled dual-stream chart (download on top, upload on bottom) on a
+//! transparent background without external plotting dependencies or bulky canvas runtimes.
 
 use crate::backend::HistorySample;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use image::{ImageEncoder, codecs::png::PngEncoder};
 
-/// RGBA colour with straight (non-premultiplied) alpha.
+/// Straight 8-bit RGBA color representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
-/// Download stroke — cyan.
+/// Download curve color (electric cyan).
 pub const DOWNLOAD_COLOR: Rgba = Rgba(56, 217, 240, 255);
-/// Upload stroke — amber.
+/// Upload curve color (warm amber).
 pub const UPLOAD_COLOR: Rgba = Rgba(255, 176, 32, 255);
-/// Minimum scale floor in bytes per second (50 KB/s).
-/// Prevents sub-kilobyte background noise (e.g. 500 B/s) from expanding to 100% chart height.
+/// Minimum vertical scale floor in bytes/sec (50 KB/s).
+/// Prevents small background network noise (e.g. 500 B/s) from stretching across the full chart height.
 pub const MIN_CHART_SCALE_BPS: f64 = 50_000.0;
-/// Centre hairline, deliberately near-invisible on both widget themes.
+/// Subdued center dividing line separating download and upload regions.
 const AXIS_COLOR: Rgba = Rgba(150, 160, 176, 56);
 
-/// Peak opacity of the area fill directly beneath the stroke.
+/// Maximum opacity for the gradient fill directly adjacent to the curve stroke.
 const FILL_ALPHA_NEAR: f32 = 120.0;
-/// Opacity of the area fill as it reaches the baseline.
+/// Fade-out opacity for the gradient fill near the baseline axis.
 const FILL_ALPHA_FAR: f32 = 14.0;
-/// Idle offset, in logical pixels, holding each track just clear of the centre
-/// axis. Without it both zero-traffic traces collapse onto the same row and the
-/// later one simply paints over the other.
+/// Small vertical offset in pixels to keep zero-traffic rails visually distinct
+/// from each other and the center axis line.
 const IDLE_OFFSET_PX: f64 = 1.25;
 
-/// Which bandwidth track to render.
+/// Telemetry stream direction selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Track {
     Download,
@@ -49,12 +48,12 @@ impl Track {
     }
 }
 
-/// Chart dimensions for each widget size.
+/// Target pixel dimensions and sampling resolution for a widget size.
 pub struct ChartDimensions {
     pub width: u32,
     pub height: u32,
     pub sample_count: usize,
-    /// Supersampling factor used while rasterising, for anti-aliased edges.
+    /// Supersampling multiplier for antialiased rasterization.
     pub supersample: u32,
 }
 
@@ -122,9 +121,7 @@ impl Canvas {
         self.pixels[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 
-    /// Paint the vertical span `top..bottom` (in fractional pixels) with
-    /// analytic coverage at both ends, which is what keeps strokes from
-    /// shimmering as the curve moves between frames.
+    /// Fills vertical range `top..bottom` with fractional pixel coverage for anti-aliasing.
     fn fill_span(&mut self, x: u32, top: f64, bottom: f64, color: Rgba, alpha_scale: f32) {
         if top.is_nan() || bottom.is_nan() || bottom <= top {
             return;
@@ -151,8 +148,7 @@ impl Canvas {
         }
     }
 
-    /// Box-downsample by `factor`, averaging in premultiplied space so that
-    /// transparent pixels never bleed black fringes into the stroke.
+    /// Downsamples supersampled buffer using box filter averaging in premultiplied alpha space.
     fn downsample(&self, factor: u32) -> (u32, u32, Vec<u8>) {
         if factor <= 1 {
             return (self.width, self.height, self.pixels.clone());
@@ -197,9 +193,8 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(png_bytes)
 }
 
-/// Take the most recent `sample_count` samples, padded at the front with zeros
-/// so a freshly started widget draws from a flat baseline instead of stretching
-/// two data points across the whole width.
+/// Takes the latest `sample_count` points, front-padding with zeroes when the
+/// widget first starts up so the curve scrolls in smoothly from the right.
 fn windowed(values: &[f64], sample_count: usize) -> Vec<f64> {
     let total = sample_count.max(2);
     let mut out = vec![0.0f64; total];
@@ -210,8 +205,7 @@ fn windowed(values: &[f64], sample_count: usize) -> Vec<f64> {
     out
 }
 
-/// Catmull-Rom interpolation at a fractional index, used to resample the
-/// history into one value per output pixel column.
+/// Evaluates a Catmull-Rom spline at fractional position `t` for smooth column interpolation.
 fn catmull_at(values: &[f64], t: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -239,8 +233,7 @@ fn catmull_at(values: &[f64], t: f64) -> f64 {
     v.max(0.0)
 }
 
-/// Draw one track into `canvas`, growing away from `baseline_y` in `direction`
-/// (-1 = upwards, +1 = downwards).
+/// Renders a single direction track (download or upload) with gradient fill and pulse indicator.
 #[allow(clippy::too_many_arguments)]
 fn draw_track(
     canvas: &mut Canvas,
@@ -330,7 +323,7 @@ fn draw_track(
     }
 }
 
-/// Draw a glowing circular indicator dot on the canvas at `(cx, cy)`.
+/// Draws a glowing pulse dot on the leading edge (current sample) of the sparkline.
 fn draw_pulse_dot(
     canvas: &mut Canvas,
     cx: f64,
@@ -365,8 +358,8 @@ fn draw_pulse_dot(
     }
 }
 
-/// Render the mirrored dual-stream chart: download above the centre line,
-/// upload below it, both on a single shared scale so the two are comparable.
+/// Renders the mirrored dual-stream chart (download above axis, upload below axis)
+/// sharing a single vertical scale so visual heights are directly comparable.
 pub fn render_unified_dual_chart_png(
     history: &[HistorySample],
     sample_count: usize,
@@ -439,7 +432,7 @@ fn render_unified_dual_chart_png_ss(
     encode_png(out_w, out_h, &rgba)
 }
 
-/// Render a single-track chart (download or upload only) as PNG bytes.
+/// Renders a single-stream sparkline (download or upload only) as PNG bytes.
 pub fn render_chart_png(
     history: &[HistorySample],
     sample_count: usize,
@@ -487,7 +480,7 @@ pub fn render_chart_png(
     encode_png(out_w, out_h, &rgba)
 }
 
-/// Render the unified chart for a widget size and return a PNG data URI.
+/// Renders the unified dual-stream chart for a widget size preset and returns a data URI.
 pub fn render_unified_chart_data_uri(
     history: &[HistorySample],
     size: &str,
@@ -506,7 +499,7 @@ pub fn render_unified_chart_data_uri(
     }
 }
 
-/// Render separate download and upload charts and return base64 data URIs.
+/// Renders separate download and upload charts and returns a tuple of base64 data URIs.
 pub fn render_chart_data_uris(
     history: &[HistorySample],
     size: &str,
@@ -529,6 +522,7 @@ pub fn render_chart_data_uris(
     (render(Track::Download), render(Track::Upload))
 }
 
+/// Encodes raw PNG bytes into a standard `data:image/png;base64,...` URI string.
 pub fn png_to_data_uri(png_bytes: &[u8]) -> String {
     format!(
         "data:image/png;base64,{}",
@@ -536,8 +530,7 @@ pub fn png_to_data_uri(png_bytes: &[u8]) -> String {
     )
 }
 
-/// Apply a Gaussian smoothing filter to discrete samples so the trace reads as a
-/// continuous flow instead of a sawtooth, while preserving the true peak height.
+/// Smooths discrete sample jitter using a Gaussian filter while preserving the true peak value.
 pub fn apply_fluid_wave_smoothing(raw_values: &[f64]) -> Vec<f64> {
     if raw_values.len() <= 2 {
         return raw_values.to_vec();
@@ -592,8 +585,7 @@ pub fn apply_fluid_wave_smoothing(raw_values: &[f64]) -> Vec<f64> {
     smoothed
 }
 
-/// Catmull-Rom resampling of a point sequence. Retained for callers that want
-/// an explicit point list rather than the rasteriser's per-column sampling.
+/// Generates an interpolated Catmull-Rom point sequence from discrete coordinates.
 pub fn smooth_flowing_curve(points: &[(f64, f64)], subdivisions: usize) -> Vec<(f64, f64)> {
     if points.len() < 2 || subdivisions <= 1 {
         return points.to_vec();

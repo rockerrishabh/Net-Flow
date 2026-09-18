@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-/// Speed display unit preference.
+/// Unit preference for bandwidth rate displays.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpeedUnit {
-    /// Auto-scale based on magnitude (default behavior).
+    /// Dynamically scales between B/s, KB/s, MB/s, and GB/s based on magnitude.
     #[default]
     Auto,
     Bytes,
@@ -13,7 +13,7 @@ pub enum SpeedUnit {
 }
 
 impl SpeedUnit {
-    /// Parse from a string value (used in settings card form data).
+    /// Parses an incoming form submission string from the settings card.
     pub fn from_str_value(s: &str) -> Self {
         match s {
             "b" | "bytes" => SpeedUnit::Bytes,
@@ -24,7 +24,7 @@ impl SpeedUnit {
         }
     }
 
-    /// Convert to string value for settings card form data.
+    /// Returns the lowercase identifier used in settings Adaptive Card dropdowns.
     pub fn to_str_value(self) -> &'static str {
         match self {
             SpeedUnit::Auto => "auto",
@@ -36,14 +36,14 @@ impl SpeedUnit {
     }
 }
 
-/// Format bandwidth in bytes per second into human-readable string.
-/// Auto-scales: B/s -> KB/s -> MB/s -> GB/s (using 1024 base).
-/// Always formats to 2 decimal places, except B/s which formats to 0 decimal places.
+/// Formats bandwidth in bytes per second using auto-scaling (1024-based binary units).
+///
+/// Keeps two decimal places for KB/s, MB/s, and GB/s, and zero decimals for raw B/s.
 pub fn format_bandwidth(bytes_per_sec: f64) -> String {
     format_bandwidth_with_unit(bytes_per_sec, SpeedUnit::Auto)
 }
 
-/// Format bandwidth with a specific unit preference.
+/// Formats bandwidth in bytes per second honoring a fixed or auto-scaled unit preference.
 pub fn format_bandwidth_with_unit(bytes_per_sec: f64, unit: SpeedUnit) -> String {
     if bytes_per_sec.is_nan() || bytes_per_sec <= 0.0 {
         return match unit {
@@ -78,7 +78,7 @@ pub fn format_bandwidth_with_unit(bytes_per_sec: f64, unit: SpeedUnit) -> String
     }
 }
 
-/// Format total transferred bytes into human-readable string.
+/// Formats cumulative byte totals into readable strings up to Terabytes.
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;

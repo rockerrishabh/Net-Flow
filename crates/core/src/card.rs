@@ -5,16 +5,16 @@ use crate::icons;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Per-widget configuration persisted via CustomState.
+/// User configuration options saved in the widget's persistent CustomState.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WidgetConfig {
     pub speed_unit: SpeedUnit,
-    /// Chart window in seconds: 15, 30, or 60.
+    /// Chart time window in seconds (15, 30, or 60).
     pub chart_window: u32,
-    /// Whether in-widget active apps view is currently expanded.
+    /// Indicates whether the active apps drawer is expanded.
     #[serde(default)]
     pub apps_expanded: bool,
-    /// Current page of apps when expanded (0-indexed).
+    /// Currently visible page in the active apps list (0-indexed).
     #[serde(default)]
     pub apps_page: usize,
 }
@@ -30,20 +30,19 @@ impl Default for WidgetConfig {
     }
 }
 
-/// Size-specific layout metrics. Keeping these in one place is what stops the
-/// three card variants from drifting apart visually.
+/// Visual layout budget and typography sizing for each widget form factor (Small, Medium, Large).
 struct Layout {
-    /// Adaptive Card font size token for the headline bandwidth figures.
+    /// Font size token used for primary bandwidth figures.
     value_size: &'static str,
-    /// Chart preset name passed to the renderer.
+    /// Chart preset key passed to the sparkline rasterizer.
     chart_size: &'static str,
-    /// Apps shown while the section is collapsed (0 = section hidden).
+    /// Number of apps shown when collapsed (0 hides the section).
     apps_collapsed: usize,
-    /// Apps shown per page while the section is expanded.
+    /// Number of apps shown per page when expanded.
     apps_page_size: usize,
-    /// Character budget for app names before they are elided.
+    /// Character limit for application names before truncating with an ellipsis.
     apps_name_budget: usize,
-    /// Whether the session-total footer is rendered.
+    /// Whether to show the bottom session summary row.
     show_session: bool,
 }
 
@@ -74,7 +73,7 @@ const LARGE_LAYOUT: Layout = Layout {
     show_session: true,
 };
 
-/// Build an Adaptive Card v1.6 template string for the given snapshot, widget size, and config.
+/// Generates an Adaptive Card v1.6 JSON template for the current snapshot and widget size.
 pub fn build_adaptive_card(
     snapshot: &NetworkSnapshot,
     size: &str,
@@ -693,15 +692,15 @@ fn build_card(snapshot: &NetworkSnapshot, config: &WidgetConfig, layout: &Layout
     })
 }
 
-/// Build the settings (customization) card displayed when the user picks
-/// "Customize widget" from the widget's native overflow menu or the in-card gear icon.
+/// Builds the default settings card template for the customization flyout.
 pub fn build_settings_card(current_config: &WidgetConfig) -> String {
     build_settings_card_for_size(current_config, "Medium", 0)
 }
 
-/// Build the size-tailored settings card.
-/// On Small widgets, only essential speed units are displayed to fit within the 160px height.
-/// On Medium/Large widgets, full settings with compact spacing are displayed to fit within 340px.
+/// Builds a size-optimized settings card template.
+///
+/// Small widgets receive a simplified 2-column layout to remain accessible within 160px height,
+/// while Medium and Large widgets provide full speed unit and chart window controls.
 pub fn build_settings_card_for_size(
     current_config: &WidgetConfig,
     size: &str,

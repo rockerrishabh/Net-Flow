@@ -2,7 +2,7 @@ fn main() {
     println!("cargo:rerun-if-changed=winmd/Microsoft.Windows.Widgets.winmd");
     println!("cargo:rerun-if-changed=Assets/app.ico");
 
-    // Standard location for Windows SDK winmd (with env override support)
+    // Discover the Windows SDK winmd metadata file for widget interface generation
     let sdk_ver = std::env::var("NETFLOW_SDK_VERSION")
         .or_else(|_| std::env::var("WindowsSDKVersion"))
         .unwrap_or_else(|_| "10.0.26100.0".to_string());
@@ -27,8 +27,10 @@ fn main() {
         "--implement",
     ]);
 
+    // Run windows-bindgen to produce Rust COM wrapper definitions
     windows_bindgen::bindgen(args);
 
+    // Embed the widget app icon into the compiled executable PE header
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
         let mut res = winres::WindowsResource::new();
         res.set_icon("Assets/app.ico");

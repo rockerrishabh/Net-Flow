@@ -86,6 +86,7 @@ impl IClassFactory_Vtbl {
     }
 }
 
+/// Standard COM IClassFactory implementation that instantiates `NetFlowWidgetProvider`.
 #[implement(IClassFactory)]
 pub struct NetFlowClassFactory {
     pub state: Arc<Mutex<ProviderState>>,
@@ -111,6 +112,7 @@ impl IclassFactoryImpl for NetFlowClassFactory_Impl {
             *ppvobject = core::ptr::null_mut();
         }
 
+        // COM aggregation is not supported for the widget provider
         if punkouter.as_ref().is_some() {
             return Err(Error::from_hresult(HRESULT(0x80040110_u32 as i32))); // CLASS_E_NOAGGREGATION
         }

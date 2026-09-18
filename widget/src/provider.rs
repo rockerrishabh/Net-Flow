@@ -17,6 +17,7 @@ use net_flow_core::card::{WidgetConfig, build_adaptive_card, build_settings_card
 use net_flow_core::format::SpeedUnit;
 use net_flow_core::{SAMPLING_INTERVAL_MS, UPDATE_INTERVAL_MS};
 
+/// Poison-safe lock acquisition helper to keep the widget server resilient if a thread panics.
 pub trait LockExt<T> {
     fn lock_safe(&self) -> std::sync::MutexGuard<'_, T>;
 }
@@ -27,6 +28,7 @@ impl<T> LockExt<T> for Mutex<T> {
     }
 }
 
+/// Poison-safe RwLock helper.
 pub trait RwLockExt<T> {
     fn read_safe(&self) -> std::sync::RwLockReadGuard<'_, T>;
     fn write_safe(&self) -> std::sync::RwLockWriteGuard<'_, T>;
@@ -41,6 +43,7 @@ impl<T> RwLockExt<T> for RwLock<T> {
     }
 }
 
+/// Maps Windows WidgetSize enum variants to string keys expected by Adaptive Card builders.
 pub fn widget_size_to_str(size: WidgetSize) -> &'static str {
     match size {
         WidgetSize::Small => "Small",
@@ -49,6 +52,7 @@ pub fn widget_size_to_str(size: WidgetSize) -> &'static str {
     }
 }
 
+/// Internal tracking info for each widget instance registered on the board.
 pub struct InternalWidgetInfo {
     pub id: String,
     pub size: WidgetSize,
@@ -59,6 +63,7 @@ pub struct InternalWidgetInfo {
     pub customization_requested_at: Option<Instant>,
 }
 
+/// Shared state synchronized across the COM provider and the background sampling worker thread.
 pub struct ProviderState {
     pub widgets: HashMap<String, InternalWidgetInfo>,
     pub active_count: usize,
@@ -67,7 +72,7 @@ pub struct ProviderState {
     pub worker: Option<WorkerHandle>,
     pub backend: Arc<Mutex<NetworkBackend>>,
     pub latest_snapshot: Arc<RwLock<NetworkSnapshot>>,
-    /// Set when session/chart state must be pushed before the next 1s UI tick.
+    /// Flagged when a user interaction (like resetting session totals) requires an immediate card update.
     pub ui_dirty: Arc<AtomicBool>,
 }
 
@@ -93,6 +98,7 @@ impl ProviderState {
     }
 }
 
+/// Thread join handle and shutdown condition variable for the sampling worker.
 pub struct WorkerHandle {
     pub handle: JoinHandle<()>,
     pub shutdown: Arc<(Mutex<bool>, Condvar)>,
@@ -107,6 +113,7 @@ impl WorkerHandle {
     }
 }
 
+/// Lightweight snapshot of a widget target passed to the worker thread for card pushing.
 pub struct WidgetTarget {
     pub id: String,
     pub size: WidgetSize,
@@ -975,6 +982,8 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
     }
 }
 
+/// Background worker loop that samples network telemetry every 500ms
+/// and pushes updated Adaptive Cards to active board widgets.
 fn worker_loop(
     shutdown: Arc<(Mutex<bool>, Condvar)>,
     state: Arc<Mutex<ProviderState>>,

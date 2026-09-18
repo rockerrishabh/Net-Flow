@@ -12,7 +12,7 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
-/// Represents an active application or service utilizing network connections.
+/// Process telemetry and connection metrics for an active network consumer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActiveAppInfo {
     pub name: String,
@@ -25,9 +25,7 @@ pub struct ActiveAppInfo {
     pub tx_bps: f64,
 }
 
-/// Split a CamelCase / PascalCase identifier into separate words so that
-/// executables like `OmenCommandCenterBackground.exe` read as real product
-/// names instead of one unbreakable string the widget has to cut mid-word.
+/// Splits CamelCase or PascalCase executable names into spaced words (e.g. "OmenCommandCenter" -> "Omen Command Center").
 pub fn split_camel_case(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::with_capacity(input.len() + 4);
@@ -36,8 +34,7 @@ pub fn split_camel_case(input: &str) -> String {
         if i > 0 && c.is_uppercase() {
             let prev = chars[i - 1];
             let next_is_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
-            // "fooBar" / "v2Bar" -> split; "HTTPServer" -> split before "Server"
-            // but keep the acronym itself intact.
+            // Split "fooBar" or "v2Bar"; for acronyms like "HTTPServer", split before "Server"
             if prev.is_lowercase()
                 || prev.is_ascii_digit()
                 || (prev.is_uppercase() && next_is_lower)
@@ -51,7 +48,8 @@ pub fn split_camel_case(input: &str) -> String {
     out
 }
 
-/// Helper to sanitize a raw process binary name into a clean, human-friendly Title Case name.
+/// Cleans raw executable filenames into human-friendly Title Case product names,
+/// stripping common architecture tags, extensions, and normalizing technical acronyms.
 pub fn sanitize_process_name(raw: &str) -> String {
     let mut name = raw;
     for ext in &[".exe", ".EXE", ".dll", ".DLL", ".bin", ".BIN"] {
@@ -134,7 +132,7 @@ pub fn sanitize_process_name(raw: &str) -> String {
     }
 }
 
-/// Infer a sensible emoji icon for an application based on its name keywords.
+/// Assigns a fallback category icon based on common application keywords.
 pub fn infer_app_icon(clean_name: &str) -> &'static str {
     let lower = clean_name.to_lowercase();
     if lower.contains("rust") || lower.contains("cargo") {
@@ -230,7 +228,7 @@ pub fn infer_app_icon(clean_name: &str) -> &'static str {
     }
 }
 
-/// Map a raw executable file name to a user-friendly application display name and icon.
+/// Resolves known process executable names to their official product branding and icon.
 pub fn map_process_to_app(exe_name: &str) -> (String, &'static str) {
     let lower = exe_name.to_lowercase();
     match lower.as_str() {
@@ -628,7 +626,7 @@ fn extract_native_icon_data_uri(path: &str) -> Option<String> {
     }
 }
 
-/// Query the process full executable path, name and I/O byte transfer counters for a given process ID.
+/// Reads process binary path, executable name, and cumulative I/O transfer counters via Win32 APIs.
 pub fn get_process_info_and_io(pid: u32) -> Option<(String, String, u64, u64)> {
     if pid == 0 {
         return None;
@@ -670,7 +668,8 @@ pub fn get_process_info_and_io(pid: u32) -> Option<(String, String, u64, u64)> {
     }
 }
 
-/// Query all active socket connections (TCP IPv4/IPv6 and UDP IPv4/IPv6) and count per PID.
+/// Enumerates active IPv4/IPv6 TCP and UDP sockets from the Windows IP Helper table,
+/// returning the count of open connections per process ID.
 pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
     let mut pid_counts: HashMap<u32, usize> = HashMap::new();
     let mut total_connections = 0usize;
@@ -830,7 +829,7 @@ pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
     (pid_counts, total_connections)
 }
 
-/// Tracks process I/O counters over time to calculate per-process realtime upload and download rates.
+/// Tracks per-process I/O transfer deltas to compute instantaneous transfer rates.
 #[derive(Debug, Default, Clone)]
 pub struct ProcessTracker {
     prev_io: HashMap<u32, (u64, u64)>, // pid -> (read_transfer_count, write_transfer_count)
@@ -847,6 +846,7 @@ impl ProcessTracker {
         self.prev_time = None;
     }
 
+    /// Samples current open socket connections and correlates with process I/O rates.
     pub fn sample(&mut self, now: std::time::Instant) -> (Vec<ActiveAppInfo>, usize) {
         let elapsed_secs = match self.prev_time {
             Some(prev) => {
@@ -917,18 +917,17 @@ impl ProcessTracker {
     }
 }
 
-/// Query all active socket connections grouped by active applications in real time (stateless fallback).
+/// One-shot query of active applications and socket connections without historical delta tracking.
 pub fn query_active_apps() -> (Vec<ActiveAppInfo>, usize) {
     let mut tracker = ProcessTracker::new();
     tracker.sample(std::time::Instant::now())
 }
 
-/// Deterministic and stable ordering for active apps:
-/// - Apps with active bandwidth (>= 1.0 B/s) rank above idle apps (< 1.0 B/s).
-/// - Active apps are sorted primarily by bandwidth descending, then by connection count.
-/// - Idle apps are sorted strictly by connection count descending, then alphabetically by name.
+/// Sorts active applications predictably:
+/// 1. Apps with real bandwidth (>= 1 B/s) appear first, ordered highest-throughput first.
+/// 2. Idle apps appear second, sorted by connection count, then alphabetically.
 ///
-/// This prevents sub-byte I/O noise from causing the active apps list to shuffle when idle.
+/// This avoids list shuffling caused by tiny sub-byte background disk noise.
 pub fn compare_active_apps(a: &ActiveAppInfo, b: &ActiveAppInfo) -> std::cmp::Ordering {
     let rate_a = a.rx_bps + a.tx_bps;
     let rate_b = b.rx_bps + b.tx_bps;
@@ -950,11 +949,6 @@ pub fn compare_active_apps(a: &ActiveAppInfo, b: &ActiveAppInfo) -> std::cmp::Or
     }
 }
 
-/// Reconcile per-process I/O rates with the authoritative physical network throughput.
-///
-/// Process I/O counters on Windows (`GetProcessIoCounters`) aggregate all I/O, including
-/// file reads/writes, pipes, and disk cache. If total network traffic is zero or low,
-/// disk activity must not be reported as internet bandwidth.
 fn is_system_app(app: &ActiveAppInfo) -> bool {
     let lower_proc = app.process_name.to_ascii_lowercase();
     let lower_name = app.name.to_ascii_lowercase();
@@ -969,6 +963,12 @@ fn is_system_app(app: &ActiveAppInfo) -> bool {
         || lower_name.contains("host process")
 }
 
+/// Reconciles process-level I/O counters against physical network adapter throughput.
+///
+/// On Windows, `GetProcessIoCounters` lumps disk reads/writes and named pipes in with socket I/O.
+/// Furthermore, download managers writing incoming stream chunks to disk trigger `WriteFile` (disk write),
+/// while socket reads often bypass process `ReadTransferCount`.
+/// This reconciles directionality and clamps total app bandwidth to the actual physical wire speed.
 pub fn reconcile_app_bandwidth(
     active_apps: &mut [ActiveAppInfo],
     net_rx_bps: f64,
@@ -986,17 +986,10 @@ pub fn reconcile_app_bandwidth(
         return;
     }
 
-    // Directional I/O reconciliation:
-    // When an app downloads files from the internet (e.g. IDM, Steam, browsers, torrents),
-    // it writes incoming chunks to disk (`WriteFile`), incrementing `WriteTransferCount`.
-    // Winsock socket receives (`WSARecv`) do not increment `ReadTransferCount`.
-    // Conversely, when an app uploads files (e.g. OneDrive, cloud sync, web uploads),
-    // it reads data from disk (`ReadFile`), incrementing `ReadTransferCount`.
-    //
-    // Naively mapping `ReadTransferCount` -> `rx_bps` and `WriteTransferCount` -> `tx_bps`
-    // causes file downloads to appear as uploads, and file uploads to appear as downloads.
-    //
-    // We detect impossible directional mismatches against physical adapter throughput:
+    // Directional reconciliation:
+    // If the physical adapter is heavily downloading, apps doing heavy disk writes with socket
+    // connections are streaming data in, so we shift that throughput to download rate.
+    // Conversely, heavy disk reads during an upload burst indicate file uploading.
     if net_rx_bps > 2.0 * net_tx_bps && net_rx_bps > 10_000.0 {
         let mut download_shifted = false;
         for app in active_apps.iter_mut() {

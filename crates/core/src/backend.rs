@@ -116,21 +116,21 @@ pub struct InterfaceSample {
     pub tx_bps: f64,
 }
 
-/// A single bucket in the rolling history buffer representing a fixed-duration time interval.
+/// A fixed-duration telemetry sample representing bandwidth across one bucket (e.g. 500ms).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySample {
-    /// Authoritative byte integral received during this bucket interval.
+    /// Bytes received during this sample bucket.
     #[serde(default)]
     pub rx_bytes: u64,
-    /// Authoritative byte integral transmitted during this bucket interval.
+    /// Bytes transmitted during this sample bucket.
     #[serde(default)]
     pub tx_bytes: u64,
     /// Duration of this bucket in nanoseconds (e.g. 500_000_000 ns for 500ms).
     #[serde(default)]
     pub duration_ns: u64,
-    /// Derived download transfer rate (B/s) over this bucket interval.
+    /// Average download speed in B/s over this interval.
     pub rx_bps: u64,
-    /// Derived upload transfer rate (B/s) over this bucket interval.
+    /// Average upload speed in B/s over this interval.
     pub tx_bps: u64,
 }
 
@@ -168,7 +168,7 @@ impl HistorySample {
     }
 }
 
-/// Persisted session state across widget restarts.
+/// Persistent telemetry metrics saved across widget restarts and session resets.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
     pub session_rx: u64,
@@ -226,9 +226,11 @@ pub fn save_persisted_session_state(state: &SessionState) {
     }
 }
 
-/// Deterministic interval-based telemetry accumulator with cumulative proportional boundary allocation.
-/// Partitions variable sampling intervals into discrete fixed-duration buckets (e.g. 500ms)
-/// with exact byte conservation and zero clock phase drift.
+/// Accumulates measurement intervals and slices them into discrete buckets (default 500ms).
+///
+/// Because timer ticks on Windows can have minor jitter (e.g. 485ms or 515ms),
+/// this distributes bytes proportionally across bucket boundaries so chart points
+/// represent uniform time intervals without dropping or fabricating bytes.
 #[derive(Clone, Debug, Default)]
 pub struct RateAccumulator {
     time_acc_ns: u64,
@@ -263,11 +265,8 @@ impl RateAccumulator {
         self.bytes_tx_acc
     }
 
-    /// Push an observed measurement interval (elapsed_ns, delta_rx, delta_tx) and emit
-    /// any completed buckets of size slot_ns.
-    ///
-    /// Slices are distributed using cumulative proportional allocation to guarantee
-    /// each boundary receives its exact proportional share under piecewise-constant interpolation.
+    /// Pushes an observed time slice (`elapsed_ns`, `delta_rx`, `delta_tx`) and returns
+    /// any completed buckets of duration `slot_ns`.
     pub fn push_sample(
         &mut self,
         elapsed_ns: u64,
@@ -344,7 +343,7 @@ impl RateAccumulator {
     }
 }
 
-/// A single timestamped cumulative counter point for rolling window rate calculation.
+/// Timestamped cumulative byte totals used for boundary interpolation in `RollingRateWindow`.
 #[derive(Clone, Copy, Debug)]
 pub struct CounterPoint {
     pub timestamp: Instant,
@@ -352,7 +351,7 @@ pub struct CounterPoint {
     pub total_tx: u64,
 }
 
-/// Rolling window rate calculator that interpolates exact counter values at window boundaries.
+/// Calculates a smooth 1-second rolling transfer rate by interpolating byte counters at window boundaries.
 #[derive(Clone, Debug)]
 pub struct RollingRateWindow {
     points: VecDeque<CounterPoint>,
@@ -485,20 +484,20 @@ impl RollingRateWindow {
     }
 }
 
-/// Complete snapshot returned by `NetworkBackend::sample()`.
-/// Contains everything the presentation layer needs.
+/// Telemetry snapshot containing current rates, totals, active apps, and chart history.
 #[derive(Debug, Clone)]
 pub struct NetworkSnapshot {
-    /// 1-second rolling download rate (in B/s), smoothly matching the UI refresh cadence.
+    /// 1-second rolling download speed in bytes/sec.
     pub rx_bps: f64,
-    /// 1-second rolling upload rate (in B/s), smoothly matching the UI refresh cadence.
+    /// 1-second rolling upload speed in bytes/sec.
     pub tx_bps: f64,
-    /// Download rate represented by the latest 500ms completed bucket (in B/s).
+    /// Download speed of the most recently finished 500ms bucket.
     pub rx_bps_500ms: u64,
-    /// Upload rate represented by the latest 500ms completed bucket (in B/s).
+    /// Upload speed of the most recently finished 500ms bucket.
     pub tx_bps_500ms: u64,
-    /// Instantaneous measurement interval rate (for internal telemetry / app bandwidth reconciliation).
+    /// Instantaneous download rate over the last raw tick (used for app rate reconciliation).
     pub instant_rx_bps: f64,
+    /// Instantaneous upload rate over the last raw tick (used for app rate reconciliation).
     pub instant_tx_bps: f64,
     pub session_rx: u64,
     pub session_tx: u64,
@@ -518,8 +517,7 @@ pub struct NetworkSnapshot {
 }
 
 impl NetworkSnapshot {
-    /// Compute the peak rx and tx bandwidth across the most recent `sample_count` samples in history.
-    /// Incorporates the current live `rx_bps` / `tx_bps` so the peak is strictly >= current rate.
+    /// Returns the maximum download and upload rate observed across the last `sample_count` history samples.
     pub fn chart_window_peak(&self, sample_count: usize) -> (f64, f64) {
         let count = sample_count.min(self.history.len());
         let mut max_rx = self.rx_bps;
@@ -573,10 +571,10 @@ pub fn compute_delta(prev: u64, curr: u64) -> u64 {
     curr.saturating_sub(prev)
 }
 
+/// Core telemetry backend that queries Windows network adapters, computes bandwidth, and tracks apps.
 pub struct NetworkBackend {
     pub mode: AggregateMode,
-    /// Baseline counters for EVERY interface seen, regardless of mode/status.
-    /// This prevents false rate spikes when an interface cycles Down → Up.
+    /// Baseline byte counts for all known interfaces to avoid spikes when an adapter comes online.
     prev_counters: HashMap<InterfaceLuid, (u64, u64)>,
     prev_time: Option<Instant>,
     pub peak_rx: f64,
@@ -584,17 +582,17 @@ pub struct NetworkBackend {
     pub session_rx: u64,
     pub session_tx: u64,
     pub session_start_unix: u64,
-    /// Rolling FIFO history of aggregate rates.
+    /// Rolling FIFO buffer of fixed-duration bandwidth samples.
     history: VecDeque<HistorySample>,
-    /// State tracker for per-process realtime bandwidth and connection counts.
+    /// Tracks per-process network and disk I/O rates.
     pub process_tracker: crate::process::ProcessTracker,
-    /// Timestamp of the last raw process table sampling pass.
+    /// Last time the process table was refreshed (throttled to 1s).
     last_process_sample: Option<Instant>,
-    /// Cached pre-reconciliation raw output from ProcessTracker.
+    /// Cached un-reconciled apps from the last process tracker pass.
     cached_raw_apps: (Vec<crate::process::ActiveAppInfo>, usize),
-    /// Deterministic integer-nanosecond interval accumulator with cumulative proportional allocation.
+    /// Sub-sample bucket accumulator for fixed 500ms chart slices.
     pub accumulator: RateAccumulator,
-    /// 1-second rolling rate window with boundary counter interpolation.
+    /// Rolling 1-second window for smooth UI headline rates.
     pub rolling_window: RollingRateWindow,
 }
 
@@ -1041,7 +1039,7 @@ unsafe extern "system" {
     fn WlanFreeMemory(pMemory: *mut core::ffi::c_void);
 }
 
-/// Query the active Wi-Fi SSID connected on Windows via WlanAPI.
+/// Queries the SSID of the currently connected Wi-Fi network using the native Windows WlanAPI.
 pub fn query_active_wifi_ssid() -> Option<String> {
     unsafe {
         let mut negotiated = 0u32;
@@ -1116,7 +1114,7 @@ pub fn query_active_wifi_ssid() -> Option<String> {
 static WIFI_SSID_CACHE: std::sync::Mutex<(Option<String>, Option<Instant>)> =
     std::sync::Mutex::new((None, None));
 
-/// Cached lookup of active Wi-Fi SSID with a 2-second TTL to avoid redundant WLAN queries.
+/// Cached Wi-Fi SSID lookup with a 2-second TTL to avoid spamming WlanAPI on every 500ms tick.
 pub fn query_cached_wifi_ssid() -> Option<String> {
     const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = Instant::now();
@@ -1134,7 +1132,7 @@ pub fn query_cached_wifi_ssid() -> Option<String> {
     }
 }
 
-/// Classify an interface row from MIB_IF_ROW2 into an InterfaceCategory and InterfaceMedium.
+/// Identifies adapter category and hardware medium from Windows NDIS driver properties and name strings.
 pub fn classify_interface(
     if_type: i32,
     tunnel_type: i32,
@@ -1221,7 +1219,7 @@ pub fn classify_interface(
     (InterfaceCategory::Physical, InterfaceMedium::Other)
 }
 
-/// Query system network interfaces using IP Helper API GetIfTable2.
+/// Polls all network adapters and current octet transfer counters via Windows `GetIfTable2`.
 pub fn query_interfaces() -> Result<Vec<InterfaceInfo>, String> {
     use windows::Win32::NetworkManagement::IpHelper;
 

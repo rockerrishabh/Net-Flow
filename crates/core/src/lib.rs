@@ -1,14 +1,20 @@
+//! Core network monitoring engine, Adaptive Card templating, and chart rendering
+//! for the Net-Flow Windows 11 widget.
+
+/// Sampling period for network interface polling (2 samples per second).
 pub const SAMPLING_INTERVAL_MS: u64 = 500;
+/// Cadence for pushing updated Adaptive Cards to the Windows Widget Board.
 pub const UPDATE_INTERVAL_MS: u64 = 500;
+/// Maximum rolling history buffer duration in seconds.
 pub const MAX_CHART_WINDOW_SECS: u32 = 60;
 
-/// How many history samples a chart window of `secs` covers at the sampling cadence.
+/// Calculates how many telemetry samples fit into a given chart window duration.
 pub fn history_samples_for_secs(secs: u32) -> usize {
     let secs = u64::from(secs.max(1));
     ((secs * 1000) / SAMPLING_INTERVAL_MS) as usize
 }
 
-/// Allowed history windows: 15, 30, or 60 seconds.
+/// Validates and snaps user-selected chart windows to supported presets (15s, 30s, or 60s).
 pub fn clamp_chart_window(secs: u32) -> u32 {
     match secs {
         15 | 60 => secs,
