@@ -110,13 +110,6 @@ jobs:
           & $makeappx pack /d $layoutDir /p "target/NetFlow.msix" /o
           Write-Host "Packaged target/NetFlow.msix successfully."
 
-      - name: Upload MSIX Artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: NetFlow-MSIX
-          path: target/NetFlow.msix
-          if-no-files-found: error
-
   auto-tag:
     name: Auto Tag on Version Bump
     needs: [test-and-build]
