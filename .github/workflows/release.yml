@@ -1,14 +1,17 @@
-name: Release (GitHub)
+name: Release (GitHub & Microsoft Store)
 
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
   workflow_dispatch:
     inputs:
+      tag_name:
+        description: "Release tag or version (e.g. v0.1.1, leave blank to use Cargo.toml)"
+        required: false
+        default: ""
       draft_release:
-        description: "Create draft GitHub release"
-        required: true
+        description: "Create draft release"
         type: boolean
         default: false
 
@@ -18,11 +21,22 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   WASDK_VERSION: "1.7.250310001"
+  STORE_PACKAGE_IDENTITY_NAME: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
+  STORE_PUBLISHER_ID: ${{ secrets.STORE_PUBLISHER_ID }}
+  STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
+  PARTNER_CENTER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+  PARTNER_CENTER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+  PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+  PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+  STORE_PRODUCT_ID: ${{ secrets.STORE_PRODUCT_ID }}
 
 jobs:
-  build-and-release:
-    name: Build, Package & Create GitHub Release
+  release:
+    name: Build & Publish GitHub Release
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.VERSION }}
+      tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
 
     steps:
       - name: Checkout repository
@@ -69,21 +83,28 @@ jobs:
         id: get_version
         shell: pwsh
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $inputTag = "${{ github.event.inputs.tag_name }}".Trim()
+          $tag = if ($inputTag) { $inputTag } else { $env:GITHUB_REF_NAME }
+
           if ($tag -match '^v?(\d+\.\d+\.\d+(\.\d+)?)$') {
             $ver = $matches[1]
             if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
+            $tagName = if ($tag.StartsWith('v')) { $tag } else { "v$($matches[1])" }
           } else {
             $cargoContent = Get-Content "Cargo.toml" -Raw
             if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
-              $ver = $matches[1]
-              if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
+              $sem = $matches[1]
+              $ver = if ($sem.Split('.').Count -eq 3) { "$sem.0" } else { $sem }
+              $tagName = "v$sem"
             } else {
               $ver = "0.1.0.0"
+              $tagName = "v0.1.0"
             }
           }
           Write-Host "Package Version: $ver"
+          Write-Host "Release Tag    : $tagName"
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+          echo "TAG_NAME=$tagName" >> $env:GITHUB_OUTPUT
 
       - name: Build Release Binary
         run: cargo build --release --workspace
@@ -186,8 +207,8 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
           files: |
             target/net-flow-windows-x64.zip
             target/SHA256SUMS.txt
@@ -196,3 +217,109 @@ jobs:
           generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Store Build Assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-build-assets
+          path: |
+            target/release/net-flow.exe
+            target/layout/resources.pri
+          if-no-files-found: error
+
+  publish-to-store:
+    name: Submit to Microsoft Store
+    needs: [release]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify Partner Center Credentials
+        id: check_creds
+        shell: pwsh
+        run: |
+          if (-not $env:PARTNER_CENTER_CLIENT_ID -or -not $env:STORE_PRODUCT_ID) {
+            Write-Host "::warning::Microsoft Partner Center secrets (PARTNER_CENTER_CLIENT_ID / STORE_PRODUCT_ID) are not configured. Skipping Microsoft Store submission."
+            echo "CONFIGURED=false" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Partner Center credentials detected. Proceeding with Microsoft Store submission."
+            echo "CONFIGURED=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Download Store Build Assets
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: store-build-assets
+          path: target/store_input
+
+      - name: Stage & Pack Store MSIX
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        shell: pwsh
+        run: |
+          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+          $makeappx = Join-Path $sdkBin "makeappx.exe"
+          if (-not (Test-Path $makeappx)) {
+            $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $makeappx) { throw "makeappx.exe not found!" }
+
+          $layoutDir = "target/msix_store"
+          if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
+
+          $exeFile = Get-ChildItem "target/store_input" -Recurse -Filter "net-flow.exe" | Select-Object -First 1
+          $priFile = Get-ChildItem "target/store_input" -Recurse -Filter "resources.pri" | Select-Object -First 1
+          if (-not $exeFile) { throw "net-flow.exe not found in downloaded build assets!" }
+          if (-not $priFile) { throw "resources.pri not found in downloaded build assets!" }
+
+          Copy-Item $exeFile.FullName (Join-Path $layoutDir "net-flow.exe") -Force
+          Copy-Item $priFile.FullName (Join-Path $layoutDir "resources.pri") -Force
+
+          # Dynamically inject Partner Center identity details into manifest
+          $manifestContent = Get-Content "widget/Package.appxmanifest" -Raw
+          $targetVer = "${{ needs.release.outputs.version }}"
+          if ($targetVer) {
+            $manifestContent = $manifestContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $targetVer
+          }
+          if ($env:STORE_PACKAGE_IDENTITY_NAME) {
+            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sName=")[^"]+', $env:STORE_PACKAGE_IDENTITY_NAME
+          }
+          if ($env:STORE_PUBLISHER_ID) {
+            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sPublisher=")[^"]+', $env:STORE_PUBLISHER_ID
+          }
+          if ($env:STORE_PUBLISHER_DISPLAY_NAME) {
+            $manifestContent = $manifestContent -replace '(?<=<PublisherDisplayName>)[^<]+', $env:STORE_PUBLISHER_DISPLAY_NAME
+          }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText("$layoutDir/AppxManifest.xml", $manifestContent, $utf8NoBom)
+
+          if (Test-Path "widget/Assets") {
+            Copy-Item "widget/Assets" "$layoutDir/Assets" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path "$layoutDir/Public" | Out-Null
+
+          $storeMsixPath = "target/NetFlow_Store.msix"
+          if (Test-Path $storeMsixPath) { Remove-Item $storeMsixPath -Force }
+          & $makeappx pack /d $layoutDir /p $storeMsixPath /o
+          Write-Host "Packed $storeMsixPath for Microsoft Store successfully."
+
+      - name: Setup Microsoft Store Developer CLI
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        uses: microsoft/microsoft-store-apppublisher@v1.4
+
+      - name: Publish to Microsoft Store
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        shell: pwsh
+        run: |
+          Write-Host "Configuring Microsoft Store Developer CLI credentials..."
+          msstore reconfigure `
+            --tenantId "$env:PARTNER_CENTER_TENANT_ID" `
+            --sellerId "$env:PARTNER_CENTER_SELLER_ID" `
+            --clientId "$env:PARTNER_CENTER_CLIENT_ID" `
+            --clientSecret "$env:PARTNER_CENTER_CLIENT_SECRET"
+
+          Write-Host "Publishing submission for Product ID $env:STORE_PRODUCT_ID..."
+          msstore submission publish "$env:STORE_PRODUCT_ID" --packagePath "target/NetFlow_Store.msix"
+          Write-Host "Submission published to Microsoft Store successfully! Partner Center will certify and release to catalog."

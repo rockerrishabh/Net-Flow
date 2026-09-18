@@ -116,3 +116,47 @@ jobs:
           name: NetFlow-MSIX
           path: target/NetFlow.msix
           if-no-files-found: error
+
+  auto-tag:
+    name: Auto Tag on Version Bump
+    needs: [test-and-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check version and trigger release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $cargoContent = Get-Content "Cargo.toml" -Raw
+          if (-not ($cargoContent -match 'version\s*=\s*"([^"]+)"')) {
+            Write-Host "Could not find version in Cargo.toml. Skipping auto-tag."
+            exit 0
+          }
+          $ver = $matches[1]
+          $tag = "v$ver"
+          Write-Host "Checking if tag $tag exists on remote..."
+
+          $remoteTag = git ls-remote --tags origin "refs/tags/$tag"
+          if ($remoteTag) {
+            Write-Host "Tag $tag already exists on remote. No new version bump detected."
+            exit 0
+          }
+
+          Write-Host "New version detected: $ver! Creating tag $tag..."
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a $tag -m "Release $tag"
+          git push origin $tag
+
+          Write-Host "Tag $tag pushed successfully. Triggering Release workflow..."
+          gh workflow run release.yml -f tag_name=$tag
