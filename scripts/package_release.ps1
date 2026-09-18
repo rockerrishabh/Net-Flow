@@ -162,55 +162,40 @@ if (-not $SkipMsix) {
     Write-Host "`n--- [Step 2/5] Skipping MSIX Packaging (-SkipMsix specified) ---" -ForegroundColor Yellow
 }
 
-# 4. Assemble Portable Archive (net-flow-windows-x64.zip)
+# 4. Assemble Release Archive (net-flow-windows-x64.zip)
 $zipPath = Join-Path $TargetDir "net-flow-windows-x64.zip"
 if (-not $SkipZip) {
-    Write-Host "`n--- [Step 3/5] Assembling Portable Archive ($zipPath) ---" -ForegroundColor Cyan
+    Write-Host "`n--- [Step 3/5] Assembling Release Archive ($zipPath) ---" -ForegroundColor Cyan
     $portableStage = Join-Path $TargetDir "portable"
     if (Test-Path $portableStage) { Remove-Item $portableStage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $portableStage | Out-Null
 
-    Copy-Item $releaseExe (Join-Path $portableStage "net-flow.exe") -Force
-    Copy-Item (Join-Path $RootDir "widget\Assets") (Join-Path $portableStage "Assets") -Recurse -Force
-    Copy-Item (Join-Path $RootDir "README.md") (Join-Path $portableStage "README.md") -Force
-    Copy-Item (Join-Path $RootDir "LICENSE-MIT") (Join-Path $portableStage "LICENSE-MIT") -Force
-    Copy-Item (Join-Path $RootDir "LICENSE-APACHE") (Join-Path $portableStage "LICENSE-APACHE") -Force
-
-    $regScript = Join-Path $RootDir "scripts\register.ps1"
-    if (Test-Path $regScript) {
-        Copy-Item $regScript (Join-Path $portableStage "register.ps1") -Force
-    }
-
-    $manifestPath = Join-Path $layoutDir "AppxManifest.xml"
-    if (-not (Test-Path $manifestPath)) {
-        $srcManifest = Join-Path $RootDir "widget\Package.appxmanifest"
-        if (Test-Path $srcManifest) {
-            $mContent = Get-Content $srcManifest -Raw
-            $quadVer = if ($Version.Split('.').Count -eq 3) { "$Version.0" } else { $Version }
-            $mContent = $mContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $quadVer
-            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText((Join-Path $portableStage "AppxManifest.xml"), $mContent, $utf8NoBom)
-        }
+    if (Test-Path $msixPath) {
+        Copy-Item $msixPath (Join-Path $portableStage "NetFlow.msix") -Force
     } else {
-        Copy-Item $manifestPath (Join-Path $portableStage "AppxManifest.xml") -Force
-    }
-
-    $priPath = Join-Path $layoutDir "resources.pri"
-    if (Test-Path $priPath) {
-        Copy-Item $priPath (Join-Path $portableStage "resources.pri") -Force
+        throw "NetFlow.msix not found at $msixPath! Ensure MSIX step ran."
     }
 
     if (Test-Path $cerPath) {
         Copy-Item $cerPath (Join-Path $portableStage "NetFlow_Sideload_Cert.cer") -Force
     }
 
+    $installScript = Join-Path $RootDir "scripts\install.ps1"
+    if (Test-Path $installScript) {
+        Copy-Item $installScript (Join-Path $portableStage "install.ps1") -Force
+    }
+
+    Copy-Item (Join-Path $RootDir "README.md") (Join-Path $portableStage "README.md") -Force
+    Copy-Item (Join-Path $RootDir "LICENSE-MIT") (Join-Path $portableStage "LICENSE-MIT") -Force
+    Copy-Item (Join-Path $RootDir "LICENSE-APACHE") (Join-Path $portableStage "LICENSE-APACHE") -Force
+
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path (Join-Path $portableStage "*") -DestinationPath $zipPath -Force
     Remove-Item $portableStage -Recurse -Force -ErrorAction SilentlyContinue
 
-    Write-Host "Portable archive created successfully: $zipPath" -ForegroundColor Green
+    Write-Host "Release archive created successfully: $zipPath" -ForegroundColor Green
 } else {
-    Write-Host "`n--- [Step 3/5] Skipping Portable Zip (-SkipZip specified) ---" -ForegroundColor Yellow
+    Write-Host "`n--- [Step 3/5] Skipping Release Zip (-SkipZip specified) ---" -ForegroundColor Yellow
 }
 
 # 5. Extract Release Notes from CHANGELOG.md
@@ -237,7 +222,7 @@ if (Test-Path $changelogPath) {
 # 6. Generate Checksums (SHA256SUMS.txt)
 Write-Host "`n--- [Step 5/5] Generating SHA256SUMS.txt Checksums ---" -ForegroundColor Cyan
 $sumsPath = Join-Path $TargetDir "SHA256SUMS.txt"
-$filesToCheck = @($msixPath, $zipPath, $cerPath)
+$filesToCheck = @($zipPath)
 $checksumLines = @()
 $summaryRows = @()
 

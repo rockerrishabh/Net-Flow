@@ -194,39 +194,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signtool failed!" }
           Write-Host "Signed target/NetFlow.msix successfully."
 
-      - name: Create Portable Zip Package
+      - name: Create Release Zip Package
         shell: pwsh
         run: |
           $zipStage = "target/portable"
           if (Test-Path $zipStage) { Remove-Item $zipStage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $zipStage | Out-Null
 
-          Copy-Item "target/release/net-flow.exe" (Join-Path $zipStage "net-flow.exe") -Force
-          Copy-Item "widget/Assets" (Join-Path $zipStage "Assets") -Recurse -Force
+          Copy-Item "target/NetFlow.msix" (Join-Path $zipStage "NetFlow.msix") -Force
+          Copy-Item "target/NetFlow_Sideload_Cert.cer" (Join-Path $zipStage "NetFlow_Sideload_Cert.cer") -Force
+          Copy-Item "scripts/install.ps1" (Join-Path $zipStage "install.ps1") -Force
           Copy-Item "README.md" (Join-Path $zipStage "README.md") -Force
           Copy-Item "LICENSE-MIT" (Join-Path $zipStage "LICENSE-MIT") -Force
           Copy-Item "LICENSE-APACHE" (Join-Path $zipStage "LICENSE-APACHE") -Force
-
-          if (Test-Path "scripts/register.ps1") {
-            Copy-Item "scripts/register.ps1" (Join-Path $zipStage "register.ps1") -Force
-          }
-          if (Test-Path "target/msix/AppxManifest.xml") {
-            Copy-Item "target/msix/AppxManifest.xml" (Join-Path $zipStage "AppxManifest.xml") -Force
-          } elseif (Test-Path "widget/Package.appxmanifest") {
-            Copy-Item "widget/Package.appxmanifest" (Join-Path $zipStage "AppxManifest.xml") -Force
-          }
-          if (Test-Path "target/msix/resources.pri") {
-            Copy-Item "target/msix/resources.pri" (Join-Path $zipStage "resources.pri") -Force
-          }
-          if (Test-Path "target/NetFlow_Sideload_Cert.cer") {
-            Copy-Item "target/NetFlow_Sideload_Cert.cer" (Join-Path $zipStage "NetFlow_Sideload_Cert.cer") -Force
-          }
 
           $zipPath = "target/net-flow-windows-x64.zip"
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           Compress-Archive -Path (Join-Path $zipStage "*") -DestinationPath $zipPath -Force
           Remove-Item $zipStage -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Created portable archive: $zipPath"
+          Write-Host "Created release archive: $zipPath"
 
       - name: Extract Release Notes from CHANGELOG
         shell: pwsh
@@ -253,7 +239,7 @@ jobs:
       - name: Generate Checksums
         shell: pwsh
         run: |
-          $files = @("target/NetFlow.msix", "target/net-flow-windows-x64.zip", "target/NetFlow_Sideload_Cert.cer")
+          $files = @("target/net-flow-windows-x64.zip")
           $sums = @()
           foreach ($file in $files) {
             if (Test-Path $file) {
@@ -271,9 +257,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           files: |
-            target/NetFlow.msix
             target/net-flow-windows-x64.zip
-            target/NetFlow_Sideload_Cert.cer
             target/SHA256SUMS.txt
           body_path: target/RELEASE_NOTES.md
           draft: ${{ github.event.inputs.draft_release == 'true' }}

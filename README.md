@@ -56,8 +56,11 @@ Once installed:
 2. Click **+** (**Add Widgets**) in the top-right corner.
 3. Select **Net Flow** and pin your preferred size (Small, Medium, or Large).
 
-### 3. Portable Archive
-Download the standalone `net-flow-windows-x64.zip` directly from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases).
+### 3. Sideload Release Bundle
+1. Download `net-flow-windows-x64.zip` from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases).
+2. Extract the archive.
+3. Run `.\install.ps1` in PowerShell (or right-click `install.ps1` → **Run with PowerShell**).
+The installer automatically trusts the signing certificate in `CurrentUser\TrustedPeople` and installs `NetFlow.msix` into Windows.
 
 ---
 
