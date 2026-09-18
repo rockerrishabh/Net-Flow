@@ -20,13 +20,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
       - name: Cache Windows App SDK WinMD
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: widget/winmd/
           key: ${{ runner.os }}-wasdk-winmd-${{ env.WASDK_VERSION }}
