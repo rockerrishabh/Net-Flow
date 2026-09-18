@@ -110,7 +110,6 @@ function Install-SideloadCert {
         }
 
         # Attempt direct machine store import (works if terminal is elevated)
-
         try {
             Import-Certificate -CertStoreLocation "Cert:\LocalMachine\Root" -FilePath $resolvedCer -ErrorAction Stop | Out-Null
             Import-Certificate -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -FilePath $resolvedCer -ErrorAction SilentlyContinue | Out-Null
@@ -125,7 +124,6 @@ function Install-SideloadCert {
                 $argList = "-NoProfile -ExecutionPolicy Bypass -Command `"Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\Root' -FilePath '$resolvedCer'; Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -FilePath '$resolvedCer'`""
                 $proc = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList $argList
                 if ($proc.ExitCode -eq 0) {
-                    
                     Write-Host "Certificate installed to LocalMachine\Root successfully." -ForegroundColor Green
                 }
             }
