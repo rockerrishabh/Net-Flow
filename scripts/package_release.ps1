@@ -182,9 +182,19 @@ if (-not $SkipZip) {
     }
 
     $manifestPath = Join-Path $layoutDir "AppxManifest.xml"
-    if (Test-Path $manifestPath) {
+    if (-not (Test-Path $manifestPath)) {
+        $srcManifest = Join-Path $RootDir "widget\Package.appxmanifest"
+        if (Test-Path $srcManifest) {
+            $mContent = Get-Content $srcManifest -Raw
+            $quadVer = if ($Version.Split('.').Count -eq 3) { "$Version.0" } else { $Version }
+            $mContent = $mContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $quadVer
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText((Join-Path $portableStage "AppxManifest.xml"), $mContent, $utf8NoBom)
+        }
+    } else {
         Copy-Item $manifestPath (Join-Path $portableStage "AppxManifest.xml") -Force
     }
+
     $priPath = Join-Path $layoutDir "resources.pri"
     if (Test-Path $priPath) {
         Copy-Item $priPath (Join-Path $portableStage "resources.pri") -Force

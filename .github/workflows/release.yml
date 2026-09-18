@@ -212,6 +212,8 @@ jobs:
           }
           if (Test-Path "target/msix/AppxManifest.xml") {
             Copy-Item "target/msix/AppxManifest.xml" (Join-Path $zipStage "AppxManifest.xml") -Force
+          } elseif (Test-Path "widget/Package.appxmanifest") {
+            Copy-Item "widget/Package.appxmanifest" (Join-Path $zipStage "AppxManifest.xml") -Force
           }
           if (Test-Path "target/msix/resources.pri") {
             Copy-Item "target/msix/resources.pri" (Join-Path $zipStage "resources.pri") -Force
