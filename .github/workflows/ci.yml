@@ -137,19 +137,36 @@ jobs:
           }
           $ver = $matches[1]
           $tag = "v$ver"
-          Write-Host "Checking if tag $tag exists on remote..."
 
-          $remoteTag = git ls-remote --tags origin "refs/tags/$tag"
-          if ($remoteTag) {
-            Write-Host "Tag $tag already exists on remote. No new version bump detected."
+          Write-Host "Checking if GitHub Release exists for $tag..."
+          $releaseExists = $false
+          try {
+            $null = gh release view $tag 2>&1
+            if ($LASTEXITCODE -eq 0) {
+              $releaseExists = $true
+            }
+          } catch {}
+
+          if ($releaseExists) {
+            Write-Host "GitHub Release $tag already exists. No new release needed."
             exit 0
           }
 
-          Write-Host "New version detected: $ver! Creating tag $tag..."
+          Write-Host "No GitHub Release found for $tag! Preparing release..."
+
+          $remoteTag = git ls-remote --tags origin "refs/tags/$tag"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a $tag -m "Release $tag"
-          git push origin $tag
 
-          Write-Host "Tag $tag pushed successfully. Triggering Release workflow..."
+          if ($remoteTag) {
+            Write-Host "Tag $tag exists on remote. Updating tag to current commit..."
+            git tag -f -a $tag -m "Release $tag"
+            git push origin $tag --force
+          } else {
+            Write-Host "Creating tag $tag on current commit..."
+            git tag -a $tag -m "Release $tag"
+            git push origin $tag
+          }
+
+          Write-Host "Tag $tag ready. Triggering Release workflow..."
           gh workflow run release.yml -f tag_name=$tag
