@@ -104,7 +104,8 @@ net-flow/
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                     # Continuous integration & MSIX packaging validation
-│       └── publish.yml                # Release pipeline & Microsoft Store submission
+│       ├── release.yml                # GitHub Release pipeline (triggered on Git tags)
+│       └── store-publish.yml          # Microsoft Store submission pipeline (manual dispatch)
 ├── crates/
 │   └── core/                          # net-flow-core (pure Rust core logic)
 │       ├── src/
@@ -167,7 +168,8 @@ cargo build --release --workspace
 Net Flow includes automated GitHub Actions workflows:
 
 1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 75 unit tests, and verifies MSIX layout packaging.
-2. **`publish.yml`**: Triggered on Git tags (e.g. `v0.1.0`) or manual workflow dispatch. Builds the optimized binary, injects Partner Center secrets into the manifest, packages the MSIX, publishes GitHub Releases, and submits the update to the **Microsoft Store** via the Store Submission API.
+2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.0`) or manual workflow dispatch. Builds the optimized binary, packages the MSIX, creates public sideload certificates, computes SHA256 checksums, extracts release notes from `CHANGELOG.md`, and publishes the **GitHub Release**.
+3. **`store-publish.yml`**: Triggered manually via workflow dispatch. Builds the Store MSIX with Partner Center credentials and submits updates to the **Microsoft Store** via the Store Submission API.
 
 ---
 

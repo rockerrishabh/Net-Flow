@@ -104,8 +104,12 @@ When proposing changes, keep the following core design principles in mind:
 
 - **Local Sideloading (`scripts/setup_msix.ps1`)**:
   Builds, signs with a local developer test certificate (`CN=NetFlow-Dev-Test`), and registers the package on your machine for live testing in the Windows 11 Widgets Board.
-- **Automated CI/CD Releases (`.github/workflows/publish.yml`)**:
-  Triggered by release tags (`vX.Y.Z`). Automatically runs tests, builds optimized binaries with LTO, creates GitHub Releases, and uploads to the Microsoft Store via GitHub repository secrets.
+- **Local Release Packaging (`scripts/package_release.ps1`)**:
+  Packages, signs, bundles the portable zip archive (`net-flow-windows-x64.zip`), extracts changelog notes, and generates SHA256 checksums locally.
+- **Automated GitHub Releases (`.github/workflows/release.yml`)**:
+  Triggered by release tags (`vX.Y.Z`). Automatically runs tests, builds optimized binaries with LTO, and creates GitHub Releases with MSIX, portable ZIP, cert, and release notes.
+- **Microsoft Store Publishing (`.github/workflows/store-publish.yml`)**:
+  Triggered manually via workflow dispatch. Injects Partner Center credentials, packages the Store MSIX, and publishes submissions to the Microsoft Store.
 
 ---
 

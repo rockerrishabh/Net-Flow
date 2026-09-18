@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Achieved a compact **1.24 MB** standalone release binary.
 - **Packaging & Publishing Pipeline**:
   - Store-ready MSIX packaging pipeline for automated Microsoft Partner Center ingestion.
-  - Automated GitHub Actions workflows for continuous integration (`ci.yml`) and store publishing (`publish.yml`).
+  - Automated GitHub Actions workflows for continuous integration (`ci.yml`), GitHub Releases (`release.yml`), and store publishing (`store-publish.yml`).
   - Single source of truth versioning automatically synchronized from `Cargo.toml`.
 - **Comprehensive Test Suite**:
   - 75 automated unit tests covering bandwidth allocation math, history ring buffers, card templates, and lock poison recovery.

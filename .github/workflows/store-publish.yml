@@ -1,24 +1,15 @@
-name: Release & Publish to Microsoft Store
+name: Publish to Microsoft Store
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      publish_to_store:
-        description: "Publish submission to Microsoft Store"
-        required: true
-        type: boolean
-        default: true
-      draft_release:
-        description: "Create draft GitHub release"
-        required: true
-        type: boolean
-        default: false
+      version_override:
+        description: "Package version (e.g. 0.1.0.0, leave empty to read from Cargo.toml)"
+        required: false
+        default: ""
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,12 +22,10 @@ env:
   PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
   PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
   STORE_PRODUCT_ID: ${{ secrets.STORE_PRODUCT_ID }}
-  PFX_BASE64: ${{ secrets.PFX_BASE64 }}
-  PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
 
 jobs:
-  build-and-publish:
-    name: Build, Package & Publish
+  publish-to-store:
+    name: Build, Package & Submit to Partner Center
     runs-on: windows-latest
 
     steps:
@@ -85,13 +74,13 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --verbose
 
-      - name: Extract Tag / Version
+      - name: Resolve Store Package Version
         id: get_version
         shell: pwsh
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          if ($tag -match '^v?(\d+\.\d+\.\d+(\.\d+)?)$') {
-            $ver = $matches[1]
+          $inputVer = "${{ github.event.inputs.version_override }}".Trim()
+          if ($inputVer -ne '') {
+            $ver = $inputVer
             if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
           } else {
             $cargoContent = Get-Content "Cargo.toml" -Raw
@@ -102,13 +91,13 @@ jobs:
               $ver = "0.1.0.0"
             }
           }
-          Write-Host "Package Version: $ver"
+          Write-Host "Store Package Version: $ver"
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
 
       - name: Build Release Binary
         run: cargo build --release --workspace
 
-      - name: Stage & Pack MSIX
+      - name: Stage & Pack Store MSIX
         shell: pwsh
         run: |
           $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
@@ -118,13 +107,13 @@ jobs:
           }
           if (-not $makeappx) { throw "makeappx.exe not found!" }
 
-          $layoutDir = "target/msix"
+          $layoutDir = "target/msix_store"
           if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
 
           Copy-Item "target/release/net-flow.exe" $layoutDir -Force
 
-          # Dynamically inject version and secrets into manifest
+          # Dynamically inject Partner Center identity details into manifest
           $manifestContent = Get-Content "widget/Package.appxmanifest" -Raw
           $targetVer = "${{ steps.get_version.outputs.VERSION }}"
           if ($targetVer) {
@@ -158,81 +147,21 @@ jobs:
             Remove-Item $priconfig -Force -ErrorAction SilentlyContinue
           }
 
-          & $makeappx pack /d $layoutDir /p "target/NetFlow.msix" /o
-          Write-Host "Packed target/NetFlow.msix"
-
-      - name: Sign MSIX (Secret Certificate or Self-Signed Sideload Cert)
-        shell: pwsh
-        run: |
-          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
-          $signtool = Join-Path $sdkBin "signtool.exe"
-          if (-not (Test-Path $signtool)) {
-            $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-          }
-          if (-not $signtool) { throw "signtool.exe not found!" }
-
-          $pfxPath = "$env:TEMP/signing_cert.pfx"
-          $password = "NetFlowDev123!"
-
-          if ($env:PFX_BASE64) {
-            Write-Host "Using provided PFX_BASE64 secret..."
-            [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:PFX_BASE64))
-            if ($env:PFX_PASSWORD) { $password = $env:PFX_PASSWORD }
-          } else {
-            Write-Host "No PFX_BASE64 secret provided; generating CI self-signed certificate for sideloading..."
-            $publisher = "CN=Development"
-            if ($env:STORE_PUBLISHER_ID) {
-              $publisher = $env:STORE_PUBLISHER_ID
-            }
-            $cert = New-SelfSignedCertificate `
-              -Type Custom `
-              -Subject "$publisher" `
-              -KeyUsage DigitalSignature `
-              -FriendlyName "Net Flow Sideload Signing" `
-              -CertStoreLocation "Cert:\CurrentUser\My" `
-              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-
-            $secPwd = ConvertTo-SecureString $password -AsPlainText -Force
-            Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPwd | Out-Null
-            
-            # Export public .cer for users to install for sideloading
-            $cerPath = "target/NetFlow_Sideload_Cert.cer"
-            [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-            Write-Host "Exported public sideload cert to $cerPath"
-          }
-
-          & $signtool sign /fd SHA256 /f $pfxPath /p $password "target/NetFlow.msix"
-          if ($LASTEXITCODE -ne 0) { throw "signtool failed!" }
-          Write-Host "Signed target/NetFlow.msix successfully."
-
-      - name: Create Portable Zip Package
-        shell: pwsh
-        run: |
-          $zipPath = "target/net-flow-windows-x64.zip"
-          Compress-Archive -Path "target/release/net-flow.exe", "widget/Assets", "README.md", "LICENSE-MIT", "LICENSE-APACHE" -DestinationPath $zipPath -Force
-          Write-Host "Created portable archive: $zipPath"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-        with:
-          files: |
-            target/NetFlow.msix
-            target/net-flow-windows-x64.zip
-            target/NetFlow_Sideload_Cert.cer
-          draft: ${{ github.event.inputs.draft_release == 'true' }}
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          $storeMsixPath = "target/NetFlow_Store.msix"
+          if (Test-Path $storeMsixPath) { Remove-Item $storeMsixPath -Force }
+          & $makeappx pack /d $layoutDir /p $storeMsixPath /o
+          Write-Host "Packed $storeMsixPath for Microsoft Store"
 
       - name: Setup Microsoft Store Developer CLI
-        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '') && (env.STORE_PRODUCT_ID != '')
         uses: microsoft/microsoft-store-apppublisher@v1.4
 
       - name: Publish to Microsoft Store
-        if: (github.event.inputs.publish_to_store != 'false') && (env.PARTNER_CENTER_TENANT_ID != '') && (env.STORE_PRODUCT_ID != '')
         shell: pwsh
         run: |
+          if (-not $env:PARTNER_CENTER_TENANT_ID -or -not $env:STORE_PRODUCT_ID) {
+            throw "Missing Partner Center secrets (PARTNER_CENTER_TENANT_ID or STORE_PRODUCT_ID)!"
+          }
+
           Write-Host "Configuring Microsoft Store Developer CLI credentials..."
           msstore reconfigure `
             --tenantId "$env:PARTNER_CENTER_TENANT_ID" `
@@ -241,5 +170,5 @@ jobs:
             --clientSecret "$env:PARTNER_CENTER_CLIENT_SECRET"
 
           Write-Host "Publishing submission for Product ID $env:STORE_PRODUCT_ID..."
-          msstore submission publish "$env:STORE_PRODUCT_ID" --packagePath "target/NetFlow.msix"
+          msstore submission publish "$env:STORE_PRODUCT_ID" --packagePath "target/NetFlow_Store.msix"
           Write-Host "Submission published to Microsoft Store successfully!"
