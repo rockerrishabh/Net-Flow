@@ -170,14 +170,19 @@ if (-not $SkipZip) {
     if (Test-Path $portableStage) { Remove-Item $portableStage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $portableStage | Out-Null
 
-    if (Test-Path $msixPath) {
-        Copy-Item $msixPath (Join-Path $portableStage "NetFlow.msix") -Force
-    } else {
-        throw "NetFlow.msix not found at $msixPath! Ensure MSIX step ran."
-    }
+    Copy-Item $releaseExe (Join-Path $portableStage "net-flow.exe") -Force
+    Copy-Item (Join-Path $RootDir "widget\Assets") (Join-Path $portableStage "Assets") -Recurse -Force
 
-    if (Test-Path $cerPath) {
-        Copy-Item $cerPath (Join-Path $portableStage "NetFlow_Sideload_Cert.cer") -Force
+    $manifestSrc = Join-Path $RootDir "widget\Package.appxmanifest"
+    $manifestContent = Get-Content $manifestSrc -Raw
+    $quadVer = if ($Version.Split('.').Count -eq 3) { "$Version.0" } else { $Version }
+    $manifestContent = $manifestContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $quadVer
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText((Join-Path $portableStage "AppxManifest.xml"), $manifestContent, $utf8NoBom)
+
+    $priPath = Join-Path $layoutDir "resources.pri"
+    if (Test-Path $priPath) {
+        Copy-Item $priPath (Join-Path $portableStage "resources.pri") -Force
     }
 
     $installScript = Join-Path $RootDir "scripts\install.ps1"

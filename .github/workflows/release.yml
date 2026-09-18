@@ -18,7 +18,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   WASDK_VERSION: "1.7.250310001"
-  PFX_PASSWORD: ${{ secrets.PFX_PASSWORD }}
 
 jobs:
   build-and-release:
@@ -89,71 +88,27 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --workspace
 
-      - name: Generate Code Signing Certificate
-        id: prep_cert
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) {
-            throw "Secret PFX_PASSWORD is not configured! Please configure PFX_PASSWORD in repository secrets."
-          }
-          $password = $env:PFX_PASSWORD.Trim().Trim('"').Trim("'")
-
-          # Read publisher directly from manifest to ensure 100% sync
-          $publisher = "CN=Development"
-          $manifestSrc = "widget/Package.appxmanifest"
-          if (Test-Path $manifestSrc) {
-            $mContent = Get-Content $manifestSrc -Raw
-            if ($mContent -match 'Publisher="([^"]+)"') { $publisher = $matches[1] }
-          }
-          Write-Host "Generating code signing certificate with Subject: $publisher..."
-
-          $cert = New-SelfSignedCertificate `
-            -Type Custom `
-            -Subject "$publisher" `
-            -KeyUsage DigitalSignature `
-            -FriendlyName "Net Flow Sideload Signing" `
-            -CertStoreLocation "Cert:\CurrentUser\My" `
-            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-
-          $pfxPath = "$env:TEMP/signing_cert.pfx"
-          $secPwd = ConvertTo-SecureString $password -AsPlainText -Force
-          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPwd | Out-Null
-          Write-Host "Exported encrypted PFX to $pfxPath"
-
-          $cerPath = "target/NetFlow_Sideload_Cert.cer"
-          New-Item -ItemType Directory -Force -Path "target" | Out-Null
-          [System.IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
-          Write-Host "Exported public sideload cert to $cerPath"
-
-          echo "PUBLISHER=$publisher" >> $env:GITHUB_OUTPUT
-          echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
-          echo "CERT_PASS=$password" >> $env:GITHUB_ENV
-
-      - name: Stage & Pack MSIX
+      - name: Generate Resources PRI & Prepare Manifest
         shell: pwsh
         run: |
           $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
-          $makeappx = Join-Path $sdkBin "makeappx.exe"
-          if (-not (Test-Path $makeappx)) {
-            $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
+          $makepri = Join-Path $sdkBin "makepri.exe"
+          if (-not (Test-Path $makepri)) {
+            $makepri = (Get-Command makepri.exe -ErrorAction SilentlyContinue).Source
           }
-          if (-not $makeappx) { throw "makeappx.exe not found!" }
+          if (-not $makepri) { throw "makepri.exe not found!" }
 
-          $layoutDir = "target/msix"
+          $layoutDir = "target/layout"
           if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
 
           Copy-Item "target/release/net-flow.exe" $layoutDir -Force
 
-          # Dynamically inject version and publisher into manifest
+          # Dynamically inject version into manifest
           $manifestContent = Get-Content "widget/Package.appxmanifest" -Raw
           $targetVer = "${{ steps.get_version.outputs.VERSION }}"
           if ($targetVer) {
             $manifestContent = $manifestContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $targetVer
-          }
-          $publisher = "${{ steps.prep_cert.outputs.PUBLISHER }}"
-          if ($publisher) {
-            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sPublisher=")[^"]+', $publisher
           }
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [System.IO.File]::WriteAllText("$layoutDir/AppxManifest.xml", $manifestContent, $utf8NoBom)
@@ -163,36 +118,11 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path "$layoutDir/Public" | Out-Null
 
-          $makepri = Join-Path $sdkBin "makepri.exe"
-          if (-not (Test-Path $makepri)) {
-            $makepri = (Get-Command makepri.exe -ErrorAction SilentlyContinue).Source
-          }
-          if ($makepri) {
-            $priconfig = "$layoutDir/priconfig.xml"
-            & $makepri createconfig /cf $priconfig /dq "en-US" /pv "10.0.0" /o | Out-Null
-            & $makepri new /pr $layoutDir /cf $priconfig /of "$layoutDir/resources.pri" /o | Out-Null
-            Remove-Item $priconfig -Force -ErrorAction SilentlyContinue
-          }
-
-          & $makeappx pack /d $layoutDir /p "target/NetFlow.msix" /o
-          Write-Host "Packed target/NetFlow.msix"
-
-      - name: Sign MSIX
-        shell: pwsh
-        run: |
-          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
-          $signtool = Join-Path $sdkBin "signtool.exe"
-          if (-not (Test-Path $signtool)) {
-            $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-          }
-          if (-not $signtool) { throw "signtool.exe not found!" }
-
-          $pfxPath = "${{ steps.prep_cert.outputs.PFX_PATH }}"
-          $password = $env:CERT_PASS
-
-          & $signtool sign /fd SHA256 /f $pfxPath /p $password "target/NetFlow.msix"
-          if ($LASTEXITCODE -ne 0) { throw "signtool failed!" }
-          Write-Host "Signed target/NetFlow.msix successfully."
+          $priconfig = "$layoutDir/priconfig.xml"
+          & $makepri createconfig /cf $priconfig /dq "en-US" /pv "10.0.0" /o | Out-Null
+          & $makepri new /pr $layoutDir /cf $priconfig /of "$layoutDir/resources.pri" /o | Out-Null
+          Remove-Item $priconfig -Force -ErrorAction SilentlyContinue
+          Write-Host "Generated resources.pri successfully."
 
       - name: Create Release Zip Package
         shell: pwsh
@@ -201,8 +131,10 @@ jobs:
           if (Test-Path $zipStage) { Remove-Item $zipStage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $zipStage | Out-Null
 
-          Copy-Item "target/NetFlow.msix" (Join-Path $zipStage "NetFlow.msix") -Force
-          Copy-Item "target/NetFlow_Sideload_Cert.cer" (Join-Path $zipStage "NetFlow_Sideload_Cert.cer") -Force
+          Copy-Item "target/release/net-flow.exe" (Join-Path $zipStage "net-flow.exe") -Force
+          Copy-Item "target/layout/AppxManifest.xml" (Join-Path $zipStage "AppxManifest.xml") -Force
+          Copy-Item "target/layout/resources.pri" (Join-Path $zipStage "resources.pri") -Force
+          Copy-Item "widget/Assets" (Join-Path $zipStage "Assets") -Recurse -Force
           Copy-Item "scripts/install.ps1" (Join-Path $zipStage "install.ps1") -Force
           Copy-Item "README.md" (Join-Path $zipStage "README.md") -Force
           Copy-Item "LICENSE-MIT" (Join-Path $zipStage "LICENSE-MIT") -Force
