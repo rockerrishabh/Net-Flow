@@ -379,8 +379,8 @@ function Restart-WidgetBoard {
 }
 
 # Main Execution Dispatch
-if ($Register) {
-    Register-Package
+if ($Status) {
+    Get-Status
 }
 elseif ($Unregister) {
     Unregister-Package
@@ -393,24 +393,9 @@ elseif ($InstallCert) {
 elseif ($RestartWidgets) {
     Restart-WidgetBoard
 }
-elseif ($Status) {
-    Get-Status
-}
 else {
+    # Default behavior: Always package (if missing or rebuild requested) and install/register
+    Register-Package
+    Write-Host ""
     Get-Status
-    $appx = Get-AppxPackage "*NetFlow*" -ErrorAction SilentlyContinue
-    if (-not $appx) {
-        Write-Host "Net Flow is not installed yet in your Widgets Board." -ForegroundColor Yellow
-        Write-Host "Installing MSIX package now..." -ForegroundColor Cyan
-        Register-Package
-    }
-    else {
-        Write-Host "Usage commands:" -ForegroundColor White
-        Write-Host "  .\register.ps1 -Register        Install and register MSIX package into Windows"
-        Write-Host "  .\register.ps1 -Unregister      Remove widget package from Windows"
-        Write-Host "  .\register.ps1 -Rebuild         Force recreation of NetFlow.msix from loose files"
-        Write-Host "  .\register.ps1 -RestartWidgets  Restart Windows Widgets Board service"
-        Write-Host "  .\register.ps1 -Status          Display current installation and process state"
-        Write-Host "  .\register.ps1 -InstallCert     Trust sideload certificate in CurrentUser\TrustedPeople"
-    }
 }
