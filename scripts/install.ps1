@@ -164,8 +164,18 @@ function New-MsixPackage {
     $binExe = $ExePath
     if (-not (Test-Path $binExe)) {
         $candRelease = Join-Path $ScriptDir "..\target\release\net-flow.exe"
-        if (Test-Path $candRelease) { $binExe = (Resolve-Path $candRelease).Path }
-        else { throw "net-flow.exe not found at $binExe! Please ensure you extracted the full release archive." }
+        if (Test-Path $candRelease) {
+            $binExe = (Resolve-Path $candRelease).Path
+        } elseif (Test-Path (Join-Path $ScriptDir "..\Cargo.toml")) {
+            Write-Host "net-flow.exe not found. Building release binary via cargo..." -ForegroundColor Cyan
+            & cargo build --release --workspace
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $candRelease)) {
+                throw "Failed to build net-flow.exe via cargo!"
+            }
+            $binExe = (Resolve-Path $candRelease).Path
+        } else {
+            throw "net-flow.exe not found at $binExe! Please ensure you extracted the full release archive."
+        }
     }
 
     # Locate manifest

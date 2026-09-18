@@ -48,7 +48,7 @@ git clone https://github.com/rockerrishabh/net-flow.git
 cd net-flow
 
 # One-command build, packaging, self-signing, and sideload registration
-powershell -ExecutionPolicy Bypass -File scripts/setup_msix.ps1
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
 Once installed:
@@ -60,7 +60,7 @@ Once installed:
 1. Download `net-flow-windows-x64.zip` from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases).
 2. Extract the archive.
 3. Run `.\install.ps1` in PowerShell (or right-click `install.ps1` → **Run with PowerShell**).
-The installer automatically trusts the signing certificate in `CurrentUser\TrustedPeople` and installs `NetFlow.msix` into Windows.
+The installer automatically provisions a local signing certificate, packages `NetFlow.msix`, and registers the widget package into Windows 11. To uninstall, run `.\install.ps1 -Uninstall`.
 
 ---
 
@@ -134,7 +134,7 @@ net-flow/
 │       ├── main.rs                    # WinMain entry point, COM lifecycle & idle shutdown
 │       └── provider.rs                # IWidgetProvider2 handler with poison-resilient locks
 ├── scripts/
-│   └── setup_msix.ps1                 # Local developer build, test-signing & sideloading
+│   └── install.ps1                    # Sideload packaging, certificate provisioning & registration
 ├── Cargo.toml                         # Workspace manifest & LTO release profile
 ├── CHANGELOG.md                       # Release notes & version history
 ├── CODE_OF_CONDUCT.md                 # Contributor Covenant v2.1

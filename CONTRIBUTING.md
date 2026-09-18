@@ -60,10 +60,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ### 4. Build & Sideload to Windows 11 Widgets Board
 To test changes live on your Windows 11 Widgets board:
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/setup_msix.ps1
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 This script will:
-1. Compile the release binaries with embedded icons and LTO optimizations.
+1. Compile the release binaries with embedded icons and LTO optimizations (if not yet built).
 2. Generate a local self-signed developer certificate (if needed).
 3. Pack and sign `NetFlow.msix`.
 4. Sideload the package and refresh the Windows Widgets Board.
@@ -77,7 +77,7 @@ When proposing changes, keep the following core design principles in mind:
 ### Workspace Structure
 - **`crates/core`**: OS-independent core library containing telemetry calculation (`backend.rs`), sparkline rendering (`chart.rs`), Adaptive Card JSON builders (`card.rs`), vector glyphs (`icons.rs`), and process attribution (`process.rs`). This crate contains no COM or widget runtime code.
 - **`widget`**: The Windows App SDK widget provider implementing `IWidgetProvider2` and COM class factories.
-- **`scripts`**: Developer packaging and local MSIX sideloading automation (`setup_msix.ps1`).
+- **`scripts`**: Sideload packaging, certificate provisioning, and widget lifecycle automation (`install.ps1`).
 
 ### Core Engineering Guidelines
 
@@ -94,7 +94,7 @@ When proposing changes, keep the following core design principles in mind:
 5. **Bounded Caches & Memory Protection**:
    - Static caches (such as `ICON_CACHE` in `process.rs`) must be capped (maximum 256 entries) to prevent unbounded memory growth during multi-day sessions.
 6. **Single Source of Truth for Versions**:
-   - The project version is defined strictly in [`Cargo.toml`](Cargo.toml). [`scripts/setup_msix.ps1`](scripts/setup_msix.ps1) and CI workflows automatically propagate this version to [`Package.appxmanifest`](widget/Package.appxmanifest).
+   - The project version is defined strictly in [`Cargo.toml`](Cargo.toml). [`scripts/install.ps1`](scripts/install.ps1) and CI workflows automatically propagate this version to [`Package.appxmanifest`](widget/Package.appxmanifest).
 7. **100% Offline & Private**:
    - Do not add outbound network telemetry, analytics, or external tracking libraries. All telemetry processing must remain entirely local.
 
@@ -102,14 +102,10 @@ When proposing changes, keep the following core design principles in mind:
 
 ## 📦 Packaging Workflows
 
-- **Local Sideloading (`scripts/setup_msix.ps1`)**:
-  Builds, signs with a local developer test certificate (`CN=NetFlow-Dev-Test`), and registers the package on your machine for live testing in the Windows 11 Widgets Board.
-- **Local Release Packaging (`scripts/package_release.ps1`)**:
-  Packages, signs, bundles the portable zip archive (`net-flow-windows-x64.zip`), extracts changelog notes, and generates SHA256 checksums locally.
-- **Automated GitHub Releases (`.github/workflows/release.yml`)**:
-  Triggered by release tags (`vX.Y.Z`). Automatically runs tests, builds optimized binaries with LTO, and creates GitHub Releases with MSIX, portable ZIP, cert, and release notes.
-- **Microsoft Store Publishing (`.github/workflows/store-publish.yml`)**:
-  Triggered manually via workflow dispatch. Injects Partner Center credentials, packages the Store MSIX, and publishes submissions to the Microsoft Store.
+- **Local Sideloading & Testing (`scripts/install.ps1`)**:
+  Builds, provisions a local test certificate, packages `NetFlow.msix`, and registers the package on your machine for live testing in the Windows 11 Widgets Board. Supports `-Rebuild`, `-Uninstall`, `-Status`, and `-RestartWidgets`.
+- **Automated GitHub Releases & Store Submission (`.github/workflows/release.yml`)**:
+  Triggered automatically upon CI completion on `main` when `Cargo.toml` is bumped, or via release tags (`vX.Y.Z`). Automatically runs tests, builds optimized binaries with LTO, creates GitHub Releases with `net-flow-windows-x64.zip` and checksums, and submits `NetFlow_Store.msix` to Microsoft Store.
 
 ---
 
@@ -119,7 +115,7 @@ Before submitting your pull request:
 - [ ] Added unit tests covering new logic or bug fixes.
 - [ ] Verified that `cargo test --workspace` passes cleanly (all 75 tests).
 - [ ] Verified that `cargo clippy --workspace --all-targets --all-features -- -D warnings` returns 0 warnings.
-- [ ] Verified live widget functionality via `scripts/setup_msix.ps1`.
+- [ ] Verified live widget functionality via `scripts/install.ps1`.
 - [ ] Ensured all mutex and lock accesses use `.lock_safe()` / `.read_safe()`.
 - [ ] Updated documentation or `README.md` if user-facing behavior changed.
 
