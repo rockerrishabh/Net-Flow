@@ -1,5 +1,5 @@
 use crate::backend::{InterfaceMedium, NetworkSnapshot};
-use crate::chart::render_unified_chart_data_uri;
+use crate::chart::{render_idle_unified_chart_data_uri, render_unified_chart_data_uri};
 use crate::format::{SpeedUnit, format_bandwidth, format_bandwidth_with_unit, format_bytes};
 use crate::icons;
 use serde::{Deserialize, Serialize};
@@ -377,7 +377,14 @@ fn chart_element(
     config: &WidgetConfig,
     chart_size: &str,
 ) -> Vec<Value> {
-    let uri = render_unified_chart_data_uri(&snapshot.history, chart_size, config.chart_window);
+    // O(1) idle bypass: if both incremental peaks across the entire history buffer are 0,
+    // we are guaranteed that every sample in any chart window is 0 bps. Directly fetch
+    // the precomputed idle chart from the immutable OnceLock cache.
+    let uri = if snapshot.peak_rx_bps == 0.0 && snapshot.peak_tx_bps == 0.0 {
+        render_idle_unified_chart_data_uri(chart_size, config.chart_window)
+    } else {
+        render_unified_chart_data_uri(&snapshot.history, chart_size, config.chart_window)
+    };
     if uri.is_empty() {
         return Vec::new();
     }

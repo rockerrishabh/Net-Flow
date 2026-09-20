@@ -11,6 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.1] - 2026-09-20
+
+### Changed
+
+- **Telemetry & UI Cadence Decoupling**:
+  - Decoupled high-fidelity telemetry sampling (250 ms / 4 Hz) from widget card publication (500 ms / 2 Hz).
+  - Expanded rolling history buffer from 60 to 240 samples for high-resolution waveform tracking without increasing UI load.
+- **Incremental O(1) Chart Peak Tracking**:
+  - Maintained running maximum download and upload peaks in `NetworkBackend`.
+  - Replaced O(N) full-history scans on every UI frame with O(1) updates, only rescanning on FIFO eviction if the evicted sample matched the peak.
+- **Sparkline Rasterizer Optimizations**:
+  - Added zero-alpha destination fast path in `Canvas::blend` and unrolled RGB compositing channels.
+  - Hoisted invariant scales and precomputed column metrics in `draw_track`, adding a dedicated branchless interior-row filling loop.
+  - Accelerated downsampler by skipping transparent destination sub-pixels.
+  - Reduced active chart rasterization latency by 45% (from 6.52 ms to 3.58 ms).
+- **Precomputed Idle Chart Cache**:
+  - Implemented immutable `OnceLock` cache for standard widget size and time window presets.
+  - Enabled O(1) idle bypass when history peaks are zero, eliminating rasterization during idle periods (down from 6.68 ms to 120 us, a 55x speedup; total idle CPU overhead reduced to 0.024% of 1 core).
+- **Official URLs**:
+  - Updated official product homepage to `https://netflow.rockerrishabh.me`.
+  - Configured dedicated privacy policy route at `https://netflow.rockerrishabh.me/privacy`.
+
+
+---
+
 ## [0.1.0] - 2026-09-17
 
 ### Added

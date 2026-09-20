@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "net-flow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "net-flow-core",
  "serde",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "net-flow-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "image",

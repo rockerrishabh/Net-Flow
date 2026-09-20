@@ -1,8 +1,8 @@
 //! Core network monitoring engine, Adaptive Card templating, and chart rendering
 //! for the Net-Flow Windows 11 widget.
 
-/// Sampling period for network interface polling (2 samples per second).
-pub const SAMPLING_INTERVAL_MS: u64 = 500;
+/// Sampling period for network interface polling (4 samples per second).
+pub const SAMPLING_INTERVAL_MS: u64 = 250;
 /// Cadence for pushing updated Adaptive Cards to the Windows Widget Board.
 pub const UPDATE_INTERVAL_MS: u64 = 500;
 /// Maximum rolling history buffer duration in seconds.
@@ -34,8 +34,24 @@ pub use backend::{
     InterfaceLuid, InterfaceSample, NetworkBackend, NetworkSnapshot, classify_interface,
     compute_delta, query_interfaces,
 };
-pub use card::{WidgetConfig, build_adaptive_card, build_settings_card, build_settings_card_for_size};
+pub use card::{
+    WidgetConfig, build_adaptive_card, build_settings_card, build_settings_card_for_size,
+};
 pub use chart::{Track, render_chart_data_uris, render_chart_png};
 pub use format::{SpeedUnit, format_bandwidth, format_bandwidth_with_unit, format_bytes};
 pub use icons::app_glyph_for_emoji;
 pub use process::{ActiveAppInfo, ProcessTracker, map_process_to_app, query_active_apps};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_capacity_matches_sampling_cadence() {
+        assert_eq!(
+            history_samples_for_secs(MAX_CHART_WINDOW_SECS),
+            HISTORY_CAPACITY
+        );
+        assert_eq!(HISTORY_CAPACITY, 240);
+    }
+}

@@ -48,6 +48,44 @@ impl Track {
     }
 }
 
+/// Strongly typed widget size preset for chart rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChartSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl ChartSize {
+    pub fn from_str_name(name: &str) -> Self {
+        match name {
+            "Small" => Self::Small,
+            "Large" => Self::Large,
+            _ => Self::Medium,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+        }
+    }
+}
+
+/// Cache key covering every rendering input that affects the idle chart output.
+/// Invariant: For every two rendering states represented by the same cache key,
+/// the idle PNG output must be bit-for-bit identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdleChartCacheKey {
+    pub size: ChartSize,
+    pub chart_window: u32,
+    pub width: u32,
+    pub height: u32,
+    pub supersample: u32,
+}
+
 /// Target pixel dimensions and sampling resolution for a widget size.
 pub struct ChartDimensions {
     pub width: u32,
@@ -58,28 +96,32 @@ pub struct ChartDimensions {
 }
 
 impl ChartDimensions {
-    pub fn for_size(size: &str, chart_window: u32) -> Self {
+    pub fn for_chart_size(size: ChartSize, chart_window: u32) -> Self {
         let sample_count = crate::history_samples_for_secs(crate::clamp_chart_window(chart_window));
         match size {
-            "Small" => ChartDimensions {
+            ChartSize::Small => ChartDimensions {
                 width: 400,
                 height: 44,
                 sample_count,
                 supersample: 3,
             },
-            "Large" => ChartDimensions {
+            ChartSize::Large => ChartDimensions {
                 width: 800,
                 height: 150,
                 sample_count,
                 supersample: 2,
             },
-            _ => ChartDimensions {
+            ChartSize::Medium => ChartDimensions {
                 width: 600,
                 height: 64,
                 sample_count,
                 supersample: 3,
             },
         }
+    }
+
+    pub fn for_size(size: &str, chart_window: u32) -> Self {
+        Self::for_chart_size(ChartSize::from_str_name(size), chart_window)
     }
 }
 
@@ -108,16 +150,37 @@ impl Canvas {
             return;
         }
         let idx = ((y * self.width + x) * 4) as usize;
-        let dst_a = self.pixels[idx + 3] as f32 / 255.0;
+        let dst_alpha_byte = self.pixels[idx + 3];
+
+        if dst_alpha_byte == 0 {
+            // Fast path: destination is completely transparent (virgin canvas).
+            // Under source-over compositing, transparent destination contributes nothing:
+            // out_a = a, val = src.
+            self.pixels[idx] = color.0;
+            self.pixels[idx + 1] = color.1;
+            self.pixels[idx + 2] = color.2;
+            self.pixels[idx + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
+            return;
+        }
+
+        let dst_a = dst_alpha_byte as f32 / 255.0;
         let out_a = a + dst_a * (1.0 - a);
         if out_a <= 0.0 {
             return;
         }
-        for (offset, src) in [(0, color.0), (1, color.1), (2, color.2)] {
-            let dst = self.pixels[idx + offset] as f32;
-            let val = (src as f32 * a + dst * dst_a * (1.0 - a)) / out_a;
-            self.pixels[idx + offset] = val.round().clamp(0.0, 255.0) as u8;
-        }
+        let inv_out_a = 1.0 / out_a;
+        let dst_weight = dst_a * (1.0 - a);
+        let src_weight = a;
+
+        let r = (color.0 as f32 * src_weight + self.pixels[idx] as f32 * dst_weight) * inv_out_a;
+        let g =
+            (color.1 as f32 * src_weight + self.pixels[idx + 1] as f32 * dst_weight) * inv_out_a;
+        let b =
+            (color.2 as f32 * src_weight + self.pixels[idx + 2] as f32 * dst_weight) * inv_out_a;
+
+        self.pixels[idx] = r.round().clamp(0.0, 255.0) as u8;
+        self.pixels[idx + 1] = g.round().clamp(0.0, 255.0) as u8;
+        self.pixels[idx + 2] = b.round().clamp(0.0, 255.0) as u8;
         self.pixels[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 
@@ -162,10 +225,14 @@ impl Canvas {
             for ox in 0..out_w {
                 let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
                 for dy in 0..factor {
+                    let row_start = ((oy * factor + dy) * self.width + ox * factor) as usize * 4;
                     for dx in 0..factor {
-                        let idx =
-                            (((oy * factor + dy) * self.width + ox * factor + dx) * 4) as usize;
-                        let pa = self.pixels[idx + 3] as f32 / 255.0;
+                        let idx = row_start + dx as usize * 4;
+                        let pa_byte = self.pixels[idx + 3];
+                        if pa_byte == 0 {
+                            continue;
+                        }
+                        let pa = pa_byte as f32 / 255.0;
                         r += self.pixels[idx] as f32 * pa;
                         g += self.pixels[idx + 1] as f32 * pa;
                         b += self.pixels[idx + 2] as f32 * pa;
@@ -252,19 +319,18 @@ fn draw_track(
     }
     let last_index = (values.len() - 1) as f64;
 
+    let x_factor = if width > 1 {
+        last_index / (width - 1) as f64
+    } else {
+        0.0
+    };
+    let reachable = (span - idle_offset).max(0.0);
+    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+
     for x in 0..width {
-        let t = if width > 1 {
-            x as f64 / (width - 1) as f64 * last_index
-        } else {
-            0.0
-        };
+        let t = x as f64 * x_factor;
         let v = catmull_at(values, t);
-        let norm = if scale > 0.0 {
-            (v / scale).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let reachable = (span - idle_offset).max(0.0);
+        let norm = (v * inv_scale).clamp(0.0, 1.0);
         let y = baseline_y + direction * (idle_offset + norm * reachable);
 
         // Gradient area fill: brightest against the stroke, fading out towards
@@ -275,20 +341,49 @@ fn draw_track(
             (baseline_y, y)
         };
         let reach = (y - baseline_y).abs().max(1e-6);
+        let inv_reach = 1.0 / reach;
         let first = top.floor().max(0.0) as i64;
         let last_row = (bottom.ceil() as i64 - 1).min(canvas.height as i64 - 1);
-        for py in first..=last_row {
-            if py < 0 {
-                continue;
+
+        if first <= last_row && first >= 0 {
+            if first == last_row {
+                // Single boundary row
+                let coverage =
+                    (bottom.min((first + 1) as f64) - top.max(first as f64)).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    let nearness = (((first as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = FILL_ALPHA_FAR
+                        + (FILL_ALPHA_NEAR - FILL_ALPHA_FAR) * (nearness * nearness) as f32;
+                    canvas.blend(x, first as u32, color, (alpha / 255.0) * coverage as f32);
+                }
+            } else {
+                // Top boundary row
+                let first_cov = ((first + 1) as f64 - top).clamp(0.0, 1.0);
+                if first_cov > 0.0 {
+                    let nearness = (((first as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = FILL_ALPHA_FAR
+                        + (FILL_ALPHA_NEAR - FILL_ALPHA_FAR) * (nearness * nearness) as f32;
+                    canvas.blend(x, first as u32, color, (alpha / 255.0) * first_cov as f32);
+                }
+
+                // Interior rows: coverage == 1.0 unconditionally
+                for py in (first + 1)..last_row {
+                    let nearness = (((py as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = FILL_ALPHA_FAR
+                        + (FILL_ALPHA_NEAR - FILL_ALPHA_FAR) * (nearness * nearness) as f32;
+                    canvas.blend(x, py as u32, color, alpha / 255.0);
+                }
+
+                // Bottom boundary row
+                let last_cov = (bottom - last_row as f64).clamp(0.0, 1.0);
+                if last_cov > 0.0 {
+                    let nearness =
+                        (((last_row as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = FILL_ALPHA_FAR
+                        + (FILL_ALPHA_NEAR - FILL_ALPHA_FAR) * (nearness * nearness) as f32;
+                    canvas.blend(x, last_row as u32, color, (alpha / 255.0) * last_cov as f32);
+                }
             }
-            let coverage = (bottom.min((py + 1) as f64) - top.max(py as f64)).clamp(0.0, 1.0);
-            if coverage <= 0.0 {
-                continue;
-            }
-            let nearness = ((py as f64 + 0.5 - baseline_y).abs() / reach).clamp(0.0, 1.0);
-            let alpha =
-                FILL_ALPHA_FAR + (FILL_ALPHA_NEAR - FILL_ALPHA_FAR) * (nearness * nearness) as f32;
-            canvas.blend(x, py as u32, color, (alpha / 255.0) * coverage as f32);
         }
 
         // Stroke, centred on the curve.
@@ -480,13 +575,84 @@ pub fn render_chart_png(
     encode_png(out_w, out_h, &rgba)
 }
 
+static IDLE_CHART_CACHE: std::sync::OnceLock<std::collections::HashMap<IdleChartCacheKey, String>> =
+    std::sync::OnceLock::new();
+
+/// Thread-safe immutable idle chart cache precomputed for standard size and window presets.
+fn get_idle_chart_cache() -> &'static std::collections::HashMap<IdleChartCacheKey, String> {
+    IDLE_CHART_CACHE.get_or_init(|| {
+        let mut map = std::collections::HashMap::new();
+        for size in [ChartSize::Small, ChartSize::Medium, ChartSize::Large] {
+            for window in [15, 30, 60] {
+                let dims = ChartDimensions::for_chart_size(size, window);
+                let key = IdleChartCacheKey {
+                    size,
+                    chart_window: window,
+                    width: dims.width,
+                    height: dims.height,
+                    supersample: dims.supersample,
+                };
+                let empty_history: Vec<HistorySample> = Vec::new();
+                if let Ok(png) = render_unified_dual_chart_png_ss(
+                    &empty_history,
+                    dims.sample_count,
+                    dims.width,
+                    dims.height,
+                    dims.supersample,
+                ) {
+                    map.insert(key, png_to_data_uri(&png));
+                }
+            }
+        }
+        map
+    })
+}
+
 /// Renders the unified dual-stream chart for a widget size preset and returns a data URI.
+/// When the history window contains zero network traffic, serves the result directly from
+/// the immutable idle cache in O(1) time with zero rasterization.
+/// Returns the precomputed idle chart data URI for a given widget size and chart window.
+/// Serves the result directly from the immutable OnceLock cache in O(1) time with zero rasterization.
+pub fn render_idle_unified_chart_data_uri(size: &str, chart_window: u32) -> String {
+    let chart_size = ChartSize::from_str_name(size);
+    let clamped_window = crate::clamp_chart_window(chart_window);
+    let dims = ChartDimensions::for_chart_size(chart_size, clamped_window);
+    let key = IdleChartCacheKey {
+        size: chart_size,
+        chart_window: clamped_window,
+        width: dims.width,
+        height: dims.height,
+        supersample: dims.supersample,
+    };
+    if let Some(cached_uri) = get_idle_chart_cache().get(&key) {
+        return cached_uri.clone();
+    }
+    String::new()
+}
+
+/// Renders the unified dual-stream chart for a widget size preset and returns a data URI.
+/// When the history window contains zero network traffic, serves the result directly from
+/// the immutable idle cache in O(1) time with zero rasterization.
 pub fn render_unified_chart_data_uri(
     history: &[HistorySample],
     size: &str,
     chart_window: u32,
 ) -> String {
-    let dims = ChartDimensions::for_size(size, chart_window);
+    let chart_size = ChartSize::from_str_name(size);
+    let clamped_window = crate::clamp_chart_window(chart_window);
+    let dims = ChartDimensions::for_chart_size(chart_size, clamped_window);
+
+    // O(1) idle detection: if history is empty or all samples in the active window are 0 bps
+    let window_samples = dims.sample_count.min(history.len());
+    let is_idle = history.is_empty()
+        || history[history.len() - window_samples..]
+            .iter()
+            .all(|s| s.rx_bps == 0 && s.tx_bps == 0);
+
+    if is_idle {
+        return render_idle_unified_chart_data_uri(size, chart_window);
+    }
+
     match render_unified_dual_chart_png_ss(
         history,
         dims.sample_count,
@@ -761,15 +927,156 @@ mod tests {
     #[test]
     fn chart_window_uses_sampling_cadence_on_every_size() {
         for size in ["Small", "Medium", "Large"] {
-            assert_eq!(ChartDimensions::for_size(size, 15).sample_count, 30);
-            assert_eq!(ChartDimensions::for_size(size, 30).sample_count, 60);
-            assert_eq!(ChartDimensions::for_size(size, 60).sample_count, 120);
+            assert_eq!(ChartDimensions::for_size(size, 15).sample_count, 60);
+            assert_eq!(ChartDimensions::for_size(size, 30).sample_count, 120);
+            assert_eq!(ChartDimensions::for_size(size, 60).sample_count, 240);
             assert_eq!(
                 ChartDimensions::for_size(size, 60).sample_count,
                 crate::HISTORY_CAPACITY
             );
             // Invalid windows fall back to 30s.
-            assert_eq!(ChartDimensions::for_size(size, 45).sample_count, 60);
+            assert_eq!(ChartDimensions::for_size(size, 45).sample_count, 120);
         }
+    }
+
+    #[test]
+    fn test_blend_alpha_edge_cases() {
+        let test_alphas = [0.0f32, 1e-6f32, 1.0 / 255.0, 0.5, 254.0 / 255.0, 1.0];
+        let test_colors = [
+            Rgba(255, 0, 0, 255),
+            Rgba(0, 255, 0, 128),
+            Rgba(0, 0, 255, 1),
+            Rgba(255, 255, 255, 0),
+            Rgba(100, 150, 200, 50),
+        ];
+
+        let mut c_opt = Canvas::new(10, 10);
+        let mut pixels_ref = vec![0u8; 400];
+
+        // Reference scalar blend function
+        let blend_ref = |pixels: &mut [u8], x: u32, y: u32, color: Rgba, alpha_scale: f32| {
+            let a = (color.3 as f32 * alpha_scale.clamp(0.0, 1.0)) / 255.0;
+            if a <= 0.0 {
+                return;
+            }
+            let idx = ((y * 10 + x) * 4) as usize;
+            let dst_a = pixels[idx + 3] as f32 / 255.0;
+            let out_a = a + dst_a * (1.0 - a);
+            if out_a <= 0.0 {
+                return;
+            }
+            for (offset, src) in [(0, color.0), (1, color.1), (2, color.2)] {
+                let dst = pixels[idx + offset] as f32;
+                let val = (src as f32 * a + dst * dst_a * (1.0 - a)) / out_a;
+                pixels[idx + offset] = val.round().clamp(0.0, 255.0) as u8;
+            }
+            pixels[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        };
+
+        // Pass 1: Transparent destination
+        for (i, &a) in test_alphas.iter().enumerate() {
+            for (j, &color) in test_colors.iter().enumerate() {
+                let x = (i % 10) as u32;
+                let y = (j % 10) as u32;
+                c_opt.blend(x, y, color, a);
+                blend_ref(&mut pixels_ref, x, y, color, a);
+                assert_eq!(c_opt.pixels, pixels_ref);
+            }
+        }
+
+        // Pass 2: Semi-transparent and opaque destination
+        for (i, &a) in test_alphas.iter().enumerate() {
+            for (j, &color) in test_colors.iter().enumerate() {
+                let x = (i % 10) as u32;
+                let y = (j % 10) as u32;
+                c_opt.blend(x, y, color, a);
+                blend_ref(&mut pixels_ref, x, y, color, a);
+                assert_eq!(c_opt.pixels, pixels_ref);
+            }
+        }
+    }
+
+    #[test]
+    fn test_downsample_differential_deterministic() {
+        let reference_downsample = |w: u32, h: u32, pixels: &[u8], factor: u32| -> Vec<u8> {
+            let out_w = w / factor;
+            let out_h = h / factor;
+            let mut out = vec![0u8; (out_w * out_h * 4) as usize];
+            let samples = (factor * factor) as f32;
+            for oy in 0..out_h {
+                for ox in 0..out_w {
+                    let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                    for dy in 0..factor {
+                        for dx in 0..factor {
+                            let idx = (((oy * factor + dy) * w + ox * factor + dx) * 4) as usize;
+                            let pa = pixels[idx + 3] as f32 / 255.0;
+                            r += pixels[idx] as f32 * pa;
+                            g += pixels[idx + 1] as f32 * pa;
+                            b += pixels[idx + 2] as f32 * pa;
+                            a += pa;
+                        }
+                    }
+                    let o = ((oy * out_w + ox) * 4) as usize;
+                    if a > 0.0 {
+                        out[o] = (r / a).round().clamp(0.0, 255.0) as u8;
+                        out[o + 1] = (g / a).round().clamp(0.0, 255.0) as u8;
+                        out[o + 2] = (b / a).round().clamp(0.0, 255.0) as u8;
+                        out[o + 3] = ((a / samples) * 255.0).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+            out
+        };
+
+        let mut rng: u64 = 0xabcdef01_23456789;
+        let mut xor_shift = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+
+        let w = 12;
+        let h = 12;
+        for iter in 0..100 {
+            let mut c = Canvas::new(w, h);
+            let factor = if iter % 2 == 0 { 3 } else { 2 };
+            for i in 0..(w * h) as usize {
+                let val = xor_shift();
+                let alpha = match val % 4 {
+                    0 => 0u8,
+                    1 => 255u8,
+                    _ => (val & 0xFF) as u8,
+                };
+                c.pixels[i * 4] = ((val >> 8) & 0xFF) as u8;
+                c.pixels[i * 4 + 1] = ((val >> 16) & 0xFF) as u8;
+                c.pixels[i * 4 + 2] = ((val >> 24) & 0xFF) as u8;
+                c.pixels[i * 4 + 3] = alpha;
+            }
+
+            let (_, _, opt_bytes) = c.downsample(factor);
+            let ref_bytes = reference_downsample(w, h, &c.pixels, factor);
+            assert_eq!(
+                opt_bytes, ref_bytes,
+                "Mismatch on random iteration {}",
+                iter
+            );
+        }
+    }
+
+    #[test]
+    fn test_idle_chart_caching() {
+        let empty_history: Vec<HistorySample> = Vec::new();
+        let uri1 = render_unified_chart_data_uri(&empty_history, "Medium", 60);
+        let uri2 = render_unified_chart_data_uri(&empty_history, "Medium", 60);
+        assert!(!uri1.is_empty());
+        assert_eq!(uri1, uri2);
+
+        // All zero-rate history is also served from idle cache
+        let zero_traffic: Vec<HistorySample> = (0..60)
+            .map(|_| HistorySample::from_bps(0, 0, 250_000_000))
+            .collect();
+        let uri3 = render_unified_chart_data_uri(&zero_traffic, "Medium", 60);
+        assert_eq!(uri1, uri3);
     }
 }

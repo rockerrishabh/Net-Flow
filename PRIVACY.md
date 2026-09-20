@@ -1,3 +1,9 @@
+---
+layout: default
+title: Privacy Policy
+permalink: /privacy/
+---
+
 # Privacy Policy for Net Flow
 
 **Last Updated**: September 17, 2026  

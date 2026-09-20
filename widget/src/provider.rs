@@ -982,7 +982,7 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
     }
 }
 
-/// Background worker loop that samples network telemetry every 500ms
+/// Background worker loop that samples network telemetry every 250ms
 /// and pushes updated Adaptive Cards to active board widgets.
 fn worker_loop(
     shutdown: Arc<(Mutex<bool>, Condvar)>,

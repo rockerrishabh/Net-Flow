@@ -584,6 +584,10 @@ pub struct NetworkBackend {
     pub session_start_unix: u64,
     /// Rolling FIFO buffer of fixed-duration bandwidth samples.
     history: VecDeque<HistorySample>,
+    /// Tracked chart peak download rate across current history buffer.
+    chart_peak_rx: u64,
+    /// Tracked chart peak upload rate across current history buffer.
+    chart_peak_tx: u64,
     /// Tracks per-process network and disk I/O rates.
     pub process_tracker: crate::process::ProcessTracker,
     /// Last time the process table was refreshed (throttled to 1s).
@@ -622,6 +626,8 @@ impl NetworkBackend {
             session_tx: 0,
             session_start_unix: now_unix,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            chart_peak_rx: 0,
+            chart_peak_tx: 0,
             process_tracker: crate::process::ProcessTracker::new(),
             last_process_sample: None,
             cached_raw_apps: (Vec::new(), 0),
@@ -651,6 +657,8 @@ impl NetworkBackend {
                 now_unix
             },
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            chart_peak_rx: 0,
+            chart_peak_tx: 0,
             process_tracker: crate::process::ProcessTracker::new(),
             last_process_sample: None,
             cached_raw_apps: (Vec::new(), 0),
@@ -684,6 +692,8 @@ impl NetworkBackend {
             .unwrap_or(0);
         self.session_start_unix = now_unix;
         self.history.clear();
+        self.chart_peak_rx = 0;
+        self.chart_peak_tx = 0;
         self.accumulator.reset();
         self.rolling_window.reset();
         self.process_tracker.reset();
@@ -876,6 +886,8 @@ impl NetworkBackend {
         let slot_ns = crate::SAMPLING_INTERVAL_MS * 1_000_000;
         if elapsed_ns > 5_000_000_000 {
             self.history.clear();
+            self.chart_peak_rx = 0;
+            self.chart_peak_tx = 0;
             self.accumulator.reset();
             self.rolling_window.reset();
             self.rolling_window
@@ -892,9 +904,20 @@ impl NetworkBackend {
                     self.peak_tx = bucket.tx_bps as f64;
                 }
                 if self.history.len() >= HISTORY_CAPACITY {
-                    self.history.pop_front();
+                    if let Some(evicted) = self.history.pop_front() {
+                        if evicted.rx_bps == self.chart_peak_rx {
+                            self.chart_peak_rx =
+                                self.history.iter().map(|s| s.rx_bps).max().unwrap_or(0);
+                        }
+                        if evicted.tx_bps == self.chart_peak_tx {
+                            self.chart_peak_tx =
+                                self.history.iter().map(|s| s.tx_bps).max().unwrap_or(0);
+                        }
+                    }
                 }
                 self.history.push_back(bucket);
+                self.chart_peak_rx = self.chart_peak_rx.max(bucket.rx_bps);
+                self.chart_peak_tx = self.chart_peak_tx.max(bucket.tx_bps);
             }
             self.rolling_window
                 .record_sample(now, self.session_rx, self.session_tx);
@@ -914,18 +937,6 @@ impl NetworkBackend {
             .unwrap_or(0);
         let session_duration_secs = now_unix.saturating_sub(self.session_start_unix);
 
-        // Compute active chart peak (across current history)
-        let mut chart_peak_rx = rx_bps;
-        let mut chart_peak_tx = tx_bps;
-        for s in &self.history {
-            if (s.rx_bps as f64) > chart_peak_rx {
-                chart_peak_rx = s.rx_bps as f64;
-            }
-            if (s.tx_bps as f64) > chart_peak_tx {
-                chart_peak_tx = s.tx_bps as f64;
-            }
-        }
-
         NetworkSnapshot {
             rx_bps,
             tx_bps,
@@ -937,8 +948,8 @@ impl NetworkBackend {
             session_tx: self.session_tx,
             session_duration_secs,
             active_interfaces: reported_active_count,
-            peak_rx_bps: chart_peak_rx,
-            peak_tx_bps: chart_peak_tx,
+            peak_rx_bps: self.chart_peak_rx as f64,
+            peak_tx_bps: self.chart_peak_tx as f64,
             session_peak_rx_bps: self.peak_rx,
             session_peak_tx_bps: self.peak_tx,
             timestamp: now,
@@ -1366,21 +1377,21 @@ mod tests {
         assert_eq!(snap.active_interfaces, 1);
         assert_eq!(snap.primary_medium, InterfaceMedium::Wifi);
 
-        // Second sample 500ms later (1 sampling interval)
-        let t1 = t0 + Duration::from_millis(500);
+        // Second sample 250ms later (1 sampling interval)
+        let t1 = t0 + Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
         let ifaces2 = vec![mock_iface(
             1,
             InterfaceCategory::Physical,
             InterfaceMedium::Wifi,
             1,
-            1000 + 2500,
-            2000 + 1000,
+            1000 + 1250,
+            2000 + 500,
         )];
         let snap2 = backend.sample_from_interfaces(&ifaces2, t1);
         assert_eq!(snap2.rx_bps, 5000.0);
         assert_eq!(snap2.tx_bps, 2000.0);
-        assert_eq!(snap2.session_rx, 2500);
-        assert_eq!(snap2.session_tx, 1000);
+        assert_eq!(snap2.session_rx, 1250);
+        assert_eq!(snap2.session_tx, 500);
         assert_eq!(snap2.history.len(), 1);
         assert_eq!(snap2.history[0].rx_bps, 5000);
         assert_eq!(snap2.history[0].tx_bps, 2000);
@@ -1561,9 +1572,9 @@ mod tests {
         )];
         backend.sample_from_interfaces(&ifaces, t0);
 
-        // Generate 140 samples at 500ms intervals (70s total, exceeds capacity of 120 / 60s)
-        for i in 1..=140u64 {
-            let t = t0 + Duration::from_millis(i * 500);
+        // Generate 260 samples at 250ms intervals (65s total, exceeds capacity of 240 / 60s)
+        for i in 1..=260u64 {
+            let t = t0 + Duration::from_millis(i * crate::SAMPLING_INTERVAL_MS);
             let ifaces = vec![mock_iface(
                 1,
                 InterfaceCategory::Physical,
@@ -1577,7 +1588,7 @@ mod tests {
 
         assert_eq!(backend.history.len(), HISTORY_CAPACITY);
         assert_eq!(HISTORY_CAPACITY, crate::history_samples_for_secs(60));
-        assert_eq!(HISTORY_CAPACITY, 120);
+        assert_eq!(HISTORY_CAPACITY, 240);
         // The oldest samples should have been dropped
         assert!(backend.history.len() <= HISTORY_CAPACITY);
     }
@@ -1634,21 +1645,21 @@ mod tests {
         assert_eq!(snap_reset.session_tx, 0);
         assert!(snap_reset.history.is_empty());
 
-        // Second sample after reset (500ms cadence) computes real delta from new baseline
-        let t3 = t2 + Duration::from_millis(500);
+        // Second sample after reset (250ms cadence) computes real delta from new baseline
+        let t3 = t2 + Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
         let ifaces4 = vec![mock_iface(
             1,
             InterfaceCategory::Physical,
             InterfaceMedium::Wifi,
             1,
-            6500,
-            6250,
+            6000 + 250,
+            6000 + 125,
         )];
         let snap_after = backend.sample_from_interfaces(&ifaces4, t3);
         assert_eq!(snap_after.rx_bps, 1000.0);
         assert_eq!(snap_after.tx_bps, 500.0);
-        assert_eq!(snap_after.session_rx, 500);
-        assert_eq!(snap_after.session_tx, 250);
+        assert_eq!(snap_after.session_rx, 250);
+        assert_eq!(snap_after.session_tx, 125);
         assert_eq!(snap_after.history.len(), 1);
         assert_eq!(snap_after.history[0].rx_bps, 1000);
         assert_eq!(snap_after.history[0].tx_bps, 500);
@@ -1750,7 +1761,7 @@ mod tests {
         )];
         backend.sample_from_interfaces(&ifaces, t0);
 
-        // Advance 3s (6 intervals of 500ms)
+        // Advance 3s (12 intervals of 250ms)
         let t1 = t0 + Duration::from_secs(3);
         let ifaces2 = vec![mock_iface(
             1,
@@ -1763,8 +1774,8 @@ mod tests {
         let snap = backend.sample_from_interfaces(&ifaces2, t1);
         assert_eq!(snap.rx_bps, 5000.0);
         assert_eq!(snap.tx_bps, 2000.0);
-        // History should contain 6 samples reflecting the 3s elapsed span (3.0s / 0.5s = 6)
-        assert_eq!(snap.history.len(), 6);
+        // History should contain 12 samples reflecting the 3s elapsed span (3.0s / 0.25s = 12)
+        assert_eq!(snap.history.len(), 12);
         for s in &snap.history {
             assert_eq!(s.rx_bps, 5000);
             assert_eq!(s.tx_bps, 2000);
@@ -1785,9 +1796,9 @@ mod tests {
         )];
         backend.sample_from_interfaces(&ifaces, t0);
 
-        // Push some initial samples at 500ms intervals
+        // Push some initial samples at 250ms intervals
         for i in 1..=5u64 {
-            let t = t0 + Duration::from_millis(i * 500);
+            let t = t0 + Duration::from_millis(i * crate::SAMPLING_INTERVAL_MS);
             let ifaces = vec![mock_iface(
                 1,
                 InterfaceCategory::Physical,
@@ -1801,7 +1812,8 @@ mod tests {
         assert_eq!(backend.history.len(), 5);
 
         // Simulate 120-second suspend/sleep gap (> 5s threshold)
-        let t_sleep = t0 + Duration::from_millis(5 * 500) + Duration::from_secs(120);
+        let t_sleep =
+            t0 + Duration::from_millis(5 * crate::SAMPLING_INTERVAL_MS) + Duration::from_secs(120);
         let ifaces_wake = vec![mock_iface(
             1,
             InterfaceCategory::Physical,
@@ -1816,20 +1828,20 @@ mod tests {
         assert_eq!(backend.accumulator.time_acc_ns(), 0);
         assert_eq!(backend.accumulator.bytes_rx_acc(), 0);
 
-        // Next 500ms sample after wake starts fresh without incorporating pre-suspend data
-        let t_after_wake = t_sleep + Duration::from_millis(500);
+        // Next 250ms sample after wake starts fresh without incorporating pre-suspend data
+        let t_after_wake = t_sleep + Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
         let ifaces_after_wake = vec![mock_iface(
             1,
             InterfaceCategory::Physical,
             InterfaceMedium::Ethernet,
             1,
-            105_000,
-            52_500,
+            102_500,
+            51_250,
         )];
         let snap_after_wake = backend.sample_from_interfaces(&ifaces_after_wake, t_after_wake);
         assert_eq!(snap_after_wake.history.len(), 1);
-        assert_eq!(snap_after_wake.history[0].rx_bytes, 5000);
-        assert_eq!(snap_after_wake.history[0].tx_bytes, 2500);
+        assert_eq!(snap_after_wake.history[0].rx_bytes, 2500);
+        assert_eq!(snap_after_wake.history[0].tx_bytes, 1250);
         assert_eq!(snap_after_wake.history[0].rx_bps, 10_000);
         assert_eq!(snap_after_wake.history[0].tx_bps, 5_000);
     }
@@ -1986,5 +1998,138 @@ mod tests {
         let serialized = serde_json::to_string(&state).expect("serialize");
         let deserialized: SessionState = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(state, deserialized);
+    }
+    #[test]
+    fn test_incremental_chart_peak_tracking() {
+        let mut backend = NetworkBackend::new();
+        let t0 = Instant::now();
+        let ifaces = vec![mock_iface(
+            1,
+            InterfaceCategory::Physical,
+            InterfaceMedium::Ethernet,
+            1,
+            0,
+            0,
+        )];
+        backend.sample_from_interfaces(&ifaces, t0);
+
+        let mut t = t0;
+        let mut total_rx = 0u64;
+        let mut total_tx = 0u64;
+
+        // Sample 1: rate 20,000 rx, 10,000 tx (5,000 rx bytes, 2,500 tx bytes in 250ms)
+        t += Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
+        total_rx += 5000;
+        total_tx += 2500;
+        let snap = backend.sample_from_interfaces(
+            &[mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                total_rx,
+                total_tx,
+            )],
+            t,
+        );
+        assert_eq!(snap.peak_rx_bps, 20_000.0);
+        assert_eq!(snap.peak_tx_bps, 10_000.0);
+
+        // Sample 2: burst! rate 100,000 rx, 50,000 tx (25,000 rx bytes, 12,500 tx bytes)
+        t += Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
+        total_rx += 25000;
+        total_tx += 12500;
+        let snap = backend.sample_from_interfaces(
+            &[mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                total_rx,
+                total_tx,
+            )],
+            t,
+        );
+        assert_eq!(snap.peak_rx_bps, 100_000.0);
+        assert_eq!(snap.peak_tx_bps, 50_000.0);
+
+        // Sample 3: drop down to lower rate 4,000 rx, 2,000 tx (1,000 rx bytes, 500 tx bytes)
+        t += Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
+        total_rx += 1000;
+        total_tx += 500;
+        let snap = backend.sample_from_interfaces(
+            &[mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                total_rx,
+                total_tx,
+            )],
+            t,
+        );
+        assert_eq!(snap.peak_rx_bps, 100_000.0);
+        assert_eq!(snap.peak_tx_bps, 50_000.0);
+
+        // Push 237 more samples at 4,000 rx, 2,000 tx (total 240 samples in history)
+        for _ in 0..237 {
+            t += Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
+            total_rx += 1000;
+            total_tx += 500;
+            backend.sample_from_interfaces(
+                &[mock_iface(
+                    1,
+                    InterfaceCategory::Physical,
+                    InterfaceMedium::Ethernet,
+                    1,
+                    total_rx,
+                    total_tx,
+                )],
+                t,
+            );
+        }
+        assert_eq!(backend.history.len(), HISTORY_CAPACITY);
+        assert_eq!(backend.chart_peak_rx, 100_000);
+
+        // Push 1 more sample: evicts sample 1 (20,000 rx). Peak 100,000 is still in history!
+        t += Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
+        total_rx += 1000;
+        total_tx += 500;
+        let snap = backend.sample_from_interfaces(
+            &[mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                total_rx,
+                total_tx,
+            )],
+            t,
+        );
+        assert_eq!(snap.peak_rx_bps, 100_000.0);
+
+        // Push 1 more sample: evicts sample 2 (the 100,000 peak holder!). Lazy rescan occurs.
+        // History now contains only 4,000 rx samples. Peak drops to 4,000!
+        t += Duration::from_millis(crate::SAMPLING_INTERVAL_MS);
+        total_rx += 1000;
+        total_tx += 500;
+        let snap = backend.sample_from_interfaces(
+            &[mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                total_rx,
+                total_tx,
+            )],
+            t,
+        );
+        assert_eq!(snap.peak_rx_bps, 4_000.0);
+        assert_eq!(snap.peak_tx_bps, 2_000.0);
+
+        // Reset session drops peaks to 0
+        backend.reset_session();
+        assert_eq!(backend.chart_peak_rx, 0);
+        assert_eq!(backend.chart_peak_tx, 0);
     }
 }

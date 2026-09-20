@@ -18,3 +18,7 @@ serde_json = { workspace = true }
 windows = { workspace = true }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 base64 = "0.23.1"
+
+[[bench]]
+name = "telemetry_bench"
+harness = false
