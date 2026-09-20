@@ -43,14 +43,18 @@ jobs:
       actions: read
       contents: read
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Check CI workflow status
         if: github.event_name != 'workflow_dispatch' || inputs.skip_ci_check != true
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           $sha = "${{ github.sha }}"
-          Write-Host "Verifying CI status for commit $sha..."
+          Write-Host "Verifying CI status for commit $sha in $env:GH_REPO..."
           $timeout = [DateTime]::UtcNow.AddMinutes(15)
 
           while ([DateTime]::UtcNow -lt $timeout) {
