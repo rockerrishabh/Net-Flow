@@ -379,4 +379,6 @@ jobs:
 
           Write-Host "Publishing submission for Product ID $env:STORE_PRODUCT_ID..."
           msstore publish -v "target/NetFlow_Store.msix" --appId "$env:STORE_PRODUCT_ID"
-          Write-Host "Submission published to Microsoft Store successfully! Partner Center will certify and release to catalog."
+          Write-Host "Package uploaded and draft submitted. Polling submission status until published..."
+          msstore submission poll "$env:STORE_PRODUCT_ID"
+          Write-Host "Submission certified and published to Microsoft Store catalog successfully!"
