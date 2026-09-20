@@ -318,5 +318,5 @@ jobs:
             --clientSecret "$env:PARTNER_CENTER_CLIENT_SECRET"
 
           Write-Host "Publishing submission for Product ID $env:STORE_PRODUCT_ID..."
-          msstore submission publish "$env:STORE_PRODUCT_ID" --packagePath "target/NetFlow_Store.msix"
+          msstore publish "target/NetFlow_Store.msix"
           Write-Host "Submission published to Microsoft Store successfully! Partner Center will certify and release to catalog."
