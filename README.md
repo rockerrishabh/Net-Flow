@@ -9,11 +9,22 @@
 *Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint.*
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.1.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
-[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](ms-windows-store://pdp/?productid=9PCR54NGJ94J)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
+
+<br/>
+<br/>
+
+<a href="https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_hero">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://get.microsoft.com/images/en-us%20dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://get.microsoft.com/images/en-us%20light.svg">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" alt="Get Net Flow from Microsoft Store" width="220" />
+  </picture>
+</a>
 
 </div>
 
@@ -37,7 +48,15 @@
 ### 1. Microsoft Store (Recommended)
 Net Flow is available directly through the Microsoft Store with seamless background updates:
 
-👉 **[Get Net Flow on the Microsoft Store (Product ID: 9PCR54NGJ94J)](ms-windows-store://pdp/?productid=9PCR54NGJ94J)**
+<a href="https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_install">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://get.microsoft.com/images/en-us%20dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://get.microsoft.com/images/en-us%20light.svg">
+    <img src="https://get.microsoft.com/images/en-us%20dark.svg" alt="Download Net Flow from Microsoft Store" width="200" />
+  </picture>
+</a>
+
+👉 *Or launch directly in the Windows Store app via protocol:* [`ms-windows-store://pdp/?productid=9PCR54NGJ94J`](ms-windows-store://pdp/?productid=9PCR54NGJ94J)
 
 ### 2. Local Developer Sideloading
 If building from source or testing modifications locally:
