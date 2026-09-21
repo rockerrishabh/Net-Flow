@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] - 2026-09-21
+
+### Changed
+
+- **Automatic Widgets Board Theme Synchronization**:
+  - Removed manual in-card theme selector from widget settings; the card automatically tracks the system Widgets Board surface.
+  - Enhanced theme detection in `query_windows_light_theme` to prioritize `SystemUsesLightTheme` (governing the Windows 11 Shell and Widgets Board), falling back to `AppsUseLightTheme`.
+  - Streamlined the Settings card layout across Small, Medium, and Large widgets with cleaner spacing.
+
+---
+
 ## [0.2.0] - 2026-09-21
 
 ### Added

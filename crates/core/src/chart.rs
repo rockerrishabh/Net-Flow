@@ -49,10 +49,10 @@ pub enum ThemeDetectionError {
     UnsupportedPlatform,
 }
 
-/// Fallible query for Windows application light theme.
-/// Returns Ok(true) if AppsUseLightTheme is set to 1.
-/// Returns Ok(false) if set to 0.
-/// Returns Err(ThemeDetectionError) if key or value is absent or fails to open.
+/// Fallible query for Windows shell and application light theme.
+/// In Windows 10/11, the Widgets Board is a Windows Shell surface whose theme is
+/// governed by `SystemUsesLightTheme` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`.
+/// Falls back to `AppsUseLightTheme` if `SystemUsesLightTheme` is absent.
 pub fn query_windows_light_theme() -> Result<bool, ThemeDetectionError> {
     #[cfg(windows)]
     unsafe {
@@ -63,30 +63,47 @@ pub fn query_windows_light_theme() -> Result<bool, ThemeDetectionError> {
             return Err(ThemeDetectionError::OpenKeyFailed(status.0 as i32));
         }
 
-        let value_name = w!("AppsUseLightTheme");
+        // 1. First probe SystemUsesLightTheme (governs Windows Shell: Taskbar, Start Menu, Widgets Board)
         let mut val_type = Default::default();
         let mut data: u32 = 0;
         let mut data_len = core::mem::size_of::<u32>() as u32;
 
         let query_status = RegQueryValueExW(
             hkey,
-            value_name,
+            w!("SystemUsesLightTheme"),
             None,
             Some(&mut val_type),
             Some(&mut data as *mut u32 as *mut u8),
             Some(&mut data_len),
         );
+
+        if query_status.is_ok() && val_type == REG_DWORD {
+            let _ = RegCloseKey(hkey);
+            return Ok(data == 1);
+        }
+
+        // 2. Fallback to AppsUseLightTheme
+        let mut data2: u32 = 0;
+        let mut data2_len = core::mem::size_of::<u32>() as u32;
+        let query_status2 = RegQueryValueExW(
+            hkey,
+            w!("AppsUseLightTheme"),
+            None,
+            Some(&mut val_type),
+            Some(&mut data2 as *mut u32 as *mut u8),
+            Some(&mut data2_len),
+        );
         let _ = RegCloseKey(hkey);
 
-        if query_status.is_err() {
-            return Err(ThemeDetectionError::QueryValueFailed(query_status.0 as i32));
+        if query_status2.is_ok() && val_type == REG_DWORD {
+            return Ok(data2 == 1);
         }
 
-        if val_type != REG_DWORD {
-            return Err(ThemeDetectionError::InvalidType);
+        if query_status2.is_err() {
+            return Err(ThemeDetectionError::QueryValueFailed(query_status2.0 as i32));
         }
 
-        Ok(data == 1)
+        Err(ThemeDetectionError::InvalidType)
     }
 
     #[cfg(not(windows))]

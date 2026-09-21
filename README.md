@@ -9,7 +9,7 @@
 *Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint.*
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.2.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -49,7 +49,7 @@
 ## 🚀 What's New in v0.2.0
 
 - **🚀 Auto-Start on Windows Login**: Added native packaged Win32 `<uap5:StartupTask>` (`NetFlowStartup`) integration. Net Flow now launches cleanly on Windows user login, ensuring pinned widgets are always populated without manual intervention or resident background services.
-- **🌓 Windows System Theme-Aware Sparklines**: Implemented automatic Windows Light/Dark mode detection via `AppsUseLightTheme` registry integration with resilient dark fallback. The dual-stream waveform dynamically switches between Dark mode (cyan `#38D9F0` / amber `#FFB020`) and Light mode (crisp ocean `#008CB4` / warm solar `#D75F00`) high-contrast palettes, with customizable in-card overrides (`Auto`, `Dark`, `Light`).
+- **🌓 Windows System Theme-Aware Sparklines**: Implemented automatic Windows Light/Dark mode detection querying `SystemUsesLightTheme` and `AppsUseLightTheme` registry keys with resilient dark fallback. The dual-stream waveform dynamically switches between Dark mode (cyan `#38D9F0` / amber `#FFB020`) and Light mode (crisp ocean `#008CB4` / warm solar `#D75F00`) high-contrast palettes, automatically matching the Windows 11 Widgets Board surface.
 - **📊 Customizable Graph Styles**: Added selectable visual rendering styles: `Area` (classic Catmull-Rom filled spline), `Line` (clean minimalist strokes), and `Bar` (discrete quantized bandwidth histogram columns).
 - **❄️ Theme & Style-Aware Idle Cache**: Upgraded the precomputed zero-CPU idle chart cache to index by resolved theme and graph style, guaranteeing zero rendering overhead during quiet network periods while instantaneously reflecting OS theme changes.
 - **🧈 Fluid Widget Rendering & Flicker Elimination**: Architected strict separation between static visual layout templates (`SetTemplate`) and dynamic telemetry payloads (`SetData`), eliminating 500 ms full-card visual tree tearing in the Windows Widgets Board. Added collision-free payload diffing with fast 64-bit hashing and exact string equality to bypass redundant WinRT IPC updates when telemetry is static, reducing idle IPC calls by up to 96%.

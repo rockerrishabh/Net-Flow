@@ -1673,7 +1673,7 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Row 2: Theme and Graph style
+        // Row 2: Graph style
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Small",
@@ -1684,33 +1684,7 @@ pub fn build_settings_card_for_size(
                     "items": [
                         {
                             "type": "TextBlock",
-                            "text": "Theme",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "theme",
-                            "style": "compact",
-                            "spacing": "None",
-                            "value": current_config.theme.to_str_value(),
-                            "choices": [
-                                { "title": "Auto", "value": "auto" },
-                                { "title": "Dark", "value": "dark" },
-                                { "title": "Light", "value": "light" }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "spacing": "Small",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Style",
+                            "text": "Graph style",
                             "weight": "Bolder",
                             "size": "Small",
                             "wrap": false
@@ -1794,7 +1768,7 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Row 2: 2-column layout for Theme and Graph style
+        // Row 2: Graph style
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Small",
@@ -1802,32 +1776,6 @@ pub fn build_settings_card_for_size(
                 {
                     "type": "Column",
                     "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Theme",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "theme",
-                            "style": "compact",
-                            "spacing": "Small",
-                            "value": current_config.theme.to_str_value(),
-                            "choices": [
-                                { "title": "Auto", "value": "auto" },
-                                { "title": "Dark", "value": "dark" },
-                                { "title": "Light", "value": "light" }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "spacing": "Medium",
                     "items": [
                         {
                             "type": "TextBlock",
