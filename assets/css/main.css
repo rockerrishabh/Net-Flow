@@ -3,8 +3,10 @@
    ========================================================================== */
 
 :root {
-  --font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Inter', Roboto, sans-serif;
-  --font-mono: 'Cascadia Code', 'Consolas', 'Fira Code', monospace;
+  --font-family:
+    "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont,
+    "Inter", Roboto, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", "Fira Code", monospace;
 
   /* Color Palette */
   --bg-base: #090c12;
@@ -51,7 +53,9 @@
   --transition-normal: 250ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -59,7 +63,15 @@
 
 html {
   scroll-behavior: smooth;
+  scroll-padding-top: 90px;
   color-scheme: dark;
+}
+
+/* Ensure all anchored target sections clear the sticky navbar with breathing room */
+section[id],
+div[id],
+.stats-strip[id] {
+  scroll-margin-top: 90px;
 }
 
 body {
@@ -82,24 +94,32 @@ body {
 }
 
 .ambient-glow::before {
-  content: '';
+  content: "";
   position: absolute;
   top: -15%;
   left: 20%;
   width: 650px;
   height: 650px;
-  background: radial-gradient(circle, rgba(56, 217, 240, 0.12) 0%, rgba(56, 217, 240, 0) 70%);
+  background: radial-gradient(
+    circle,
+    rgba(56, 217, 240, 0.12) 0%,
+    rgba(56, 217, 240, 0) 70%
+  );
   filter: blur(80px);
 }
 
 .ambient-glow::after {
-  content: '';
+  content: "";
   position: absolute;
   top: 30%;
   right: 15%;
   width: 550px;
   height: 550px;
-  background: radial-gradient(circle, rgba(255, 176, 32, 0.08) 0%, rgba(255, 176, 32, 0) 70%);
+  background: radial-gradient(
+    circle,
+    rgba(255, 176, 32, 0.08) 0%,
+    rgba(255, 176, 32, 0) 70%
+  );
   filter: blur(80px);
 }
 
@@ -242,9 +262,18 @@ body {
 }
 
 @keyframes pulse-ring {
-  0% { transform: scale(0.95); opacity: 1; }
-  50% { transform: scale(1.3); opacity: 0.5; }
-  100% { transform: scale(0.95); opacity: 1; }
+  0% {
+    transform: scale(0.95);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.3);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(0.95);
+    opacity: 1;
+  }
 }
 
 .hero-title {
@@ -282,7 +311,9 @@ body {
 
 .store-badge-link {
   display: inline-block;
-  transition: transform var(--transition-fast), filter var(--transition-fast);
+  transition:
+    transform var(--transition-fast),
+    filter var(--transition-fast);
   border-radius: 8px;
 }
 
@@ -306,18 +337,30 @@ body {
   font-weight: 600;
   color: var(--text-primary);
   text-decoration: none;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-subtle);
+  background: rgba(56, 217, 240, 0.06);
+  border: 1px solid rgba(56, 217, 240, 0.35);
   border-radius: var(--radius-sm);
   backdrop-filter: blur(10px);
-  transition: var(--transition-fast);
+  transition: all var(--transition-normal);
   height: 52px;
+  position: relative;
 }
 
 .btn-secondary:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: var(--border-highlight);
+  background: rgba(56, 217, 240, 0.12);
+  border-color: rgba(56, 217, 240, 0.6);
+  box-shadow: 0 0 20px rgba(56, 217, 240, 0.15), 0 4px 12px rgba(0, 0, 0, 0.2);
   transform: translateY(-2px);
+}
+
+.btn-secondary svg {
+  color: var(--accent-cyan);
+  opacity: 0.85;
+  transition: opacity var(--transition-fast);
+}
+
+.btn-secondary:hover svg {
+  opacity: 1;
 }
 
 .hero-meta-badges {
@@ -407,11 +450,13 @@ body {
   border: 1px solid var(--w11-border);
   border-radius: 10px;
   padding: 16px 18px 14px 18px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  box-shadow:
+    0 16px 36px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  font-family: 'Segoe UI', var(--font-family);
+  font-family: "Segoe UI", var(--font-family);
   user-select: none;
   transition: all var(--transition-normal);
 }
@@ -620,9 +665,16 @@ body {
   color: #cbd5e1;
 }
 
-.w11-app-rate .c-cyan { color: var(--accent-cyan); }
-.w11-app-rate .c-amber { color: var(--accent-amber); }
-.w11-app-rate .c-conns { color: var(--w11-muted); margin-left: 2px; }
+.w11-app-rate .c-cyan {
+  color: var(--accent-cyan);
+}
+.w11-app-rate .c-amber {
+  color: var(--accent-amber);
+}
+.w11-app-rate .c-conns {
+  color: var(--w11-muted);
+  margin-left: 2px;
+}
 
 /* 6. Session Footer Row */
 .w11-session-row {
@@ -659,8 +711,12 @@ body {
   font-size: 0.72rem;
 }
 
-.w11-session-right .c-cyan { color: var(--accent-cyan); }
-.w11-session-right .c-amber { color: var(--accent-amber); }
+.w11-session-right .c-cyan {
+  color: var(--accent-cyan);
+}
+.w11-session-right .c-amber {
+  color: var(--accent-amber);
+}
 
 /* ==========================================================================
    Engineering Performance Strip
@@ -669,7 +725,11 @@ body {
 .stats-strip {
   padding: 48px 0;
   margin: 40px 0;
-  background: linear-gradient(180deg, rgba(18, 24, 38, 0.4) 0%, rgba(10, 13, 20, 0.6) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(18, 24, 38, 0.4) 0%,
+    rgba(10, 13, 20, 0.6) 100%
+  );
   border-top: 1px solid var(--border-subtle);
   border-bottom: 1px solid var(--border-subtle);
 }
@@ -761,13 +821,18 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  transition: transform var(--transition-normal), border-color var(--transition-normal), box-shadow var(--transition-normal);
+  transition:
+    transform var(--transition-normal),
+    border-color var(--transition-normal),
+    box-shadow var(--transition-normal);
 }
 
 .feature-card:hover {
   transform: translateY(-4px);
   border-color: var(--border-highlight);
-  box-shadow: var(--shadow-lg), 0 0 24px rgba(56, 217, 240, 0.08);
+  box-shadow:
+    var(--shadow-lg),
+    0 0 24px rgba(56, 217, 240, 0.08);
 }
 
 .feature-icon-box {
@@ -815,9 +880,10 @@ body {
   box-shadow: var(--shadow-lg);
   backdrop-filter: blur(24px);
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 0.85fr 1.15fr;
   gap: 48px;
-  align-items: center;
+  align-items: start;
+  overflow: hidden;
 }
 
 .install-left {
@@ -830,6 +896,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .code-box {
@@ -839,15 +906,36 @@ body {
   padding: 18px 20px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
 }
 
 .code-box code {
   font-family: var(--font-mono);
-  font-size: 0.88rem;
+  font-size: 0.85rem;
   color: #38d9f0;
-  word-break: break-all;
+  white-space: nowrap;
+  overflow-x: auto;
+  flex: 1;
+  min-width: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56, 217, 240, 0.2) transparent;
+}
+
+.code-box code::-webkit-scrollbar {
+  height: 4px;
+}
+
+.code-box code::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.code-box code::-webkit-scrollbar-thumb {
+  background: rgba(56, 217, 240, 0.2);
+  border-radius: 4px;
+}
+
+.code-box code::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 217, 240, 0.35);
 }
 
 .copy-btn {
@@ -862,6 +950,7 @@ body {
   cursor: pointer;
   white-space: nowrap;
   transition: var(--transition-fast);
+  flex-shrink: 0;
 }
 
 .copy-btn:hover {
@@ -973,15 +1062,23 @@ body {
   align-items: center;
   padding: 20px;
   border-radius: var(--radius-lg);
-  background: radial-gradient(circle at 50% 30%, rgba(30, 41, 59, 0.45) 0%, rgba(15, 20, 32, 0.8) 100%);
+  background: radial-gradient(
+    circle at 50% 30%,
+    rgba(30, 41, 59, 0.45) 0%,
+    rgba(15, 20, 32, 0.8) 100%
+  );
   border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.6), 0 0 32px rgba(56, 217, 240, 0.12);
+  box-shadow:
+    0 24px 56px rgba(0, 0, 0, 0.6),
+    0 0 32px rgba(56, 217, 240, 0.12);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   min-height: 400px;
   width: 100%;
   max-width: 460px;
-  transition: max-width var(--transition-normal), transform var(--transition-normal);
+  transition:
+    max-width var(--transition-normal),
+    transform var(--transition-normal);
 }
 
 .real-widget-img {
@@ -990,7 +1087,9 @@ body {
   height: auto;
   border-radius: 8px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7);
-  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1), transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    opacity 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
   -webkit-user-drag: none;
 }
