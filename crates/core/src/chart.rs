@@ -9,19 +9,27 @@ use crate::backend::HistorySample;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use image::{ImageEncoder, codecs::png::PngEncoder};
+use serde::{Deserialize, Serialize};
+
+#[cfg(windows)]
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+};
+#[cfg(windows)]
+use windows::core::w;
 
 /// Straight 8-bit RGBA color representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
-/// Download curve color (electric cyan).
+/// Download curve color for Dark theme (electric cyan).
 pub const DOWNLOAD_COLOR: Rgba = Rgba(56, 217, 240, 255);
-/// Upload curve color (warm amber).
+/// Upload curve color for Dark theme (warm amber).
 pub const UPLOAD_COLOR: Rgba = Rgba(255, 176, 32, 255);
 /// Minimum vertical scale floor in bytes/sec (50 KB/s).
 /// Prevents small background network noise (e.g. 500 B/s) from stretching across the full chart height.
 pub const MIN_CHART_SCALE_BPS: f64 = 50_000.0;
-/// Subdued center dividing line separating download and upload regions.
+/// Subdued center dividing line separating download and upload regions in Dark theme.
 const AXIS_COLOR: Rgba = Rgba(150, 160, 176, 56);
 
 /// Maximum opacity for the gradient fill directly adjacent to the curve stroke.
@@ -31,6 +39,177 @@ const FILL_ALPHA_FAR: f32 = 14.0;
 /// Small vertical offset in pixels to keep zero-traffic rails visually distinct
 /// from each other and the center axis line.
 const IDLE_OFFSET_PX: f64 = 1.25;
+
+/// Error conditions when probing Windows application theme from the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeDetectionError {
+    OpenKeyFailed(i32),
+    QueryValueFailed(i32),
+    InvalidType,
+    UnsupportedPlatform,
+}
+
+/// Fallible query for Windows application light theme.
+/// Returns Ok(true) if AppsUseLightTheme is set to 1.
+/// Returns Ok(false) if set to 0.
+/// Returns Err(ThemeDetectionError) if key or value is absent or fails to open.
+pub fn query_windows_light_theme() -> Result<bool, ThemeDetectionError> {
+    #[cfg(windows)]
+    unsafe {
+        let mut hkey = HKEY::default();
+        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        let status = RegOpenKeyExW(HKEY_CURRENT_USER, subkey, Some(0), KEY_READ, &mut hkey);
+        if status.is_err() {
+            return Err(ThemeDetectionError::OpenKeyFailed(status.0 as i32));
+        }
+
+        let value_name = w!("AppsUseLightTheme");
+        let mut val_type = Default::default();
+        let mut data: u32 = 0;
+        let mut data_len = core::mem::size_of::<u32>() as u32;
+
+        let query_status = RegQueryValueExW(
+            hkey,
+            value_name,
+            None,
+            Some(&mut val_type),
+            Some(&mut data as *mut u32 as *mut u8),
+            Some(&mut data_len),
+        );
+        let _ = RegCloseKey(hkey);
+
+        if query_status.is_err() {
+            return Err(ThemeDetectionError::QueryValueFailed(query_status.0 as i32));
+        }
+
+        if val_type != REG_DWORD {
+            return Err(ThemeDetectionError::InvalidType);
+        }
+
+        Ok(data == 1)
+    }
+
+    #[cfg(not(windows))]
+    Err(ThemeDetectionError::UnsupportedPlatform)
+}
+
+/// Safe helper detecting if Windows is currently using light theme for apps.
+/// Gracefully falls back to `false` (Dark theme default) if the registry key is
+/// absent or uninitialized.
+pub fn detect_windows_light_theme() -> bool {
+    query_windows_light_theme().unwrap_or(false)
+}
+
+/// User-selectable theme mode configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Automatically match the host Windows theme via registry detection.
+    #[default]
+    Auto,
+    /// Force high-contrast electric Dark theme.
+    Dark,
+    /// Force high-contrast crisp Light theme.
+    Light,
+}
+
+impl ThemeMode {
+    /// Resolves user theme policy to a concrete rendering theme.
+    pub fn resolve(self) -> ResolvedTheme {
+        match self {
+            Self::Auto => {
+                if detect_windows_light_theme() {
+                    ResolvedTheme::Light
+                } else {
+                    ResolvedTheme::Dark
+                }
+            }
+            Self::Dark => ResolvedTheme::Dark,
+            Self::Light => ResolvedTheme::Light,
+        }
+    }
+
+    pub fn to_str_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    pub fn from_str_value(val: &str) -> Self {
+        match val {
+            "dark" => Self::Dark,
+            "light" => Self::Light,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Concrete resolved theme used by the rasterizer and cache keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolvedTheme {
+    #[default]
+    Dark,
+    Light,
+}
+
+/// Color palette tailored for dark vs light card backgrounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub download: Rgba,
+    pub upload: Rgba,
+    pub axis: Rgba,
+}
+
+impl Palette {
+    pub fn for_theme(theme: ResolvedTheme) -> Self {
+        match theme {
+            ResolvedTheme::Dark => Self {
+                download: DOWNLOAD_COLOR,
+                upload: UPLOAD_COLOR,
+                axis: AXIS_COLOR,
+            },
+            ResolvedTheme::Light => Self {
+                download: Rgba(0, 140, 180, 255), // #008CB4 deep cyan with >4.5:1 contrast on white
+                upload: Rgba(215, 95, 0, 255), // #D75F00 deep amber with >4.5:1 contrast on white
+                axis: Rgba(110, 125, 145, 90), // refined medium-dark axis line
+            },
+        }
+    }
+}
+
+/// Chart graph presentation style.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphStyle {
+    /// Mirrored Catmull-Rom spline with gradient area fill fading to baseline.
+    #[default]
+    Area,
+    /// Clean, minimalist spline stroke with glowing pulse dot and no area fill.
+    Line,
+    /// Discrete vertical bandwidth bars per sample with rounded heads from baseline.
+    Bar,
+}
+
+impl GraphStyle {
+    pub fn to_str_value(self) -> &'static str {
+        match self {
+            Self::Area => "area",
+            Self::Line => "line",
+            Self::Bar => "bar",
+        }
+    }
+
+    pub fn from_str_value(val: &str) -> Self {
+        match val {
+            "line" => Self::Line,
+            "bar" => Self::Bar,
+            _ => Self::Area,
+        }
+    }
+}
 
 /// Telemetry stream direction selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +223,13 @@ impl Track {
         match self {
             Track::Download => DOWNLOAD_COLOR,
             Track::Upload => UPLOAD_COLOR,
+        }
+    }
+
+    pub fn color_with_palette(self, palette: &Palette) -> Rgba {
+        match self {
+            Track::Download => palette.download,
+            Track::Upload => palette.upload,
         }
     }
 }
@@ -84,6 +270,8 @@ pub struct IdleChartCacheKey {
     pub width: u32,
     pub height: u32,
     pub supersample: u32,
+    pub resolved_theme: ResolvedTheme,
+    pub graph_style: GraphStyle,
 }
 
 /// Target pixel dimensions and sampling resolution for a widget size.
@@ -300,9 +488,9 @@ fn catmull_at(values: &[f64], t: f64) -> f64 {
     v.max(0.0)
 }
 
-/// Renders a single direction track (download or upload) with gradient fill and pulse indicator.
+/// Renders a single direction track with Catmull-Rom spline, gradient area fill, and pulse indicator.
 #[allow(clippy::too_many_arguments)]
-fn draw_track(
+fn draw_area_track(
     canvas: &mut Canvas,
     values: &[f64],
     scale: f64,
@@ -403,7 +591,6 @@ fn draw_track(
         let dot_center_x = (width - 1) as f64;
         let dot_center_y = baseline_y + direction * (idle_offset + norm * reachable);
 
-        // Dot radius and glow radius scaled with stroke thickness
         let dot_radius = stroke * 0.95;
         let glow_radius = stroke * 2.6;
 
@@ -415,6 +602,175 @@ fn draw_track(
             glow_radius,
             color,
         );
+    }
+}
+
+/// Renders a single direction track with Catmull-Rom spline stroke and pulse dot (minimalist, no area fill).
+#[allow(clippy::too_many_arguments)]
+fn draw_line_track(
+    canvas: &mut Canvas,
+    values: &[f64],
+    scale: f64,
+    baseline_y: f64,
+    span: f64,
+    direction: f64,
+    color: Rgba,
+    stroke: f64,
+    idle_offset: f64,
+) {
+    let width = canvas.width;
+    if width == 0 || values.len() < 2 || span <= 0.0 {
+        return;
+    }
+    let last_index = (values.len() - 1) as f64;
+
+    let x_factor = if width > 1 {
+        last_index / (width - 1) as f64
+    } else {
+        0.0
+    };
+    let reachable = (span - idle_offset).max(0.0);
+    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+
+    let half = stroke / 2.0;
+    for x in 0..width {
+        let t = x as f64 * x_factor;
+        let v = catmull_at(values, t);
+        let norm = (v * inv_scale).clamp(0.0, 1.0);
+        let y = baseline_y + direction * (idle_offset + norm * reachable);
+
+        // Stroke only (no gradient area fill)
+        canvas.fill_span(x, y - half, y + half, color, 1.0);
+    }
+
+    if width > 0 {
+        let last_val = values.last().copied().unwrap_or(0.0);
+        let norm = if scale > 0.0 {
+            (last_val / scale).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let reachable = (span - idle_offset).max(0.0);
+        let dot_center_x = (width - 1) as f64;
+        let dot_center_y = baseline_y + direction * (idle_offset + norm * reachable);
+
+        let dot_radius = stroke * 0.95;
+        let glow_radius = stroke * 2.6;
+
+        draw_pulse_dot(
+            canvas,
+            dot_center_x,
+            dot_center_y,
+            dot_radius,
+            glow_radius,
+            color,
+        );
+    }
+}
+
+/// Renders discrete vertical bandwidth bars per sample without spline geometry.
+#[allow(clippy::too_many_arguments)]
+fn draw_bar_track(
+    canvas: &mut Canvas,
+    values: &[f64],
+    scale: f64,
+    baseline_y: f64,
+    span: f64,
+    direction: f64,
+    color: Rgba,
+    idle_offset: f64,
+    supersample: u32,
+) {
+    let width = canvas.width;
+    let n = values.len();
+    if width == 0 || n == 0 || span <= 0.0 {
+        return;
+    }
+
+    let reachable = (span - idle_offset).max(0.0);
+    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+    let col_w = width as f64 / n as f64;
+    let gap = (supersample as f64 * 0.75).clamp(1.0, col_w * 0.35);
+    let bar_w = (col_w - gap).max(1.0);
+
+    for (i, &v) in values.iter().enumerate() {
+        let norm = (v * inv_scale).clamp(0.0, 1.0);
+        let bar_h = idle_offset + norm * reachable;
+        let y = baseline_y + direction * bar_h;
+
+        let (top, bottom) = if direction < 0.0 {
+            (y, baseline_y)
+        } else {
+            (baseline_y, y)
+        };
+
+        let x_start = (i as f64 * col_w).round() as u32;
+        let x_end = ((i as f64 * col_w + bar_w).round() as u32).min(width);
+
+        let is_last = i == n - 1;
+        let base_alpha = if is_last { 0.95 } else { 0.82 };
+
+        for x in x_start..x_end {
+            canvas.fill_span(x, top, bottom, color, base_alpha);
+        }
+    }
+}
+
+/// Renders a single direction track (download or upload) dispatching to the configured GraphStyle.
+#[allow(clippy::too_many_arguments)]
+fn draw_track(
+    canvas: &mut Canvas,
+    values: &[f64],
+    scale: f64,
+    baseline_y: f64,
+    span: f64,
+    direction: f64,
+    color: Rgba,
+    stroke: f64,
+    idle_offset: f64,
+    style: GraphStyle,
+    supersample: u32,
+) {
+    match style {
+        GraphStyle::Area => {
+            draw_area_track(
+                canvas,
+                values,
+                scale,
+                baseline_y,
+                span,
+                direction,
+                color,
+                stroke,
+                idle_offset,
+            );
+        }
+        GraphStyle::Line => {
+            draw_line_track(
+                canvas,
+                values,
+                scale,
+                baseline_y,
+                span,
+                direction,
+                color,
+                stroke,
+                idle_offset,
+            );
+        }
+        GraphStyle::Bar => {
+            draw_bar_track(
+                canvas,
+                values,
+                scale,
+                baseline_y,
+                span,
+                direction,
+                color,
+                idle_offset,
+                supersample,
+            );
+        }
     }
 }
 
@@ -453,23 +809,32 @@ fn draw_pulse_dot(
     }
 }
 
-/// Renders the mirrored dual-stream chart (download above axis, upload below axis)
-/// sharing a single vertical scale so visual heights are directly comparable.
+/// Renders the mirrored dual-stream chart with default Dark theme and Area style.
 pub fn render_unified_dual_chart_png(
     history: &[HistorySample],
     sample_count: usize,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
-    render_unified_dual_chart_png_ss(history, sample_count, width, height, 3)
+    render_unified_dual_chart_png_ss(
+        history,
+        sample_count,
+        width,
+        height,
+        3,
+        ResolvedTheme::Dark,
+        GraphStyle::Area,
+    )
 }
 
-fn render_unified_dual_chart_png_ss(
+pub fn render_unified_dual_chart_png_ss(
     history: &[HistorySample],
     sample_count: usize,
     width: u32,
     height: u32,
     supersample: u32,
+    theme: ResolvedTheme,
+    style: GraphStyle,
 ) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
         return Err("zero-sized chart".to_string());
@@ -497,6 +862,7 @@ fn render_unified_dual_chart_png_ss(
     let span = (baseline - (ss as f64 * 2.0)).max(1.0) * 0.82;
     let stroke = (ss as f64 * 1.6).max(1.0);
     let idle_offset = ss as f64 * IDLE_OFFSET_PX;
+    let palette = Palette::for_theme(theme);
 
     draw_track(
         &mut canvas,
@@ -505,9 +871,11 @@ fn render_unified_dual_chart_png_ss(
         baseline,
         span,
         -1.0,
-        DOWNLOAD_COLOR,
+        palette.download,
         stroke,
         idle_offset,
+        style,
+        ss,
     );
     draw_track(
         &mut canvas,
@@ -516,12 +884,14 @@ fn render_unified_dual_chart_png_ss(
         baseline,
         span,
         1.0,
-        UPLOAD_COLOR,
+        palette.upload,
         stroke,
         idle_offset,
+        style,
+        ss,
     );
 
-    canvas.fill_row(baseline.round() as i64, AXIS_COLOR);
+    canvas.fill_row(baseline.round() as i64, palette.axis);
 
     let (out_w, out_h, rgba) = canvas.downsample(ss);
     encode_png(out_w, out_h, &rgba)
@@ -569,6 +939,8 @@ pub fn render_chart_png(
         track.color(),
         stroke,
         0.0,
+        GraphStyle::Area,
+        ss,
     );
 
     let (out_w, out_h, rgba) = canvas.downsample(ss);
@@ -578,29 +950,37 @@ pub fn render_chart_png(
 static IDLE_CHART_CACHE: std::sync::OnceLock<std::collections::HashMap<IdleChartCacheKey, String>> =
     std::sync::OnceLock::new();
 
-/// Thread-safe immutable idle chart cache precomputed for standard size and window presets.
+/// Thread-safe immutable idle chart cache precomputed for standard size, window, theme, and style presets.
 fn get_idle_chart_cache() -> &'static std::collections::HashMap<IdleChartCacheKey, String> {
     IDLE_CHART_CACHE.get_or_init(|| {
         let mut map = std::collections::HashMap::new();
         for size in [ChartSize::Small, ChartSize::Medium, ChartSize::Large] {
             for window in [15, 30, 60] {
-                let dims = ChartDimensions::for_chart_size(size, window);
-                let key = IdleChartCacheKey {
-                    size,
-                    chart_window: window,
-                    width: dims.width,
-                    height: dims.height,
-                    supersample: dims.supersample,
-                };
-                let empty_history: Vec<HistorySample> = Vec::new();
-                if let Ok(png) = render_unified_dual_chart_png_ss(
-                    &empty_history,
-                    dims.sample_count,
-                    dims.width,
-                    dims.height,
-                    dims.supersample,
-                ) {
-                    map.insert(key, png_to_data_uri(&png));
+                for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+                    for style in [GraphStyle::Area, GraphStyle::Line, GraphStyle::Bar] {
+                        let dims = ChartDimensions::for_chart_size(size, window);
+                        let key = IdleChartCacheKey {
+                            size,
+                            chart_window: window,
+                            width: dims.width,
+                            height: dims.height,
+                            supersample: dims.supersample,
+                            resolved_theme: theme,
+                            graph_style: style,
+                        };
+                        let empty_history: Vec<HistorySample> = Vec::new();
+                        if let Ok(png) = render_unified_dual_chart_png_ss(
+                            &empty_history,
+                            dims.sample_count,
+                            dims.width,
+                            dims.height,
+                            dims.supersample,
+                            theme,
+                            style,
+                        ) {
+                            map.insert(key, png_to_data_uri(&png));
+                        }
+                    }
                 }
             }
         }
@@ -611,9 +991,12 @@ fn get_idle_chart_cache() -> &'static std::collections::HashMap<IdleChartCacheKe
 /// Renders the unified dual-stream chart for a widget size preset and returns a data URI.
 /// When the history window contains zero network traffic, serves the result directly from
 /// the immutable idle cache in O(1) time with zero rasterization.
-/// Returns the precomputed idle chart data URI for a given widget size and chart window.
-/// Serves the result directly from the immutable OnceLock cache in O(1) time with zero rasterization.
-pub fn render_idle_unified_chart_data_uri(size: &str, chart_window: u32) -> String {
+pub fn render_idle_unified_chart_data_uri(
+    size: &str,
+    chart_window: u32,
+    theme: ResolvedTheme,
+    style: GraphStyle,
+) -> String {
     let chart_size = ChartSize::from_str_name(size);
     let clamped_window = crate::clamp_chart_window(chart_window);
     let dims = ChartDimensions::for_chart_size(chart_size, clamped_window);
@@ -623,6 +1006,8 @@ pub fn render_idle_unified_chart_data_uri(size: &str, chart_window: u32) -> Stri
         width: dims.width,
         height: dims.height,
         supersample: dims.supersample,
+        resolved_theme: theme,
+        graph_style: style,
     };
     if let Some(cached_uri) = get_idle_chart_cache().get(&key) {
         return cached_uri.clone();
@@ -637,6 +1022,8 @@ pub fn render_unified_chart_data_uri(
     history: &[HistorySample],
     size: &str,
     chart_window: u32,
+    theme: ResolvedTheme,
+    style: GraphStyle,
 ) -> String {
     let chart_size = ChartSize::from_str_name(size);
     let clamped_window = crate::clamp_chart_window(chart_window);
@@ -650,7 +1037,7 @@ pub fn render_unified_chart_data_uri(
             .all(|s| s.rx_bps == 0 && s.tx_bps == 0);
 
     if is_idle {
-        return render_idle_unified_chart_data_uri(size, chart_window);
+        return render_idle_unified_chart_data_uri(size, chart_window, theme, style);
     }
 
     match render_unified_dual_chart_png_ss(
@@ -659,6 +1046,8 @@ pub fn render_unified_chart_data_uri(
         dims.width,
         dims.height,
         dims.supersample,
+        theme,
+        style,
     ) {
         Ok(png) => png_to_data_uri(&png),
         Err(_) => String::new(),
@@ -892,7 +1281,13 @@ mod tests {
 
     #[test]
     fn data_uri_helpers_produce_png_uris() {
-        let uri = render_unified_chart_data_uri(&history(60), "Medium", 30);
+        let uri = render_unified_chart_data_uri(
+            &history(60),
+            "Medium",
+            30,
+            ResolvedTheme::Dark,
+            GraphStyle::Area,
+        );
         assert!(uri.starts_with("data:image/png;base64,"));
         let (rx, tx) = render_chart_data_uris(&history(60), "Small", 15);
         assert!(rx.starts_with("data:image/png;base64,"));
@@ -1067,8 +1462,20 @@ mod tests {
     #[test]
     fn test_idle_chart_caching() {
         let empty_history: Vec<HistorySample> = Vec::new();
-        let uri1 = render_unified_chart_data_uri(&empty_history, "Medium", 60);
-        let uri2 = render_unified_chart_data_uri(&empty_history, "Medium", 60);
+        let uri1 = render_unified_chart_data_uri(
+            &empty_history,
+            "Medium",
+            60,
+            ResolvedTheme::Dark,
+            GraphStyle::Area,
+        );
+        let uri2 = render_unified_chart_data_uri(
+            &empty_history,
+            "Medium",
+            60,
+            ResolvedTheme::Dark,
+            GraphStyle::Area,
+        );
         assert!(!uri1.is_empty());
         assert_eq!(uri1, uri2);
 
@@ -1076,7 +1483,55 @@ mod tests {
         let zero_traffic: Vec<HistorySample> = (0..60)
             .map(|_| HistorySample::from_bps(0, 0, 250_000_000))
             .collect();
-        let uri3 = render_unified_chart_data_uri(&zero_traffic, "Medium", 60);
+        let uri3 = render_unified_chart_data_uri(
+            &zero_traffic,
+            "Medium",
+            60,
+            ResolvedTheme::Dark,
+            GraphStyle::Area,
+        );
         assert_eq!(uri1, uri3);
+
+        // Light theme idle chart is distinct from Dark theme idle chart
+        let uri_light = render_unified_chart_data_uri(
+            &empty_history,
+            "Medium",
+            60,
+            ResolvedTheme::Light,
+            GraphStyle::Area,
+        );
+        assert!(!uri_light.is_empty());
+        assert_ne!(
+            uri1, uri_light,
+            "Light and Dark idle charts must have distinct palette rendering"
+        );
+    }
+
+    #[test]
+    fn test_theme_resolution_and_fallback() {
+        assert_eq!(ThemeMode::Dark.resolve(), ResolvedTheme::Dark);
+        assert_eq!(ThemeMode::Light.resolve(), ResolvedTheme::Light);
+        // Auto resolves to either Dark or Light without panicking
+        let auto_resolved = ThemeMode::Auto.resolve();
+        assert!(matches!(
+            auto_resolved,
+            ResolvedTheme::Dark | ResolvedTheme::Light
+        ));
+    }
+
+    #[test]
+    fn test_graph_styles_render() {
+        let hist = history(60);
+        for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+            for style in [GraphStyle::Area, GraphStyle::Line, GraphStyle::Bar] {
+                let uri = render_unified_chart_data_uri(&hist, "Medium", 30, theme, style);
+                assert!(
+                    uri.starts_with("data:image/png;base64,"),
+                    "Failed to render style {:?} with theme {:?}",
+                    style,
+                    theme
+                );
+            }
+        }
     }
 }

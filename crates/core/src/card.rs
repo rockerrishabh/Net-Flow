@@ -1,9 +1,35 @@
 use crate::backend::{InterfaceMedium, NetworkSnapshot};
-use crate::chart::{render_idle_unified_chart_data_uri, render_unified_chart_data_uri};
+use crate::chart::{
+    GraphStyle, ThemeMode, render_idle_unified_chart_data_uri, render_unified_chart_data_uri,
+};
 use crate::format::{SpeedUnit, format_bandwidth, format_bandwidth_with_unit, format_bytes};
 use crate::icons;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration;
+
+/// Throughput threshold above which telemetry publication accelerates to 500 ms (250 KiB/s).
+pub const BURST_THRESHOLD_BPS: f64 = 250.0 * 1024.0;
+
+/// Throughput threshold for moderate background activity updating at 1,000 ms (10 KiB/s).
+pub const MODERATE_THRESHOLD_BPS: f64 = 10.0 * 1024.0;
+
+/// Computes the traffic-adaptive data publication interval based on bidirectional throughput.
+///
+/// Traffic metric: `traffic = max(download_rate, upload_rate)`
+/// - Burst traffic (>= 250 KiB/s): 500 ms (2 Hz) for fluid, responsive waveform animation.
+/// - Moderate traffic (10 KiB/s .. 250 KiB/s): 1,000 ms (1 Hz) to balance freshness with host load.
+/// - Low / near-idle traffic (< 10 KiB/s): 1,500 ms (combined with Phase B payload diffing).
+pub fn compute_adaptive_ui_interval(download_rate: f64, upload_rate: f64) -> Duration {
+    let traffic = download_rate.max(upload_rate);
+    if traffic >= BURST_THRESHOLD_BPS {
+        Duration::from_millis(500)
+    } else if traffic >= MODERATE_THRESHOLD_BPS {
+        Duration::from_millis(1000)
+    } else {
+        Duration::from_millis(1500)
+    }
+}
 
 /// User configuration options saved in the widget's persistent CustomState.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -17,6 +43,12 @@ pub struct WidgetConfig {
     /// Currently visible page in the active apps list (0-indexed).
     #[serde(default)]
     pub apps_page: usize,
+    /// Theme preference: Auto, Dark, or Light.
+    #[serde(default)]
+    pub theme: ThemeMode,
+    /// Presentation style of the sparkline chart: Area, Line, or Bar.
+    #[serde(default)]
+    pub graph_style: GraphStyle,
 }
 
 impl Default for WidgetConfig {
@@ -26,6 +58,8 @@ impl Default for WidgetConfig {
             chart_window: 30,
             apps_expanded: false,
             apps_page: 0,
+            theme: ThemeMode::Auto,
+            graph_style: GraphStyle::Area,
         }
     }
 }
@@ -59,7 +93,7 @@ const MEDIUM_LAYOUT: Layout = Layout {
     value_size: "Medium",
     chart_size: "Medium",
     apps_collapsed: 3,
-    apps_page_size: 5,
+    apps_page_size: 4,
     apps_name_budget: 22,
     show_session: true,
 };
@@ -73,17 +107,21 @@ const LARGE_LAYOUT: Layout = Layout {
     show_session: true,
 };
 
+fn layout_for_size(size: &str) -> &'static Layout {
+    match size {
+        "Small" => &SMALL_LAYOUT,
+        "Large" => &LARGE_LAYOUT,
+        _ => &MEDIUM_LAYOUT,
+    }
+}
+
 /// Generates an Adaptive Card v1.6 JSON template for the current snapshot and widget size.
 pub fn build_adaptive_card(
     snapshot: &NetworkSnapshot,
     size: &str,
     config: &WidgetConfig,
 ) -> String {
-    let layout = match size {
-        "Small" => &SMALL_LAYOUT,
-        "Large" => &LARGE_LAYOUT,
-        _ => &MEDIUM_LAYOUT,
-    };
+    let layout = layout_for_size(size);
 
     serde_json::to_string(&build_card(snapshot, config, layout))
         .unwrap_or_else(|_| "{}".to_string())
@@ -212,10 +250,86 @@ fn glyph_column(url: &str, px: u32, alt: &str, spacing: &str) -> Value {
     })
 }
 
-/// A tappable icon control (used for expand / collapse / paging) rendered as a
-/// bare glyph rather than a full-width Adaptive Card button.
-fn icon_button_column(url: &str, verb: &str, tooltip: &str) -> Value {
-    icon_button_column_sized(url, 18, verb, tooltip)
+/// A tappable icon control rendered inside an explicit hit-target container
+/// with centered content to provide a clean, tactile Fluent hover pill/effect.
+fn icon_button_box(url: &str, px: u32, verb: &str, tooltip: &str) -> Value {
+    json!({
+        "type": "Container",
+        "minHeight": "28px",
+        "roundedCorners": true,
+        "verticalContentAlignment": "Center",
+        "horizontalAlignment": "Center",
+        "selectAction": {
+            "type": "Action.Execute",
+            "verb": verb,
+            "title": tooltip,
+            "tooltip": tooltip
+        },
+        "items": [
+            {
+                "type": "Image",
+                "url": url,
+                "altText": tooltip,
+                "width": format!("{}px", px),
+                "height": format!("{}px", px),
+                "horizontalAlignment": "Center",
+                "size": "Auto",
+                "spacing": "None"
+            }
+        ]
+    })
+}
+
+/// A tappable text button control rendered inside an explicit hit-target container
+/// with centered content to provide a clean, tactile Fluent hover pill/effect.
+fn text_button_box(
+    text: &str,
+    width_px: Option<u32>,
+    verb: &str,
+    tooltip: &str,
+    color: Option<&str>,
+    is_bold: bool,
+    associated_inputs: Option<&str>,
+) -> Value {
+    let mut select_action = json!({
+        "type": "Action.Execute",
+        "verb": verb,
+        "title": tooltip,
+        "tooltip": tooltip
+    });
+    if let Some(inputs) = associated_inputs {
+        select_action["associatedInputs"] = json!(inputs);
+    }
+
+    let mut text_item = json!({
+        "type": "TextBlock",
+        "text": text,
+        "size": "Small",
+        "horizontalAlignment": "Center",
+        "wrap": false
+    });
+    if is_bold {
+        text_item["weight"] = json!("Bolder");
+    }
+    if let Some(c) = color {
+        text_item["color"] = json!(c);
+    } else {
+        text_item["isSubtle"] = json!(true);
+    }
+
+    let mut container = json!({
+        "type": "Container",
+        "minHeight": "28px",
+        "roundedCorners": true,
+        "verticalContentAlignment": "Center",
+        "horizontalAlignment": "Center",
+        "selectAction": select_action,
+        "items": [text_item]
+    });
+    if let Some(w) = width_px {
+        container["width"] = json!(format!("{}px", w));
+    }
+    container
 }
 
 fn icon_button_column_spaced(
@@ -227,21 +341,123 @@ fn icon_button_column_spaced(
 ) -> Value {
     json!({
         "type": "Column",
-        "width": "auto",
+        "width": "28px",
+        "roundedCorners": true,
         "verticalContentAlignment": "Center",
         "spacing": spacing,
-        "selectAction": {
-            "type": "Action.Execute",
-            "verb": verb,
-            "title": tooltip,
-            "tooltip": tooltip
-        },
-        "items": [glyph(url, px, tooltip)]
+        "items": [icon_button_box(url, px, verb, tooltip)]
     })
 }
 
 fn icon_button_column_sized(url: &str, px: u32, verb: &str, tooltip: &str) -> Value {
     icon_button_column_spaced(url, px, verb, tooltip, "Small")
+}
+
+fn icon_button_column(url: &str, verb: &str, tooltip: &str) -> Value {
+    icon_button_column_sized(url, 16, verb, tooltip)
+}
+
+fn icon_button_column_when(
+    url: &str,
+    px: u32,
+    verb: &str,
+    tooltip: &str,
+    when: &str,
+    spacing: &str,
+) -> Value {
+    json!({
+        "type": "Column",
+        "$when": when,
+        "width": "28px",
+        "roundedCorners": true,
+        "verticalContentAlignment": "Center",
+        "spacing": spacing,
+        "items": [icon_button_box(url, px, verb, tooltip)]
+    })
+}
+
+/// A column that holds a native text glyph (such as "↓" or "↑"), avoiding async image decoding.
+fn text_glyph_column(text: &str, color: &str, size: &str, spacing: &str) -> Value {
+    json!({
+        "type": "Column",
+        "width": "auto",
+        "verticalContentAlignment": "Center",
+        "spacing": spacing,
+        "items": [
+            {
+                "type": "TextBlock",
+                "text": text,
+                "size": size,
+                "color": color,
+                "weight": "Bolder",
+                "wrap": false
+            }
+        ]
+    })
+}
+
+/// Template for a single fixed active app slot with stable visual elements.
+fn app_slot_template(slot: usize) -> Value {
+    let vis_cond = format!("${{app{}_visible == true}}", slot);
+    let icon_bind = format!("${{app{}_icon}}", slot);
+    let name_bind = format!("${{app{}_name}}", slot);
+    let rate_bind = format!("${{app{}_rate}}", slot);
+    let weight_bind = format!("${{app{}_weight}}", slot);
+    let subtle_bind = format!("${{app{}_isSubtle}}", slot);
+
+    json!({
+        "type": "ColumnSet",
+        "$when": vis_cond,
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
+                "spacing": "None",
+                "items": [
+                    {
+                        "type": "Image",
+                        "url": icon_bind,
+                        "width": "16px",
+                        "height": "16px",
+                        "altText": name_bind
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "verticalContentAlignment": "Center",
+                "spacing": "Small",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": name_bind,
+                        "size": "Default",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
+                "spacing": "Small",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": rate_bind,
+                        "size": "Small",
+                        "weight": weight_bind,
+                        "isSubtle": subtle_bind,
+                        "horizontalAlignment": "Right",
+                        "wrap": false
+                    }
+                ]
+            }
+        ]
+    })
 }
 
 /// Header: medium glyph, interface name, live connection count, and settings button.
@@ -292,13 +508,88 @@ fn header_row(snapshot: &NetworkSnapshot) -> Value {
                     }
                 ]
             },
-            icon_button_column_spaced(icons::SETTINGS, 15, "open_settings", "Customize widget", "Medium")
+            icon_button_column_spaced(icons::SETTINGS, 16, "open_settings", "Customize widget", "Small")
         ]
     })
 }
 
 /// One headline metric: direction glyph + label, big value, subtle peak.
-fn metric_column(glyph_uri: &str, label: &str, value: &str, peak: &str, value_size: &str) -> Value {
+fn metric_column(
+    glyph_uri: &str,
+    label: &str,
+    value: &str,
+    peak: &str,
+    value_size: &str,
+    right_aligned: bool,
+) -> Value {
+    let header_columns = if right_aligned {
+        vec![
+            json!({
+                "type": "Column",
+                "width": "stretch",
+                "items": []
+            }),
+            glyph_column(glyph_uri, 12, label, "None"),
+            json!({
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
+                "spacing": "Small",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": label,
+                        "size": "Small",
+                        "isSubtle": true,
+                        "horizontalAlignment": "Right",
+                        "wrap": false
+                    }
+                ]
+            }),
+        ]
+    } else {
+        vec![
+            glyph_column(glyph_uri, 12, label, "None"),
+            json!({
+                "type": "Column",
+                "width": "stretch",
+                "verticalContentAlignment": "Center",
+                "spacing": "Small",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": label,
+                        "size": "Small",
+                        "isSubtle": true,
+                        "wrap": false
+                    }
+                ]
+            }),
+        ]
+    };
+
+    let mut value_block = json!({
+        "type": "TextBlock",
+        "text": value,
+        "size": value_size,
+        "weight": "Bolder",
+        "spacing": "None",
+        "wrap": false
+    });
+    let mut peak_block = json!({
+        "type": "TextBlock",
+        "text": format!("Peak {}", peak),
+        "size": "Small",
+        "isSubtle": true,
+        "spacing": "None",
+        "wrap": false
+    });
+
+    if right_aligned {
+        value_block["horizontalAlignment"] = json!("Right");
+        peak_block["horizontalAlignment"] = json!("Right");
+    }
+
     json!({
         "type": "Column",
         "width": "stretch",
@@ -306,41 +597,10 @@ fn metric_column(glyph_uri: &str, label: &str, value: &str, peak: &str, value_si
             {
                 "type": "ColumnSet",
                 "spacing": "None",
-                "columns": [
-                    glyph_column(glyph_uri, 12, label, "None"),
-                    {
-                        "type": "Column",
-                        "width": "stretch",
-                        "verticalContentAlignment": "Center",
-                        "spacing": "Small",
-                        "items": [
-                            {
-                                "type": "TextBlock",
-                                "text": label,
-                                "size": "Small",
-                                "isSubtle": true,
-                                "wrap": false
-                            }
-                        ]
-                    }
-                ]
+                "columns": header_columns
             },
-            {
-                "type": "TextBlock",
-                "text": value,
-                "size": value_size,
-                "weight": "Bolder",
-                "spacing": "None",
-                "wrap": false
-            },
-            {
-                "type": "TextBlock",
-                "text": format!("Peak {}", peak),
-                "size": "Small",
-                "isSubtle": true,
-                "spacing": "None",
-                "wrap": false
-            }
+            value_block,
+            peak_block
         ]
     })
 }
@@ -358,14 +618,16 @@ fn metrics_row(snapshot: &NetworkSnapshot, config: &WidgetConfig, value_size: &s
                 "Download",
                 &fmt_bw(snapshot.rx_bps, config.speed_unit),
                 &fmt_bw(window_peak_rx, config.speed_unit),
-                value_size
+                value_size,
+                false
             ),
             metric_column(
                 icons::ARROW_UP,
                 "Upload",
                 &fmt_bw(snapshot.tx_bps, config.speed_unit),
                 &fmt_bw(window_peak_tx, config.speed_unit),
-                value_size
+                value_size,
+                true
             )
         ]
     })
@@ -377,13 +639,27 @@ fn chart_element(
     config: &WidgetConfig,
     chart_size: &str,
 ) -> Vec<Value> {
+    let resolved_theme = config.theme.resolve();
+    let graph_style = config.graph_style;
+
     // O(1) idle bypass: if both incremental peaks across the entire history buffer are 0,
     // we are guaranteed that every sample in any chart window is 0 bps. Directly fetch
     // the precomputed idle chart from the immutable OnceLock cache.
     let uri = if snapshot.peak_rx_bps == 0.0 && snapshot.peak_tx_bps == 0.0 {
-        render_idle_unified_chart_data_uri(chart_size, config.chart_window)
+        render_idle_unified_chart_data_uri(
+            chart_size,
+            config.chart_window,
+            resolved_theme,
+            graph_style,
+        )
     } else {
-        render_unified_chart_data_uri(&snapshot.history, chart_size, config.chart_window)
+        render_unified_chart_data_uri(
+            &snapshot.history,
+            chart_size,
+            config.chart_window,
+            resolved_theme,
+            graph_style,
+        )
     };
     if uri.is_empty() {
         return Vec::new();
@@ -636,7 +912,7 @@ fn session_row(snapshot: &NetworkSnapshot) -> Value {
                     }
                 ]
             },
-            icon_button_column_sized(icons::MEDIUM_LOOPBACK, 13, "reset_session", &tooltip),
+            icon_button_column_sized(icons::MEDIUM_LOOPBACK, 15, "reset_session", &tooltip),
             {
                 "type": "Column",
                 "width": "stretch",
@@ -699,6 +975,562 @@ fn build_card(snapshot: &NetworkSnapshot, config: &WidgetConfig, layout: &Layout
     })
 }
 
+/// Builds a static Adaptive Card template for the given widget size with `${...}` binding expressions.
+pub fn build_adaptive_card_template(size: &str) -> String {
+    let layout = layout_for_size(size);
+    let mut body = Vec::new();
+
+    // 1. Header row
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "None",
+        "columns": [
+            {
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
+                "spacing": "None",
+                "items": [
+                    {
+                        "type": "Image",
+                        "url": "${primaryMediumGlyph}",
+                        "width": "16px",
+                        "height": "16px",
+                        "altText": "Network medium"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "verticalContentAlignment": "Center",
+                "spacing": "Small",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "${primaryName}",
+                        "size": "Default",
+                        "weight": "Bolder",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": "auto",
+                "verticalContentAlignment": "Center",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "${activeConnsText}",
+                        "size": "Small",
+                        "isSubtle": true,
+                        "horizontalAlignment": "Right",
+                        "wrap": false
+                    }
+                ]
+            },
+            icon_button_column_spaced(icons::SETTINGS, 16, "open_settings", "Customize widget", "Small")
+        ]
+    }));
+
+    // 2. Metrics row (Download / Upload)
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Medium",
+        "columns": [
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [
+                    {
+                        "type": "ColumnSet",
+                        "spacing": "None",
+                        "columns": [
+                            text_glyph_column("↓", "Accent", "Small", "None"),
+                            {
+                                "type": "Column",
+                                "width": "stretch",
+                                "verticalContentAlignment": "Center",
+                                "spacing": "Small",
+                                "items": [
+                                    {
+                                        "type": "TextBlock",
+                                        "text": "Download",
+                                        "size": "Small",
+                                        "isSubtle": true,
+                                        "wrap": false
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "${downloadRate}",
+                        "size": layout.value_size,
+                        "weight": "Bolder",
+                        "spacing": "None",
+                        "wrap": false
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "${downloadPeak}",
+                        "size": "Small",
+                        "isSubtle": true,
+                        "spacing": "None",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [
+                    {
+                        "type": "ColumnSet",
+                        "spacing": "None",
+                        "columns": [
+                            {
+                                "type": "Column",
+                                "width": "stretch",
+                                "items": []
+                            },
+                            text_glyph_column("↑", "Warning", "Small", "None"),
+                            {
+                                "type": "Column",
+                                "width": "auto",
+                                "verticalContentAlignment": "Center",
+                                "spacing": "Small",
+                                "items": [
+                                    {
+                                        "type": "TextBlock",
+                                        "text": "Upload",
+                                        "size": "Small",
+                                        "isSubtle": true,
+                                        "horizontalAlignment": "Right",
+                                        "wrap": false
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "${uploadRate}",
+                        "size": layout.value_size,
+                        "weight": "Bolder",
+                        "horizontalAlignment": "Right",
+                        "spacing": "None",
+                        "wrap": false
+                    },
+                    {
+                        "type": "TextBlock",
+                        "text": "${uploadPeak}",
+                        "size": "Small",
+                        "isSubtle": true,
+                        "horizontalAlignment": "Right",
+                        "spacing": "None",
+                        "wrap": false
+                    }
+                ]
+            }
+        ]
+    }));
+
+    // 3. Dual-stream sparkline image
+    body.push(json!({
+        "type": "Image",
+        "url": "${chartUrl}",
+        "altText": "Download and upload bandwidth over time",
+        "size": "Stretch",
+        "spacing": "Medium"
+    }));
+
+    // 4. Active Apps Section (Medium and Large only)
+    if layout.apps_collapsed > 0 {
+        let max_slots = layout.apps_page_size;
+        let mut app_slots = Vec::new();
+        for i in 0..max_slots {
+            app_slots.push(app_slot_template(i));
+        }
+
+        body.push(json!({
+            "type": "Container",
+            "$when": "${hasActiveApps == true}",
+            "items": [
+                {
+                    "type": "ColumnSet",
+                    "spacing": "Medium",
+                    "separator": true,
+                    "columns": [
+                        {
+                            "type": "Column",
+                            "width": "stretch",
+                            "verticalContentAlignment": "Center",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "Active apps",
+                                    "size": "Default",
+                                    "weight": "Bolder",
+                                    "wrap": false
+                                }
+                            ]
+                        },
+                        {
+                            "type": "Column",
+                            "width": "auto",
+                            "verticalContentAlignment": "Center",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "${appsRangeLabel}",
+                                    "size": "Small",
+                                    "isSubtle": true,
+                                    "horizontalAlignment": "Right",
+                                    "wrap": false
+                                }
+                            ]
+                        },
+                        icon_button_column_when(
+                            icons::CHEVRON_LEFT,
+                            16,
+                            "prev_apps_page",
+                            "Previous page",
+                            "${hasPrevPage == true}",
+                            "Small",
+                        ),
+                        icon_button_column_when(
+                            icons::CHEVRON_RIGHT,
+                            16,
+                            "next_apps_page",
+                            "Next page",
+                            "${hasNextPage == true}",
+                            "Small",
+                        ),
+                        icon_button_column_when(
+                            "${toggleAppsIcon}",
+                            16,
+                            "toggle_apps",
+                            "${toggleAppsTitle}",
+                            "${canToggleApps == true}",
+                            "Small",
+                        ),
+                    ]
+                },
+                {
+                    "type": "Container",
+                    "spacing": "None",
+                    "items": app_slots
+                }
+            ]
+        }));
+    }
+
+    // 5. Session Footer (Medium and Large only)
+    if layout.show_session {
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Medium",
+            "separator": true,
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "auto",
+                    "verticalContentAlignment": "Center",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "${sessionText}",
+                            "size": "Small",
+                            "isSubtle": true,
+                            "wrap": false
+                        }
+                    ]
+                },
+                icon_button_column_sized(icons::MEDIUM_LOOPBACK, 15, "reset_session", "${sessionTooltip}"),
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": []
+                },
+                text_glyph_column("↓", "Accent", "Small", "Small"),
+                {
+                    "type": "Column",
+                    "width": "auto",
+                    "verticalContentAlignment": "Center",
+                    "spacing": "Small",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "${sessionRx}",
+                            "size": "Small",
+                            "isSubtle": true,
+                            "wrap": false
+                        }
+                    ]
+                },
+                text_glyph_column("↑", "Warning", "Small", "Medium"),
+                {
+                    "type": "Column",
+                    "width": "auto",
+                    "verticalContentAlignment": "Center",
+                    "spacing": "Small",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "${sessionTx}",
+                            "size": "Small",
+                            "isSubtle": true,
+                            "wrap": false
+                        }
+                    ]
+                }
+            ]
+        }));
+    }
+
+    json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.6",
+        "body": body
+    })
+    .to_string()
+}
+
+/// Builds dynamic telemetry data context matching the static Adaptive Card template bindings.
+pub fn build_adaptive_card_data(
+    snapshot: &NetworkSnapshot,
+    config: &WidgetConfig,
+    size: &str,
+) -> Value {
+    let layout = layout_for_size(size);
+
+    let active_count = if snapshot.active_connections_count > 0 {
+        snapshot.active_connections_count
+    } else {
+        snapshot.active_apps.len()
+    };
+
+    let window_samples = crate::history_samples_for_secs(config.chart_window);
+    let (window_peak_rx, window_peak_tx) = snapshot.chart_window_peak(window_samples);
+
+    let resolved_theme = config.theme.resolve();
+    let graph_style = config.graph_style;
+    let chart_url = if snapshot.peak_rx_bps == 0.0 && snapshot.peak_tx_bps == 0.0 {
+        render_idle_unified_chart_data_uri(
+            layout.chart_size,
+            config.chart_window,
+            resolved_theme,
+            graph_style,
+        )
+    } else {
+        render_unified_chart_data_uri(
+            &snapshot.history,
+            layout.chart_size,
+            config.chart_window,
+            resolved_theme,
+            graph_style,
+        )
+    };
+
+    let total_apps = snapshot.active_apps.len();
+    let has_active_apps = total_apps > 0 && layout.apps_collapsed > 0;
+    let page_size = layout.apps_page_size.max(1);
+
+    let (
+        start_idx,
+        end_idx,
+        range_label,
+        has_prev_page,
+        has_next_page,
+        can_toggle_apps,
+        toggle_apps_glyph,
+        toggle_apps_icon,
+        toggle_apps_title,
+    ) = if config.apps_expanded {
+        let total_pages = total_apps.div_ceil(page_size);
+        let current_page = config.apps_page.min(total_pages.saturating_sub(1));
+        let start = current_page * page_size;
+        let end = (start + page_size).min(total_apps);
+        let label = if total_pages > 1 {
+            format!("{}–{} of {}", start + 1, end, total_apps)
+        } else {
+            format!("All {}", total_apps)
+        };
+        (
+            start,
+            end,
+            label,
+            current_page > 0,
+            current_page + 1 < total_pages,
+            true,
+            "▴",
+            icons::CHEVRON_UP,
+            "Collapse",
+        )
+    } else {
+        let count = total_apps.min(layout.apps_collapsed);
+        (
+            0,
+            count,
+            format!("Top {} of {}", count, total_apps),
+            false,
+            false,
+            total_apps > layout.apps_collapsed,
+            "▾",
+            icons::CHEVRON_DOWN,
+            "Show all apps",
+        )
+    };
+
+    let max_slots = layout.apps_page_size;
+    let mut data_map = serde_json::Map::new();
+    let mut active_apps_items = Vec::new();
+
+    for i in 0..max_slots {
+        let app_idx = start_idx + i;
+        if has_active_apps && app_idx < end_idx && app_idx < total_apps {
+            let app = &snapshot.active_apps[app_idx];
+            let rx_active = app.rx_bps >= 1.0;
+            let tx_active = app.tx_bps >= 1.0;
+            let active = rx_active || tx_active;
+            let conn_suffix = if app.connection_count > 0 {
+                format!(" ({})", app.connection_count)
+            } else {
+                String::new()
+            };
+            let status = if rx_active && tx_active {
+                format!(
+                    "{}{}",
+                    fmt_dual_compact_bw(app.rx_bps, app.tx_bps),
+                    conn_suffix
+                )
+            } else if rx_active {
+                format!("↓ {}{}", fmt_compact_app_bw(app.rx_bps), conn_suffix)
+            } else if tx_active {
+                format!("↑ {}{}", fmt_compact_app_bw(app.tx_bps), conn_suffix)
+            } else if app.connection_count == 1 {
+                "1 conn".to_string()
+            } else {
+                format!("{} conns", app.connection_count)
+            };
+            let icon_uri: &str = app
+                .icon_data_uri
+                .as_deref()
+                .unwrap_or_else(|| icons::app_glyph_for_emoji(app.icon));
+
+            let app_name = truncate_name(&app.name, layout.apps_name_budget);
+            let weight = if active { "Bolder" } else { "Default" };
+            let is_subtle = !active;
+
+            data_map.insert(format!("app{}_visible", i), json!(true));
+            data_map.insert(format!("app{}_name", i), json!(app_name));
+            data_map.insert(format!("app{}_icon", i), json!(icon_uri));
+            data_map.insert(format!("app{}_rate", i), json!(status));
+            data_map.insert(format!("app{}_weight", i), json!(weight));
+            data_map.insert(format!("app{}_isSubtle", i), json!(is_subtle));
+
+            active_apps_items.push(json!({
+                "name": app_name,
+                "icon": icon_uri,
+                "rate": status,
+                "weight": weight,
+                "isSubtle": is_subtle,
+            }));
+        } else {
+            data_map.insert(format!("app{}_visible", i), json!(false));
+            data_map.insert(format!("app{}_name", i), json!(""));
+            data_map.insert(format!("app{}_icon", i), json!(""));
+            data_map.insert(format!("app{}_rate", i), json!(""));
+            data_map.insert(format!("app{}_weight", i), json!("Default"));
+            data_map.insert(format!("app{}_isSubtle", i), json!(true));
+        }
+    }
+
+    let duration_str = format_duration(snapshot.session_duration_secs);
+    let session_text = if snapshot.session_duration_secs > 0 {
+        format!("Session ({})", duration_str)
+    } else {
+        "Session".to_string()
+    };
+    let session_tooltip = format!(
+        "Reset session totals (Duration: {} • All-time peak: ↓ {}  ↑ {})",
+        duration_str,
+        format_bandwidth(snapshot.session_peak_rx_bps),
+        format_bandwidth(snapshot.session_peak_tx_bps)
+    );
+
+    data_map.insert(
+        "primaryMediumGlyph".to_string(),
+        json!(medium_glyph(snapshot.primary_medium)),
+    );
+    data_map.insert(
+        "primaryName".to_string(),
+        json!(truncate_name(&snapshot.primary_name, 22)),
+    );
+    data_map.insert(
+        "activeConnsText".to_string(),
+        json!(format!("{} conns", active_count)),
+    );
+    data_map.insert(
+        "downloadRate".to_string(),
+        json!(fmt_bw(snapshot.rx_bps, config.speed_unit)),
+    );
+    data_map.insert(
+        "downloadPeak".to_string(),
+        json!(format!(
+            "Peak {}",
+            fmt_bw(window_peak_rx, config.speed_unit)
+        )),
+    );
+    data_map.insert(
+        "uploadRate".to_string(),
+        json!(fmt_bw(snapshot.tx_bps, config.speed_unit)),
+    );
+    data_map.insert(
+        "uploadPeak".to_string(),
+        json!(format!(
+            "Peak {}",
+            fmt_bw(window_peak_tx, config.speed_unit)
+        )),
+    );
+    data_map.insert("chartUrl".to_string(), json!(chart_url));
+    data_map.insert("hasActiveApps".to_string(), json!(has_active_apps));
+    data_map.insert("appsRangeLabel".to_string(), json!(range_label));
+    data_map.insert("hasPrevPage".to_string(), json!(has_prev_page));
+    data_map.insert("hasNextPage".to_string(), json!(has_next_page));
+    data_map.insert("canToggleApps".to_string(), json!(can_toggle_apps));
+    data_map.insert("toggleAppsGlyph".to_string(), json!(toggle_apps_glyph));
+    data_map.insert("toggleAppsIcon".to_string(), json!(toggle_apps_icon));
+    data_map.insert("toggleAppsTitle".to_string(), json!(toggle_apps_title));
+    data_map.insert("activeApps".to_string(), json!(active_apps_items));
+    data_map.insert("sessionText".to_string(), json!(session_text));
+    data_map.insert("sessionTooltip".to_string(), json!(session_tooltip));
+    data_map.insert(
+        "sessionRx".to_string(),
+        json!(format_bytes(snapshot.session_rx)),
+    );
+    data_map.insert(
+        "sessionTx".to_string(),
+        json!(format_bytes(snapshot.session_tx)),
+    );
+
+    Value::Object(data_map)
+}
+
+/// Serializes dynamic telemetry data directly to JSON string for SetData.
+pub fn build_adaptive_card_data_string(
+    snapshot: &NetworkSnapshot,
+    config: &WidgetConfig,
+    size: &str,
+) -> String {
+    serde_json::to_string(&build_adaptive_card_data(snapshot, config, size))
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Builds the default settings card template for the customization flyout.
 pub fn build_settings_card(current_config: &WidgetConfig) -> String {
     build_settings_card_for_size(current_config, "Medium", 0)
@@ -713,6 +1545,12 @@ pub fn build_settings_card_for_size(
     size: &str,
     _session_duration_secs: u64,
 ) -> String {
+    let (cancel_w, save_w, save_spacing) = if size == "Small" {
+        (48, 42, "Small")
+    } else {
+        (56, 48, "Medium")
+    };
+
     let header = json!({
         "type": "ColumnSet",
         "spacing": "None",
@@ -733,44 +1571,38 @@ pub fn build_settings_card_for_size(
             },
             {
                 "type": "Column",
-                "width": "auto",
+                "width": format!("{}px", cancel_w),
+                "roundedCorners": true,
                 "verticalContentAlignment": "Center",
                 "spacing": "Small",
-                "selectAction": {
-                    "type": "Action.Execute",
-                    "verb": "cancel_settings",
-                    "title": "Cancel",
-                    "tooltip": "Cancel",
-                    "associatedInputs": "none"
-                },
                 "items": [
-                    {
-                        "type": "TextBlock",
-                        "text": "Cancel",
-                        "size": "Small",
-                        "isSubtle": true
-                    }
+                    text_button_box(
+                        "Cancel",
+                        Some(cancel_w),
+                        "cancel_settings",
+                        "Cancel",
+                        None,
+                        false,
+                        Some("none"),
+                    )
                 ]
             },
             {
                 "type": "Column",
-                "width": "auto",
+                "width": format!("{}px", save_w),
+                "roundedCorners": true,
                 "verticalContentAlignment": "Center",
-                "spacing": "Medium",
-                "selectAction": {
-                    "type": "Action.Execute",
-                    "verb": "save_settings",
-                    "title": "Save",
-                    "tooltip": "Save"
-                },
+                "spacing": save_spacing,
                 "items": [
-                    {
-                        "type": "TextBlock",
-                        "text": "Save",
-                        "weight": "Bolder",
-                        "size": "Small",
-                        "color": "Accent"
-                    }
+                    text_button_box(
+                        "Save",
+                        Some(save_w),
+                        "save_settings",
+                        "Save",
+                        Some("Accent"),
+                        true,
+                        None,
+                    )
                 ]
             }
         ]
@@ -779,7 +1611,8 @@ pub fn build_settings_card_for_size(
     let mut body = vec![header];
 
     if size == "Small" {
-        // Small widget (~160px): 2-column compact grid for Units and History
+        // Small widget (~160px): 2 balanced rows of 2-column compact grids
+        // Row 1: Units and History
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Small",
@@ -840,10 +1673,66 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Note: Reset session and Expand apps are omitted on Small to fit within the 160px height
-        // and because Small widget does not display active apps or session totals.
+        // Row 2: Theme and Graph style
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Theme",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "theme",
+                            "style": "compact",
+                            "spacing": "None",
+                            "value": current_config.theme.to_str_value(),
+                            "choices": [
+                                { "title": "Auto", "value": "auto" },
+                                { "title": "Dark", "value": "dark" },
+                                { "title": "Light", "value": "light" }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "spacing": "Small",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Style",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "graph_style",
+                            "style": "compact",
+                            "spacing": "None",
+                            "value": current_config.graph_style.to_str_value(),
+                            "choices": [
+                                { "title": "Area", "value": "area" },
+                                { "title": "Line", "value": "line" },
+                                { "title": "Bar", "value": "bar" }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
     } else {
-        // Medium & Large (~340px): 3 balanced rows for clear organization and no truncation
+        // Medium & Large (~340px): balanced rows for clear organization
         // Row 1: 2-column layout for Speed units and History window
         body.push(json!({
             "type": "ColumnSet",
@@ -905,7 +1794,66 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Row 2: Active apps section
+        // Row 2: 2-column layout for Theme and Graph style
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Theme",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "theme",
+                            "style": "compact",
+                            "spacing": "Small",
+                            "value": current_config.theme.to_str_value(),
+                            "choices": [
+                                { "title": "Auto", "value": "auto" },
+                                { "title": "Dark", "value": "dark" },
+                                { "title": "Light", "value": "light" }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "spacing": "Medium",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Graph style",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "graph_style",
+                            "style": "compact",
+                            "spacing": "Small",
+                            "value": current_config.graph_style.to_str_value(),
+                            "choices": [
+                                { "title": "Area (Waveform)", "value": "area" },
+                                { "title": "Line (Minimal)", "value": "line" },
+                                { "title": "Bar (Columns)", "value": "bar" }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+
+        // Row 3: Active apps section
         body.push(json!({
             "type": "TextBlock",
             "text": "Active apps",
@@ -924,7 +1872,7 @@ pub fn build_settings_card_for_size(
             "valueOff": "false"
         }));
 
-        // Row 3: Compact left-aligned Reset session button
+        // Row 4: Compact left-aligned Reset session button
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Medium",
@@ -1185,7 +2133,7 @@ mod tests {
     }
 
     #[test]
-    fn medium_card_pages_five_apps() {
+    fn medium_card_pages_four_apps() {
         let snap = many_apps_fixture(13);
         let json_str = build_adaptive_card(
             &snap,
@@ -1196,9 +2144,9 @@ mod tests {
                 ..WidgetConfig::default()
             },
         );
-        assert!(json_str.contains("1–5 of 13"));
-        assert!(json_str.contains("App 5"));
-        assert!(!json_str.contains("App 6"));
+        assert!(json_str.contains("1–4 of 13"));
+        assert!(json_str.contains("App 4"));
+        assert!(!json_str.contains("App 5"));
         // Active apps use compact (N) format; only the header total uses " conns".
         assert_eq!(json_str.matches(" conns").count(), 1);
         assert!(json_str.contains("(13)"));
@@ -1267,6 +2215,8 @@ mod tests {
             chart_window: 60,
             apps_expanded: false,
             apps_page: 0,
+            theme: ThemeMode::Auto,
+            graph_style: GraphStyle::Area,
         };
         let parsed: WidgetConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -1354,6 +2304,22 @@ mod tests {
     }
 
     #[test]
+    fn test_widget_config_backwards_compat() {
+        // v0.1.1 JSON without theme or graph_style must deserialize seamlessly to defaults
+        let old_json =
+            r#"{"speed_unit":"Auto","chart_window":30,"apps_expanded":false,"apps_page":0}"#;
+        let config: WidgetConfig = serde_json::from_str(old_json).unwrap();
+        assert_eq!(config.theme, ThemeMode::Auto);
+        assert_eq!(config.graph_style, GraphStyle::Area);
+
+        // Deserializing with explicit theme and graph style works
+        let new_json = r#"{"speed_unit":"Megabytes","chart_window":60,"apps_expanded":true,"apps_page":1,"theme":"light","graph_style":"bar"}"#;
+        let config2: WidgetConfig = serde_json::from_str(new_json).unwrap();
+        assert_eq!(config2.theme, ThemeMode::Light);
+        assert_eq!(config2.graph_style, GraphStyle::Bar);
+    }
+
+    #[test]
     fn manifest_version_matches_cargo_pkg_version() {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../widget/Package.appxmanifest");
@@ -1371,5 +2337,194 @@ mod tests {
             expected_quad,
             manifest_path
         );
+    }
+
+    #[test]
+    fn test_template_contains_expected_bindings() {
+        for size in &["Small", "Medium", "Large"] {
+            let tpl_str = build_adaptive_card_template(size);
+            let val: Value = serde_json::from_str(&tpl_str)
+                .unwrap_or_else(|e| panic!("template for {} must be valid json: {}", size, e));
+            assert_eq!(val["type"], "AdaptiveCard");
+            assert_eq!(val["version"], "1.6");
+
+            // All templates must contain core rate bindings and chartUrl
+            assert!(tpl_str.contains("${primaryMediumGlyph}"));
+            assert!(tpl_str.contains("${primaryName}"));
+            assert!(tpl_str.contains("${activeConnsText}"));
+            assert!(tpl_str.contains("${downloadRate}"));
+            assert!(tpl_str.contains("${uploadRate}"));
+            assert!(tpl_str.contains("${chartUrl}"));
+
+            if *size != "Small" {
+                // Medium and Large templates must contain active apps slots and session footer
+                assert!(tpl_str.contains("${app0_name}"));
+                assert!(tpl_str.contains("${app0_icon}"));
+                assert!(tpl_str.contains("${app0_rate}"));
+                assert!(tpl_str.contains("${sessionText}"));
+                assert!(tpl_str.contains("${sessionRx}"));
+                assert!(tpl_str.contains("${sessionTx}"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_data_contains_all_required_keys() {
+        let snap = NetworkSnapshot {
+            primary_medium: crate::backend::InterfaceMedium::Wifi,
+            primary_name: "Wi-Fi Test".to_string(),
+            rx_bps: 12_500_000.0,
+            tx_bps: 2_100_000.0,
+            active_connections_count: 5,
+            active_apps: vec![crate::process::ActiveAppInfo {
+                name: "browser.exe".to_string(),
+                process_name: "browser.exe".to_string(),
+                icon: "🌐",
+                icon_data_uri: None,
+                rx_bps: 10_000_000.0,
+                tx_bps: 1_000_000.0,
+                connection_count: 4,
+            }],
+            session_duration_secs: 360,
+            session_rx: 500_000_000,
+            session_tx: 50_000_000,
+            ..Default::default()
+        };
+        let config = WidgetConfig::default();
+
+        for size in &["Small", "Medium", "Large"] {
+            let data = build_adaptive_card_data(&snap, &config, size);
+            assert!(data["primaryMediumGlyph"].is_string());
+            assert!(data["primaryName"].is_string());
+            assert!(data["activeConnsText"].is_string());
+            assert!(data["downloadRate"].is_string());
+            assert!(data["uploadRate"].is_string());
+            assert!(data["chartUrl"].is_string());
+            assert!(data["activeApps"].is_array());
+            assert!(data["sessionText"].is_string());
+            assert!(data["sessionRx"].is_string());
+            assert!(data["sessionTx"].is_string());
+
+            let json_str = build_adaptive_card_data_string(&snap, &config, size);
+            assert!(!json_str.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_compute_adaptive_ui_interval() {
+        // High traffic burst: >= 250 KiB/s (256,000 B/s) -> 500 ms
+        assert_eq!(
+            compute_adaptive_ui_interval(300_000.0, 0.0),
+            Duration::from_millis(500)
+        );
+        // Asymmetric upload burst: download is 0, but upload is 500 KiB/s -> 500 ms
+        assert_eq!(
+            compute_adaptive_ui_interval(0.0, 500_000.0),
+            Duration::from_millis(500)
+        );
+        // Exact boundary for burst
+        assert_eq!(
+            compute_adaptive_ui_interval(BURST_THRESHOLD_BPS, 100.0),
+            Duration::from_millis(500)
+        );
+
+        // Moderate traffic: 10 KiB/s .. 250 KiB/s -> 1000 ms
+        assert_eq!(
+            compute_adaptive_ui_interval(50_000.0, 10_000.0),
+            Duration::from_millis(1000)
+        );
+        assert_eq!(
+            compute_adaptive_ui_interval(0.0, MODERATE_THRESHOLD_BPS),
+            Duration::from_millis(1000)
+        );
+
+        // Low / near-idle traffic: < 10 KiB/s -> 1500 ms
+        assert_eq!(
+            compute_adaptive_ui_interval(5_000.0, 2_000.0),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            compute_adaptive_ui_interval(0.0, 0.0),
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn test_icon_and_text_button_dimensions_and_rounded_corners() {
+        let icon_col =
+            icon_button_column_spaced(icons::SETTINGS, 16, "open_settings", "Settings", "Small");
+        assert_eq!(icon_col["type"], "Column");
+        assert_eq!(icon_col["width"], "28px");
+        assert_eq!(icon_col["roundedCorners"], true);
+        let inner_container = &icon_col["items"][0];
+        assert_eq!(inner_container["type"], "Container");
+        assert_eq!(inner_container["minHeight"], "28px");
+        assert_eq!(inner_container["roundedCorners"], true);
+
+        let icon_when_col = icon_button_column_when(
+            icons::CHEVRON_LEFT,
+            16,
+            "prev",
+            "Prev",
+            "${hasPrev == true}",
+            "Small",
+        );
+        assert_eq!(icon_when_col["width"], "28px");
+        assert_eq!(icon_when_col["roundedCorners"], true);
+
+        // Verify Settings card header has explicit column widths and rounded corners
+        let settings_medium = build_settings_card_for_size(&WidgetConfig::default(), "Medium", 0);
+        let parsed_med: Value = serde_json::from_str(&settings_medium).unwrap();
+        let header_cols = &parsed_med["body"][0]["columns"];
+        let cancel_col = &header_cols[1];
+        let save_col = &header_cols[2];
+        assert_eq!(cancel_col["width"], "56px");
+        assert_eq!(cancel_col["roundedCorners"], true);
+        assert_eq!(save_col["width"], "48px");
+        assert_eq!(save_col["roundedCorners"], true);
+        assert_eq!(save_col["spacing"], "Medium");
+
+        let settings_small = build_settings_card_for_size(&WidgetConfig::default(), "Small", 0);
+        let parsed_small: Value = serde_json::from_str(&settings_small).unwrap();
+        let small_header_cols = &parsed_small["body"][0]["columns"];
+        assert_eq!(small_header_cols[1]["width"], "48px");
+        assert_eq!(small_header_cols[2]["width"], "42px");
+    }
+
+    #[test]
+    fn test_metrics_row_upload_right_alignment() {
+        for size in &["Small", "Medium", "Large"] {
+            let tpl_str = build_adaptive_card_template(size);
+            let val: Value = serde_json::from_str(&tpl_str).unwrap();
+            let metrics_row = &val["body"][1];
+            assert_eq!(metrics_row["type"], "ColumnSet");
+
+            let upload_col = &metrics_row["columns"][1];
+            let upload_items = upload_col["items"].as_array().unwrap();
+
+            // Item 0: ColumnSet with empty stretch spacer pushing Upload to the right
+            let header_colset = &upload_items[0];
+            let header_cols = header_colset["columns"].as_array().unwrap();
+            assert_eq!(header_cols[0]["width"], "stretch");
+            assert_eq!(header_cols[2]["items"][0]["horizontalAlignment"], "Right");
+
+            // Item 1: ${uploadRate} TextBlock with horizontalAlignment: Right
+            assert_eq!(upload_items[1]["text"], "${uploadRate}");
+            assert_eq!(upload_items[1]["horizontalAlignment"], "Right");
+
+            // Item 2: ${uploadPeak} TextBlock with horizontalAlignment: Right
+            assert_eq!(upload_items[2]["text"], "${uploadPeak}");
+            assert_eq!(upload_items[2]["horizontalAlignment"], "Right");
+        }
+
+        // Test non-template fallback card (build_card)
+        let snap = snapshot_fixture();
+        let card_json = build_adaptive_card(&snap, "Medium", &WidgetConfig::default());
+        let val: Value = serde_json::from_str(&card_json).unwrap();
+        let metrics_row = &val["body"][1];
+        let upload_col = &metrics_row["columns"][1];
+        let upload_items = upload_col["items"].as_array().unwrap();
+        assert_eq!(upload_items[1]["horizontalAlignment"], "Right");
+        assert_eq!(upload_items[2]["horizontalAlignment"], "Right");
     }
 }

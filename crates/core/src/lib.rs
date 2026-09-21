@@ -35,9 +35,14 @@ pub use backend::{
     compute_delta, query_interfaces,
 };
 pub use card::{
-    WidgetConfig, build_adaptive_card, build_settings_card, build_settings_card_for_size,
+    BURST_THRESHOLD_BPS, MODERATE_THRESHOLD_BPS, WidgetConfig, build_adaptive_card,
+    build_adaptive_card_data, build_adaptive_card_data_string, build_adaptive_card_template,
+    build_settings_card, build_settings_card_for_size, compute_adaptive_ui_interval,
 };
-pub use chart::{Track, render_chart_data_uris, render_chart_png};
+pub use chart::{
+    GraphStyle, Palette, ResolvedTheme, ThemeMode, Track, detect_windows_light_theme,
+    query_windows_light_theme, render_chart_data_uris, render_chart_png,
+};
 pub use format::{SpeedUnit, format_bandwidth, format_bandwidth_with_unit, format_bytes};
 pub use icons::app_glyph_for_emoji;
 pub use process::{ActiveAppInfo, ProcessTracker, map_process_to_app, query_active_apps};

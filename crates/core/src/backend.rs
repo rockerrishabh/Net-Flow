@@ -903,16 +903,16 @@ impl NetworkBackend {
                 if (bucket.tx_bps as f64) > self.peak_tx {
                     self.peak_tx = bucket.tx_bps as f64;
                 }
-                if self.history.len() >= HISTORY_CAPACITY {
-                    if let Some(evicted) = self.history.pop_front() {
-                        if evicted.rx_bps == self.chart_peak_rx {
-                            self.chart_peak_rx =
-                                self.history.iter().map(|s| s.rx_bps).max().unwrap_or(0);
-                        }
-                        if evicted.tx_bps == self.chart_peak_tx {
-                            self.chart_peak_tx =
-                                self.history.iter().map(|s| s.tx_bps).max().unwrap_or(0);
-                        }
+                if self.history.len() >= HISTORY_CAPACITY
+                    && let Some(evicted) = self.history.pop_front()
+                {
+                    if evicted.rx_bps == self.chart_peak_rx {
+                        self.chart_peak_rx =
+                            self.history.iter().map(|s| s.rx_bps).max().unwrap_or(0);
+                    }
+                    if evicted.tx_bps == self.chart_peak_tx {
+                        self.chart_peak_tx =
+                            self.history.iter().map(|s| s.tx_bps).max().unwrap_or(0);
                     }
                 }
                 self.history.push_back(bucket);

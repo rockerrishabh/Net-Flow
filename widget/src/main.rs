@@ -21,7 +21,7 @@ use windows_core::{GUID, HRESULT, IUnknown, Interface};
 use crate::bindings::Microsoft::Windows::Widgets::Providers::WidgetManager;
 use crate::factory::NetFlowClassFactory;
 use crate::provider::{
-    InternalWidgetInfo, LockExt, NetFlowWidgetProvider, ProviderState, log_widget,
+    InternalWidgetInfo, LockExt, NetFlowWidgetProvider, ProviderState, TemplateKind, log_widget,
 };
 use net_flow_core::card::WidgetConfig;
 
@@ -91,10 +91,15 @@ fn main() -> windows_core::Result<()> {
                         id: id_str,
                         size,
                         is_active,
+                        template_kind: TemplateKind::Live,
                         in_customization: false,
                         custom_state: config,
                         draft_state: None,
                         customization_requested_at: None,
+                        last_data_hash: None,
+                        last_data_json: None,
+                        last_data_published_at: None,
+                        force_data_publish: true,
                     },
                 );
             }

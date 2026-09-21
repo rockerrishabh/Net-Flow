@@ -9,7 +9,7 @@
 *Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint.*
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -33,23 +33,27 @@
 ## ✨ Highlights
 
 - **🪟 Native Windows 11 Widgets Board Integration**: First-class widget integration (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 support across **Small**, **Medium**, and **Large** card dimensions.
-- **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline (in vibrant cyan `#38D9F0`) and upload traffic below (in warm amber `#FFB020`) on a shared scale with glowing pulse nodes.
+- **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline and upload traffic below on a shared scale with glowing pulse nodes.
+- **🌓 System Theme-Aware Palettes**: Automatic Windows Dark/Light mode tracking via `AppsUseLightTheme` registry integration, rendering vibrant dark palettes or high-contrast light palettes with in-card overrides.
+- **📊 3 Graph Rendering Styles**: Choose between smooth **Area** (Catmull-Rom spline fills), sleek **Line** (minimalist strokes), or discrete **Bar** (quantized histogram columns).
+- **🚀 Instant Auto-Start on Boot**: Native packaged Win32 `<uap5:StartupTask>` launches the widget seamlessly upon Windows login, with idle grace-period termination if unpinned.
 - **🌊 50 KB/s Scale Floor & Headroom**: A vertical scale floor keeps sub-kilobyte background network noise proportional, while 18% vertical headroom cushions traffic spikes from card boundaries.
 - **⚡ Ultra-Low Resource Usage**: Uses native Windows `IP Helper` (`GetIfTable2`) APIs and asynchronous Rust for near-zero CPU (< 0.1%) and negligible RAM footprint (< 15 MB).
 - **🛜 Smart Active Adapter Detection**: Auto-detects the primary active network adapter with contextual badges (Wi-Fi with friendly SSID, Ethernet, Cellular, VPN).
 - **📱 Per-App Bandwidth Attribution**: Tracks active applications consuming network bandwidth with compact rate formatting (`↓ 11.1 ↑ 9.1 KB/s (37)`) and generous 22-character name budgets.
 - **📊 Session Usage Tracking**: Monitors cumulative upload/download data transferred and active session duration with an inline **Reset** button.
-- **⚙️ In-Card Customization**: Configurable speed units (Auto-scaled, Bytes/s, KB/s, MB/s, Gbps) and adjustable waveform time windows (15s, 30s, 60s, 120s) directly inside the widget card.
+- **⚙️ In-Card Customization**: Configurable speed units, timeframe windows, theme modes, and graph styles directly inside the widget card.
 
 ---
 
-## 🚀 What's New in v0.1.1
+## 🚀 What's New in v0.2.0
 
-- **⚡ High-Fidelity 4 Hz Telemetry**: Decoupled high-frequency sampling (250 ms / 4 Hz) from widget card publication (500 ms / 2 Hz), expanding the rolling history ring buffer from 60 to 240 samples for ultra-smooth waveform fidelity without increasing UI load.
-- **❄️ Precomputed Idle Chart Cache**: Implemented an immutable `OnceLock` cache for standard widget dimensions and time windows, bypassing the rasterizer during idle network periods and reducing idle CPU overhead to just **0.024% of 1 core** (a **55x speedup** from 6.68 ms down to 120 µs).
-- **🚀 Accelerated Sparkline Rasterizer**: Optimized blend loops with a zero-alpha destination fast-path, hoisted invariant scales, unrolled color channels, and branchless interior fills, cutting active rasterization latency by **45%** (from 6.52 ms to 3.58 ms).
-- **🎯 Incremental O(1) Peak Tracking**: Replaced O(N) full-history scans on every UI tick with O(1) running maximum peak tracking in `NetworkBackend`.
-- **🌐 Official Product Showcase**: Updated product links to [`netflow.rockerrishabh.me`](https://netflow.rockerrishabh.me) and dedicated privacy policy at [`netflow.rockerrishabh.me/privacy`](https://netflow.rockerrishabh.me/privacy).
+- **🚀 Auto-Start on Windows Login**: Added native packaged Win32 `<uap5:StartupTask>` (`NetFlowStartup`) integration. Net Flow now launches cleanly on Windows user login, ensuring pinned widgets are always populated without manual intervention or resident background services.
+- **🌓 Windows System Theme-Aware Sparklines**: Implemented automatic Windows Light/Dark mode detection via `AppsUseLightTheme` registry integration with resilient dark fallback. The dual-stream waveform dynamically switches between Dark mode (cyan `#38D9F0` / amber `#FFB020`) and Light mode (crisp ocean `#008CB4` / warm solar `#D75F00`) high-contrast palettes, with customizable in-card overrides (`Auto`, `Dark`, `Light`).
+- **📊 Customizable Graph Styles**: Added selectable visual rendering styles: `Area` (classic Catmull-Rom filled spline), `Line` (clean minimalist strokes), and `Bar` (discrete quantized bandwidth histogram columns).
+- **❄️ Theme & Style-Aware Idle Cache**: Upgraded the precomputed zero-CPU idle chart cache to index by resolved theme and graph style, guaranteeing zero rendering overhead during quiet network periods while instantaneously reflecting OS theme changes.
+- **🧈 Fluid Widget Rendering & Flicker Elimination**: Architected strict separation between static visual layout templates (`SetTemplate`) and dynamic telemetry payloads (`SetData`), eliminating 500 ms full-card visual tree tearing in the Windows Widgets Board. Added collision-free payload diffing with fast 64-bit hashing and exact string equality to bypass redundant WinRT IPC updates when telemetry is static, reducing idle IPC calls by up to 96%.
+- **⚙️ Enhanced In-Card Settings**: Added Theme and Graph Style ChoiceSets to the widget flip-card settings across Small, Medium, and Large form factors with full backward-compatible configuration migration.
 
 📖 For the full historical log, check out [CHANGELOG.md](CHANGELOG.md).
 

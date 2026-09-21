@@ -1,7 +1,12 @@
 use net_flow_core::{
-    HISTORY_CAPACITY, InterfaceCategory, InterfaceInfo, NetworkBackend, SAMPLING_INTERVAL_MS,
-    WidgetConfig, backend::InterfaceMedium, build_adaptive_card,
-    chart::{render_idle_unified_chart_data_uri, render_unified_chart_data_uri, render_unified_dual_chart_png},
+    GraphStyle, HISTORY_CAPACITY, InterfaceCategory, InterfaceInfo, NetworkBackend, ResolvedTheme,
+    SAMPLING_INTERVAL_MS, WidgetConfig,
+    backend::InterfaceMedium,
+    build_adaptive_card,
+    chart::{
+        render_idle_unified_chart_data_uri, render_unified_chart_data_uri,
+        render_unified_dual_chart_png,
+    },
 };
 use std::time::{Duration, Instant};
 
@@ -108,7 +113,8 @@ fn main() {
     // Raw rasterizer + PNG (Active)
     for _ in 0..CHART_ITERS {
         let start = Instant::now();
-        let _png = render_unified_dual_chart_png(&active_snap.history, 240, 480, 80).expect("render png");
+        let _png =
+            render_unified_dual_chart_png(&active_snap.history, 240, 480, 80).expect("render png");
         let elapsed = start.elapsed();
         chart_raw_durations.push(elapsed.as_nanos() as f64 / 1000.0);
     }
@@ -116,7 +122,13 @@ fn main() {
     // Active Data URI (Full rasterizer + base64)
     for _ in 0..CHART_ITERS {
         let start = Instant::now();
-        let _uri = render_unified_chart_data_uri(&active_snap.history, "Medium", 60);
+        let _uri = render_unified_chart_data_uri(
+            &active_snap.history,
+            "Medium",
+            60,
+            ResolvedTheme::Dark,
+            GraphStyle::Area,
+        );
         let elapsed = start.elapsed();
         chart_active_uri_durations.push(elapsed.as_nanos() as f64 / 1000.0);
     }
@@ -124,7 +136,13 @@ fn main() {
     // Idle Data URI via history slice
     for _ in 0..CHART_ITERS {
         let start = Instant::now();
-        let _uri = render_unified_chart_data_uri(&idle_snap.history, "Medium", 60);
+        let _uri = render_unified_chart_data_uri(
+            &idle_snap.history,
+            "Medium",
+            60,
+            ResolvedTheme::Dark,
+            GraphStyle::Area,
+        );
         let elapsed = start.elapsed();
         chart_idle_uri_durations.push(elapsed.as_nanos() as f64 / 1000.0);
     }
@@ -132,7 +150,8 @@ fn main() {
     // Idle Data URI direct cache lookup
     for _ in 0..CHART_ITERS {
         let start = Instant::now();
-        let _uri = render_idle_unified_chart_data_uri("Medium", 60);
+        let _uri =
+            render_idle_unified_chart_data_uri("Medium", 60, ResolvedTheme::Dark, GraphStyle::Area);
         let elapsed = start.elapsed();
         chart_direct_idle_durations.push(elapsed.as_nanos() as f64 / 1000.0);
     }

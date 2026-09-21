@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-09-21
+
+### Added
+
+- **Auto-Start on Boot (Windows StartupTask)**:
+  - Added packaged Win32 `<uap5:StartupTask>` declaration in `Package.appxmanifest` (`NetFlowStartup`), enabling Net Flow to initialize on Windows user login.
+  - Full user toggle control in Windows Settings (`Apps > Startup`) and Task Manager (`Startup apps`).
+  - Graceful lifecycle integration: verifies pinned widgets on startup, maintaining active telemetry when pinned or cleanly terminating after the idle grace period if unpinned.
+- **Dark/Light Theme-Aware Sparkline Waveforms**:
+  - Implemented automatic Windows theme detection querying `AppsUseLightTheme` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` with graceful Dark default fallback.
+  - Added dual-palette sparkline rendering:
+    - **Dark Theme**: Electric cyan `#38D9F0` (DL) and warm amber `#FFB020` (UL) with subtle gray baseline.
+    - **Light Theme**: Deep high-contrast cyan `#008CB4` (DL) and rich warm amber `#D75F00` (UL) with defined baseline, achieving WCAG AA contrast on light cards.
+  - Added `Theme` dropdown (`Auto`, `Dark`, `Light`) in widget settings.
+  - Extended immutable `OnceLock` idle chart cache across resolved themes to immediately reflect OS theme changes without stale cache collisions.
+- **Graph Style Customization**:
+  - Implemented modular sparkline renderers:
+    - **Area**: Mirrored Catmull-Rom spline with smooth gradient area fill and leading pulse indicator dot.
+    - **Line**: Clean, minimalist spline stroke with pulse dot without gradient area fill.
+    - **Bar**: Discrete vertical bandwidth bars per sample with rounded heads from baseline.
+  - Added in-card `Graph style` selector (`Area`, `Line`, `Bar`) across Small, Medium, and Large widgets.
+- **Rendering Smoothness & Flicker Elimination**:
+  - **Strict Template / Data Separation (Phase A)**: Visual templates (`SetTemplate`) are transmitted exclusively on structural lifecycle events (create, resize, settings enter/exit), while 500 ms telemetry updates strictly transmit dynamic data (`SetData`). In accordance with Windows Widgets API semantics, the host visual tree is retained without periodic reconstruction or layout tearing.
+  - **Adaptive Card Templating & `$data` Repeater**: Dynamic values bind to `${downloadRate}`, `${uploadRate}`, `${peakRate}`, and `${chartUrl}`; the active applications list uses the Adaptive Card `$data` data-context/repeater bound to `${activeApps}`.
+  - **Collision-Free Payload Diffing (Phase B)**: Evaluates a fast 64-bit hash combined with exact JSON string comparison per widget. Unchanged payloads during idle network traffic bypass `UpdateWidget` calls, eliminating idle host re-evaluations and cutting IPC traffic by up to 96%.
+  - **Forced Action Publication**: App paging, session resets, and settings actions trigger immediate publication via `force_data_publish`.
+- **Flicker-Free Active Apps Drawer**:
+  - Replaced dynamic `$data` collection repeater with permanent fixed slots (`app0`..`app3` on Medium, `app0`..`app7` on Large) governed by `$when` visibility bindings, completely eliminating asynchronous image decode micro-blinking.
+- **Adaptive Cadence (Traffic-Proportional Rate)**:
+  - Dynamically throttles UI telemetry updates based on throughput: 500 ms during high traffic bursts (≥ 250 KiB/s), 1000 ms during moderate traffic, and 1500 ms during near-idle intervals (< 10 KiB/s), reducing background resource consumption by up to 60%.
+- **Tactile Button Containers & Fluent Hover Effects**:
+  - Explicit 28×28px column hit targets with `roundedCorners: true` for Settings gear, pagination chevrons, drawer toggle, and session reset controls.
+  - Symmetrical 56×28px / 48×28px rounded pill hit targets for Cancel and Save in Settings card with balanced spacing.
+- **Justify-Between Metrics Symmetry**:
+  - Right-aligned Upload metrics (`↑ Upload`, rate, peak) to match the header row's justify-between spread, balancing Download on the left and Upload on the right.
+- **Backward-Compatible Configuration Deserialization**:
+  - Guaranteed seamless deserialization and migration of existing `CustomState` configurations from v0.1.0/v0.1.1.
+
+---
+
 ## [0.1.1] - 2026-09-20
 
 ### Changed

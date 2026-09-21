@@ -143,38 +143,57 @@ function Install-SideloadCert {
 }
 
 function New-MsixPackage {
-    if (-not $Rebuild) {
+    # If an explicit external MSIX was requested, install that directly
+    if ($MsixPath -and (Test-Path $MsixPath)) {
+        Write-Host "Using explicitly specified MSIX: $MsixPath" -ForegroundColor Green
+        return (Resolve-Path $MsixPath).Path
+    }
+
+    $tools = Find-SdkTools
+    if (-not $tools.MakeAppx -or -not $tools.SignTool) {
         $existing = Find-ExistingMsix
         if ($existing) {
+            Write-Host "Windows SDK tools (makeappx/signtool) not found; falling back to existing MSIX: $existing" -ForegroundColor Yellow
             return $existing
+        }
+        if (-not $tools.MakeAppx) {
+            throw "makeappx.exe was not found. Please install the Windows 10/11 SDK or add makeappx.exe to PATH to package the MSIX."
+        }
+        if (-not $tools.SignTool) {
+            throw "signtool.exe was not found. Please install the Windows 10/11 SDK or add signtool.exe to PATH to sign the MSIX."
         }
     }
 
-    Write-Host "Packaging NetFlow.msix on your machine..." -ForegroundColor Cyan
+    Write-Host "Repackaging NetFlow.msix on your machine..." -ForegroundColor Cyan
 
-    $tools = Find-SdkTools
-    if (-not $tools.MakeAppx) {
-        throw "makeappx.exe was not found. Please install the Windows 10/11 SDK or add makeappx.exe to PATH to package the MSIX."
-    }
-    if (-not $tools.SignTool) {
-        throw "signtool.exe was not found. Please install the Windows 10/11 SDK or add signtool.exe to PATH to sign the MSIX."
-    }
+    # If in a Cargo workspace repo, always ensure latest release binary is built
+    $repoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
+    $cargoToml = Join-Path $repoRoot "Cargo.toml"
+    $candRelease = Join-Path $repoRoot "target\release\net-flow.exe"
+    $binExe = $null
 
-    # Locate binary
-    $binExe = $ExePath
-    if (-not (Test-Path $binExe)) {
-        $candRelease = Join-Path $ScriptDir "..\target\release\net-flow.exe"
-        if (Test-Path $candRelease) {
-            $binExe = (Resolve-Path $candRelease).Path
-        } elseif (Test-Path (Join-Path $ScriptDir "..\Cargo.toml")) {
-            Write-Host "net-flow.exe not found. Building release binary via cargo..." -ForegroundColor Cyan
-            & cargo build --release --workspace
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $candRelease)) {
+    if (Test-Path $cargoToml) {
+        $cargoCmd = Get-Command cargo -ErrorAction SilentlyContinue
+        if ($cargoCmd) {
+            Write-Host "Building latest release binary via cargo..." -ForegroundColor Cyan
+            & cargo build --release --bin net-flow
+            if ($LASTEXITCODE -ne 0) {
                 throw "Failed to build net-flow.exe via cargo!"
             }
+            if (Test-Path $candRelease) {
+                $binExe = (Resolve-Path $candRelease).Path
+            }
+        }
+    }
+
+    # Locate binary if not built above
+    if (-not $binExe -or -not (Test-Path $binExe)) {
+        if (Test-Path $ExePath) {
+            $binExe = $ExePath
+        } elseif (Test-Path $candRelease) {
             $binExe = (Resolve-Path $candRelease).Path
         } else {
-            throw "net-flow.exe not found at $binExe! Please ensure you extracted the full release archive."
+            throw "net-flow.exe not found at $ExePath! Please build the binary or ensure you extracted the full release archive."
         }
     }
 

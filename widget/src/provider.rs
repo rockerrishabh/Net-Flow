@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
@@ -13,9 +14,57 @@ use crate::bindings::Microsoft::Windows::Widgets::Providers::{
 };
 use crate::bindings::Microsoft::Windows::Widgets::WidgetSize;
 use net_flow_core::backend::{AggregateMode, NetworkBackend, NetworkSnapshot};
-use net_flow_core::card::{WidgetConfig, build_adaptive_card, build_settings_card_for_size};
+use net_flow_core::card::{
+    WidgetConfig, build_adaptive_card_data_string, build_adaptive_card_template,
+    build_settings_card_for_size,
+};
 use net_flow_core::format::SpeedUnit;
-use net_flow_core::{SAMPLING_INTERVAL_MS, UPDATE_INTERVAL_MS};
+use net_flow_core::{
+    GraphStyle, SAMPLING_INTERVAL_MS, ThemeMode, compute_adaptive_ui_interval,
+};
+
+/// Maximum data-update suppression interval (application-level empirical safety policy).
+/// Periodically republishes unchanged data to avoid indefinitely suppressing provider updates.
+/// Note: This is an internal Net Flow policy for empirical safety, NOT a Windows Widgets platform requirement.
+pub const REDUNDANT_UPDATE_HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// Computes a fast 64-bit hash of a serialized data JSON payload.
+pub fn compute_payload_hash(data: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Determines whether dynamic telemetry data should be published to the widget host.
+///
+/// Collision-free identity:
+/// 1. If `force` is true, always publish.
+/// 2. Fast path: If `last_hash` differs from `current_hash`, payload definitely changed -> publish.
+/// 3. If `last_hash` matches, verify `last_json == current_json` (exact byte equality) to eliminate hash collisions.
+/// 4. If payload is truly identical:
+///    - If `last_published_at.elapsed() >= REDUNDANT_UPDATE_HEARTBEAT` (15s empirical safety interval), publish.
+///    - Otherwise, skip publication entirely (0 IPC, 0 host layout work).
+pub fn should_publish_data(
+    force: bool,
+    current_hash: u64,
+    current_json: &str,
+    last_hash: Option<u64>,
+    last_json: Option<&str>,
+    last_published_at: Option<Instant>,
+) -> bool {
+    if force {
+        return true;
+    }
+
+    match (last_hash, last_json) {
+        (Some(lh), Some(lj)) if lh == current_hash && lj == current_json => match last_published_at
+        {
+            Some(published_at) => published_at.elapsed() >= REDUNDANT_UPDATE_HEARTBEAT,
+            None => true,
+        },
+        _ => true,
+    }
+}
 
 /// Poison-safe lock acquisition helper to keep the widget server resilient if a thread panics.
 pub trait LockExt<T> {
@@ -52,15 +101,29 @@ pub fn widget_size_to_str(size: WidgetSize) -> &'static str {
     }
 }
 
+/// The installed visual template kind on the widget board.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TemplateKind {
+    #[default]
+    Live,
+    Settings,
+}
+
 /// Internal tracking info for each widget instance registered on the board.
 pub struct InternalWidgetInfo {
     pub id: String,
     pub size: WidgetSize,
     pub is_active: bool,
     pub in_customization: bool,
+    pub template_kind: TemplateKind,
     pub custom_state: WidgetConfig,
     pub draft_state: Option<WidgetConfig>,
     pub customization_requested_at: Option<Instant>,
+    // Phase B: collision-free payload diffing and forced publication
+    pub last_data_hash: Option<u64>,
+    pub last_data_json: Option<String>,
+    pub last_data_published_at: Option<Instant>,
+    pub force_data_publish: bool,
 }
 
 /// Shared state synchronized across the COM provider and the background sampling worker thread.
@@ -118,7 +181,12 @@ pub struct WidgetTarget {
     pub id: String,
     pub size: WidgetSize,
     pub config: WidgetConfig,
+    pub template_kind: TemplateKind,
     pub in_customization: bool,
+    pub last_data_hash: Option<u64>,
+    pub last_data_json: Option<String>,
+    pub last_data_published_at: Option<Instant>,
+    pub force_data_publish: bool,
 }
 
 #[implement(IWidgetProvider, IWidgetProvider2)]
@@ -174,12 +242,13 @@ pub fn log_widget(msg: &str) {
         let old_path = std::path::Path::new(&temp).join("netflow_widget.log.old");
 
         if let Ok(meta) = std::fs::metadata(&path)
-            && meta.len() >= 1024 * 1024 {
-                if old_path.exists() {
-                    let _ = std::fs::remove_file(&old_path);
-                }
-                let _ = std::fs::rename(&path, &old_path);
+            && meta.len() >= 1024 * 1024
+        {
+            if old_path.exists() {
+                let _ = std::fs::remove_file(&old_path);
             }
+            let _ = std::fs::rename(&path, &old_path);
+        }
 
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -203,52 +272,87 @@ pub fn log_widget_verbose(msg: &str) {
     }
 }
 
-/// Centralized function to push the correct card (live or settings) for a widget.
-fn update_widget(
+/// Constructs WidgetUpdateRequestOptions containing dynamic telemetry data only (leaving Template unset).
+pub fn build_data_update_options(
+    widget_id: &str,
+    data_json: &str,
+) -> windows_core::Result<WidgetUpdateRequestOptions> {
+    let opts = WidgetUpdateRequestOptions::CreateInstance(&HSTRING::from(widget_id))?;
+    opts.SetData(&HSTRING::from(data_json))?;
+    Ok(opts)
+}
+
+/// Constructs WidgetUpdateRequestOptions containing visual template, data context, and custom state.
+pub fn build_template_and_data_options(
+    widget_id: &str,
+    template: &str,
+    data_json: &str,
+    custom_state_json: &str,
+) -> windows_core::Result<WidgetUpdateRequestOptions> {
+    let opts = WidgetUpdateRequestOptions::CreateInstance(&HSTRING::from(widget_id))?;
+    opts.SetTemplate(&HSTRING::from(template))?;
+    opts.SetData(&HSTRING::from(data_json))?;
+    opts.SetCustomState(&HSTRING::from(custom_state_json))?;
+    Ok(opts)
+}
+
+/// Structural lifecycle update: pushes visual template, initial data payload, and custom state.
+pub fn update_widget_template_and_data(
     manager: &WidgetManager,
     widget_id: &str,
-    size: WidgetSize,
-    config: &WidgetConfig,
-    in_customization: bool,
-    snapshot: &NetworkSnapshot,
+    template: &str,
+    data_json: &str,
+    custom_state_json: &str,
 ) {
-    let (template, custom_state_json) = if in_customization {
-        let settings_card = build_settings_card_for_size(
-            config,
-            widget_size_to_str(size),
-            snapshot.session_duration_secs,
-        );
-        let state_json = serde_json::to_string(config).unwrap_or_else(|_| "{}".to_string());
-        (settings_card, state_json)
-    } else {
-        let live_card = build_adaptive_card(snapshot, widget_size_to_str(size), config);
-        let state_json = serde_json::to_string(config).unwrap_or_else(|_| "{}".to_string());
-        (live_card, state_json)
-    };
-
-    match WidgetUpdateRequestOptions::CreateInstance(&HSTRING::from(widget_id)) {
+    match build_template_and_data_options(widget_id, template, data_json, custom_state_json) {
         Ok(opts) => {
-            let _ = opts.SetTemplate(&HSTRING::from(&template));
-            let _ = opts.SetData(&HSTRING::from("{}"));
-            let _ = opts.SetCustomState(&HSTRING::from(&custom_state_json));
             let res = manager.UpdateWidget(&opts);
             match res {
                 Ok(()) => {
                     log_widget_verbose(&format!(
-                        "UpdateWidget id={} in_custom={}: Ok",
-                        widget_id, in_customization
+                        "UpdateWidget (Template+Data) id={}: Ok",
+                        widget_id
                     ));
                 }
                 Err(ref e) => {
                     log_widget(&format!(
-                        "UpdateWidget id={} in_custom={} failed: {:?}",
-                        widget_id, in_customization, e
+                        "UpdateWidget (Template+Data) id={} failed: {:?}",
+                        widget_id, e
                     ));
                 }
             }
         }
         Err(e) => {
-            log_widget(&format!("CreateInstance failed id={}: {:?}", widget_id, e));
+            log_widget(&format!(
+                "build_template_and_data_options failed id={}: {:?}",
+                widget_id, e
+            ));
+        }
+    }
+}
+
+/// Telemetry update: pushes dynamic data payload ONLY, leaving the existing visual template untouched.
+pub fn update_widget_data_only(manager: &WidgetManager, widget_id: &str, data_json: &str) {
+    match build_data_update_options(widget_id, data_json) {
+        Ok(opts) => {
+            let res = manager.UpdateWidget(&opts);
+            match res {
+                Ok(()) => {
+                    log_widget_verbose(&format!("UpdateWidget (Data only) id={}: Ok", widget_id));
+                }
+                Err(ref e) => {
+                    log_widget(&format!(
+                        "UpdateWidget (Data only) id={} failed: {:?}",
+                        widget_id, e
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            log_widget(&format!(
+                "build_data_update_options failed id={}: {:?}",
+                widget_id, e
+            ));
         }
     }
 }
@@ -280,9 +384,14 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     size,
                     is_active: false,
                     in_customization: false,
+                    template_kind: TemplateKind::Live,
                     custom_state: config.clone(),
                     draft_state: None,
                     customization_requested_at: None,
+                    last_data_hash: None,
+                    last_data_json: None,
+                    last_data_published_at: None,
+                    force_data_publish: true,
                 },
             );
         }
@@ -294,7 +403,20 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
         };
 
         if let Ok(manager) = WidgetManager::GetDefault() {
-            update_widget(&manager, &id, size, &config, false, &snapshot);
+            let size_str = widget_size_to_str(size);
+            let template = build_adaptive_card_template(size_str);
+            let data = build_adaptive_card_data_string(&snapshot, &config, size_str);
+            let state_json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
+            update_widget_template_and_data(&manager, &id, &template, &data, &state_json);
+
+            let h = compute_payload_hash(&data);
+            let mut state = self.state.lock_safe();
+            if let Some(w) = state.widgets.get_mut(&id) {
+                w.last_data_hash = Some(h);
+                w.last_data_json = Some(data);
+                w.last_data_published_at = Some(Instant::now());
+                w.force_data_publish = false;
+            }
         }
 
         self.ensure_worker();
@@ -378,8 +500,10 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         if matches_widget_id(id, &target_id) {
                             w.custom_state = new_config.clone();
                             w.in_customization = false;
+                            w.template_kind = TemplateKind::Live;
                             w.draft_state = None;
                             w.customization_requested_at = None;
+                            w.force_data_publish = true;
                             target_id = id.clone();
                             found = true;
                             break;
@@ -393,8 +517,10 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                                 ));
                                 w.custom_state = new_config.clone();
                                 w.in_customization = false;
+                                w.template_kind = TemplateKind::Live;
                                 w.draft_state = None;
                                 w.customization_requested_at = None;
+                                w.force_data_publish = true;
                                 target_id = id.clone();
                             }
                         } else {
@@ -424,21 +550,25 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         if matches_widget_id(id, &widget_id) {
                             w.custom_state.apps_expanded = !w.custom_state.apps_expanded;
                             w.custom_state.apps_page = 0;
+                            w.force_data_publish = true;
                             target_id = id.clone();
                             found = true;
                             break;
                         }
                     }
-                    if !found && state.widgets.len() == 1
-                        && let Some((id, w)) = state.widgets.iter_mut().next() {
-                            w.custom_state.apps_expanded = !w.custom_state.apps_expanded;
-                            w.custom_state.apps_page = 0;
-                            target_id = id.clone();
-                            found = true;
-                        }
+                    if !found
+                        && state.widgets.len() == 1
+                        && let Some((id, w)) = state.widgets.iter_mut().next()
+                    {
+                        w.custom_state.apps_expanded = !w.custom_state.apps_expanded;
+                        w.custom_state.apps_page = 0;
+                        w.force_data_publish = true;
+                        target_id = id.clone();
+                        found = true;
+                    }
                 }
                 if found {
-                    self.push_current_card(&target_id);
+                    self.push_current_data_only(&target_id);
                 }
             }
             "next_apps_page" => {
@@ -449,20 +579,24 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.custom_state.apps_page = w.custom_state.apps_page.saturating_add(1);
+                            w.force_data_publish = true;
                             target_id = id.clone();
                             found = true;
                             break;
                         }
                     }
-                    if !found && state.widgets.len() == 1
-                        && let Some((id, w)) = state.widgets.iter_mut().next() {
-                            w.custom_state.apps_page = w.custom_state.apps_page.saturating_add(1);
-                            target_id = id.clone();
-                            found = true;
-                        }
+                    if !found
+                        && state.widgets.len() == 1
+                        && let Some((id, w)) = state.widgets.iter_mut().next()
+                    {
+                        w.custom_state.apps_page = w.custom_state.apps_page.saturating_add(1);
+                        w.force_data_publish = true;
+                        target_id = id.clone();
+                        found = true;
+                    }
                 }
                 if found {
-                    self.push_current_card(&target_id);
+                    self.push_current_data_only(&target_id);
                 }
             }
             "prev_apps_page" => {
@@ -473,39 +607,46 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.custom_state.apps_page = w.custom_state.apps_page.saturating_sub(1);
+                            w.force_data_publish = true;
                             target_id = id.clone();
                             found = true;
                             break;
                         }
                     }
-                    if !found && state.widgets.len() == 1
-                        && let Some((id, w)) = state.widgets.iter_mut().next() {
-                            w.custom_state.apps_page = w.custom_state.apps_page.saturating_sub(1);
-                            target_id = id.clone();
-                            found = true;
-                        }
+                    if !found
+                        && state.widgets.len() == 1
+                        && let Some((id, w)) = state.widgets.iter_mut().next()
+                    {
+                        w.custom_state.apps_page = w.custom_state.apps_page.saturating_sub(1);
+                        w.force_data_publish = true;
+                        target_id = id.clone();
+                        found = true;
+                    }
                 }
                 if found {
-                    self.push_current_card(&target_id);
+                    self.push_current_data_only(&target_id);
                 }
             }
             "reset_session" => {
                 let mut target_id = widget_id.clone();
                 let mut found = false;
                 {
-                    let state = self.state.lock_safe();
-                    if let Some((id, _)) = state
+                    let mut state = self.state.lock_safe();
+                    if let Some((id, w)) = state
                         .widgets
-                        .iter()
+                        .iter_mut()
                         .find(|(id, _)| matches_widget_id(id, &widget_id))
                     {
+                        w.force_data_publish = true;
                         target_id = id.clone();
                         found = true;
                     } else if state.widgets.len() == 1
-                        && let Some((id, _)) = state.widgets.iter().next() {
-                            target_id = id.clone();
-                            found = true;
-                        }
+                        && let Some((id, w)) = state.widgets.iter_mut().next()
+                    {
+                        w.force_data_publish = true;
+                        target_id = id.clone();
+                        found = true;
+                    }
                     if found {
                         let mut backend = state.backend.lock_safe();
                         backend.reset_session();
@@ -519,7 +660,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     }
                 }
                 if found {
-                    self.push_current_card(&target_id);
+                    self.push_current_data_only(&target_id);
                 }
             }
             "open_settings" => {
@@ -531,6 +672,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.in_customization = true;
+                            w.template_kind = TemplateKind::Settings;
                             w.draft_state = Some(w.custom_state.clone());
                             w.customization_requested_at = None;
                             target_id = id.clone();
@@ -545,6 +687,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                                     "open_settings fallback: id={widget_id} not found, applying to unique widget {id}"
                                 ));
                                 w.in_customization = true;
+                                w.template_kind = TemplateKind::Settings;
                                 w.draft_state = Some(w.custom_state.clone());
                                 w.customization_requested_at = None;
                                 target_id = id.clone();
@@ -576,8 +719,10 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     for (id, w) in state.widgets.iter_mut() {
                         if matches_widget_id(id, &widget_id) {
                             w.in_customization = false;
+                            w.template_kind = TemplateKind::Live;
                             w.draft_state = None;
                             w.customization_requested_at = None;
+                            w.force_data_publish = true;
                             target_id = id.clone();
                             found = true;
                             break;
@@ -590,8 +735,10 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                                     "cancel_settings fallback: id={widget_id} not found, applying to unique widget {id}"
                                 ));
                                 w.in_customization = false;
+                                w.template_kind = TemplateKind::Live;
                                 w.draft_state = None;
                                 w.customization_requested_at = None;
+                                w.force_data_publish = true;
                                 target_id = id.clone();
                             }
                         } else {
@@ -638,6 +785,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
             for (wid, w) in state.widgets.iter_mut() {
                 if matches_widget_id(wid, &id) {
                     w.size = new_size;
+                    w.force_data_publish = true;
                     target_id = wid.clone();
                     break;
                 }
@@ -671,6 +819,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     // Transition to active flyout (or normal activation) is complete.
                     // Clear the pending transition timestamp so future deactivations reset cleanly.
                     w.customization_requested_at = None;
+                    w.force_data_publish = true;
                     target_id = wid.clone();
                     found = true;
                     break;
@@ -684,9 +833,14 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         size,
                         is_active: true,
                         in_customization: false,
+                        template_kind: TemplateKind::Live,
                         custom_state: WidgetConfig::default(),
                         draft_state: None,
                         customization_requested_at: None,
+                        last_data_hash: None,
+                        last_data_json: None,
+                        last_data_published_at: None,
+                        force_data_publish: true,
                     },
                 );
                 became_active = true;
@@ -733,6 +887,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         // When the widget is deactivated (e.g. board closed or customization flyout dismissed),
                         // reset customization mode so reopening never stays stuck in settings!
                         w.in_customization = false;
+                        w.template_kind = TemplateKind::Live;
                         w.draft_state = None;
                         w.customization_requested_at = None;
                     }
@@ -793,6 +948,7 @@ impl IWidgetProvider2_Impl for NetFlowWidgetProvider_Impl {
             for (wid, w) in state.widgets.iter_mut() {
                 if matches_widget_id(wid, &id) {
                     w.in_customization = true;
+                    w.template_kind = TemplateKind::Settings;
                     w.customization_requested_at = Some(Instant::now());
                     w.draft_state = Some(parsed_config.clone());
                     w.custom_state = parsed_config.clone();
@@ -811,9 +967,14 @@ impl IWidgetProvider2_Impl for NetFlowWidgetProvider_Impl {
                         size: current_size,
                         is_active: true,
                         in_customization: true,
+                        template_kind: TemplateKind::Settings,
                         custom_state: parsed_config.clone(),
                         draft_state: Some(parsed_config.clone()),
                         customization_requested_at: Some(Instant::now()),
+                        last_data_hash: None,
+                        last_data_json: None,
+                        last_data_published_at: None,
+                        force_data_publish: true,
                     },
                 );
             }
@@ -833,16 +994,14 @@ impl IWidgetProvider2_Impl for NetFlowWidgetProvider_Impl {
             state.latest_snapshot.read_safe().clone()
         };
         if let Ok(manager) = WidgetManager::GetDefault() {
-            update_widget(
-                &manager,
-                &target_id,
-                board_size,
-                &board_config,
-                false,
-                &snapshot,
-            );
+            let size_str = widget_size_to_str(board_size);
+            let template = build_adaptive_card_template(size_str);
+            let data = build_adaptive_card_data_string(&snapshot, &board_config, size_str);
+            let state_json =
+                serde_json::to_string(&board_config).unwrap_or_else(|_| "{}".to_string());
+            update_widget_template_and_data(&manager, &target_id, &template, &data, &state_json);
             if target_id != id {
-                update_widget(&manager, &id, board_size, &board_config, false, &snapshot);
+                update_widget_template_and_data(&manager, &id, &template, &data, &state_json);
             }
         }
         Ok(())
@@ -850,9 +1009,9 @@ impl IWidgetProvider2_Impl for NetFlowWidgetProvider_Impl {
 }
 
 impl NetFlowWidgetProvider_Impl {
-    /// Push the correct card for a widget based on its current state.
+    /// Push the correct card (template + data) for a widget based on its current state.
     fn push_current_card(&self, widget_id: &str) {
-        let (actual_id, size, config, in_customization) = {
+        let (actual_id, size, config, in_customization, template_kind) = {
             let state = self.state.lock_safe();
             let found = state
                 .widgets
@@ -864,6 +1023,7 @@ impl NetFlowWidgetProvider_Impl {
                         w.size,
                         w.custom_state.clone(),
                         w.in_customization,
+                        w.template_kind,
                     )
                 });
 
@@ -881,6 +1041,7 @@ impl NetFlowWidgetProvider_Impl {
                                 w.size,
                                 w.custom_state.clone(),
                                 w.in_customization,
+                                w.template_kind,
                             )
                         } else {
                             return;
@@ -903,28 +1064,117 @@ impl NetFlowWidgetProvider_Impl {
         };
 
         log_widget_verbose(&format!(
-            "push_current_card req_id={} -> actual_id={} size={:?} in_custom={}",
-            widget_id, actual_id, size, in_customization
+            "push_current_card req_id={} -> actual_id={} size={:?} in_custom={} kind={:?}",
+            widget_id, actual_id, size, in_customization, template_kind
         ));
 
+        let size_str = widget_size_to_str(size);
+        let (template, data_json, state_json) = if in_customization
+            || template_kind == TemplateKind::Settings
+        {
+            let settings_card =
+                build_settings_card_for_size(&config, size_str, snapshot.session_duration_secs);
+            let state_json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
+            (settings_card, "{}".to_string(), state_json)
+        } else {
+            let live_template = build_adaptive_card_template(size_str);
+            let live_data = build_adaptive_card_data_string(&snapshot, &config, size_str);
+            let state_json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
+            (live_template, live_data, state_json)
+        };
+
         if let Ok(manager) = WidgetManager::GetDefault() {
-            update_widget(
+            update_widget_template_and_data(
                 &manager,
                 &actual_id,
-                size,
-                &config,
-                in_customization,
-                &snapshot,
+                &template,
+                &data_json,
+                &state_json,
             );
             if actual_id != widget_id && !widget_id.is_empty() {
-                update_widget(
+                update_widget_template_and_data(
                     &manager,
                     widget_id,
-                    size,
-                    &config,
-                    in_customization,
-                    &snapshot,
+                    &template,
+                    &data_json,
+                    &state_json,
                 );
+            }
+            let h = compute_payload_hash(&data_json);
+            let mut state = self.state.lock_safe();
+            if let Some(w) = state.widgets.get_mut(&actual_id) {
+                w.last_data_hash = Some(h);
+                w.last_data_json = Some(data_json.clone());
+                w.last_data_published_at = Some(Instant::now());
+                w.force_data_publish = false;
+            }
+            if actual_id != widget_id
+                && !widget_id.is_empty()
+                && let Some(w) = state.widgets.get_mut(widget_id)
+            {
+                w.last_data_hash = Some(h);
+                w.last_data_json = Some(data_json.clone());
+                w.last_data_published_at = Some(Instant::now());
+                w.force_data_publish = false;
+            }
+        }
+    }
+
+    /// Push dynamic telemetry data ONLY for a live widget without replacing its visual template.
+    fn push_current_data_only(&self, widget_id: &str) {
+        let (actual_id, size, config) = {
+            let state = self.state.lock_safe();
+            let found = state
+                .widgets
+                .iter()
+                .find(|(id, _)| matches_widget_id(id, widget_id))
+                .map(|(id, w)| (id.clone(), w.size, w.custom_state.clone()));
+
+            match found {
+                Some(data) => data,
+                None => {
+                    if state.widgets.len() == 1 {
+                        if let Some((id, w)) = state.widgets.iter().next() {
+                            (id.clone(), w.size, w.custom_state.clone())
+                        } else {
+                            return;
+                        }
+                    } else {
+                        return;
+                    }
+                }
+            }
+        };
+
+        let snapshot = {
+            let state = self.state.lock_safe();
+            state.latest_snapshot.read_safe().clone()
+        };
+
+        let size_str = widget_size_to_str(size);
+        let data_json = build_adaptive_card_data_string(&snapshot, &config, size_str);
+
+        if let Ok(manager) = WidgetManager::GetDefault() {
+            update_widget_data_only(&manager, &actual_id, &data_json);
+            if actual_id != widget_id && !widget_id.is_empty() {
+                update_widget_data_only(&manager, widget_id, &data_json);
+            }
+            let h = compute_payload_hash(&data_json);
+            let mut state = self.state.lock_safe();
+            if let Some(w) = state.widgets.get_mut(&actual_id) {
+                w.last_data_hash = Some(h);
+                w.last_data_json = Some(data_json.clone());
+                w.last_data_published_at = Some(Instant::now());
+                w.force_data_publish = false;
+            }
+            if actual_id != widget_id
+                && !widget_id.is_empty()
+                && let Some(w) = state.widgets.get_mut(widget_id)
+            {
+                w.last_data_hash = Some(h);
+                w.last_data_json = Some(data_json);
+                w.last_data_published_at = Some(Instant::now());
+                w.force_data_publish = false;
             }
         }
     }
@@ -974,16 +1224,51 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         })
         .unwrap_or(current_config.apps_expanded);
 
+    let theme = parsed
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .map(ThemeMode::from_str_value)
+        .unwrap_or(current_config.theme);
+
+    let graph_style = parsed
+        .get("graph_style")
+        .and_then(|v| v.as_str())
+        .map(GraphStyle::from_str_value)
+        .unwrap_or(current_config.graph_style);
+
     WidgetConfig {
         speed_unit,
         chart_window,
         apps_expanded,
         apps_page: 0,
+        theme,
+        graph_style,
     }
 }
 
+/// Determines whether the adaptive data publication cadence has elapsed or should be bypassed.
+///
+/// Priority:
+/// 1. `force_ui` (user interaction) -> immediate bypass.
+/// 2. Traffic rate acceleration (e.g. sudden burst while previously idle) -> immediate trigger.
+/// 3. Normal cadence interval (`last_generation_at.elapsed() >= adaptive_interval`).
+pub fn is_publication_cadence_due(
+    force_ui: bool,
+    adaptive_interval: Duration,
+    last_generation_at: Instant,
+    last_data_published_at: Instant,
+) -> bool {
+    if force_ui {
+        return true;
+    }
+    let traffic_spiked = adaptive_interval < Duration::from_millis(1500)
+        && last_data_published_at.elapsed() >= adaptive_interval;
+    last_generation_at.elapsed() >= adaptive_interval || traffic_spiked
+}
+
 /// Background worker loop that samples network telemetry every 250ms
-/// and pushes updated Adaptive Cards to active board widgets.
+/// and pushes updated Adaptive Cards to active board widgets using an
+/// adaptive publication cadence and collision-free payload diffing.
 fn worker_loop(
     shutdown: Arc<(Mutex<bool>, Condvar)>,
     state: Arc<Mutex<ProviderState>>,
@@ -992,10 +1277,11 @@ fn worker_loop(
     ui_dirty: Arc<AtomicBool>,
 ) {
     let sample_period = Duration::from_millis(SAMPLING_INTERVAL_MS);
-    let ui_period = Duration::from_millis(UPDATE_INTERVAL_MS);
     let persist_period = Duration::from_secs(5);
     let mut next_sample = Instant::now() + sample_period;
-    let mut last_ui_update = Instant::now();
+    let mut _last_sampled_at = Instant::now();
+    let mut last_data_published_at = Instant::now();
+    let mut last_generation_at = Instant::now();
     let mut last_persist = Instant::now();
 
     loop {
@@ -1011,6 +1297,7 @@ fn worker_loop(
         drop(guard);
 
         let started = Instant::now();
+        _last_sampled_at = started;
         {
             let mut b = backend.lock_safe();
             if let Ok(s) = b.sample() {
@@ -1031,12 +1318,18 @@ fn worker_loop(
         };
 
         let force_ui = ui_dirty.swap(false, Ordering::SeqCst);
-        if !force_ui && last_ui_update.elapsed() < ui_period {
+        let snapshot = snapshot_ref.read_safe().clone();
+        let adaptive_interval = compute_adaptive_ui_interval(snapshot.rx_bps, snapshot.tx_bps);
+
+        if !is_publication_cadence_due(
+            force_ui,
+            adaptive_interval,
+            last_generation_at,
+            last_data_published_at,
+        ) {
             continue;
         }
-        last_ui_update = Instant::now();
-
-        let snapshot = snapshot_ref.read_safe().clone();
+        last_generation_at = Instant::now();
 
         let targets: Vec<WidgetTarget> = {
             let s = state.lock_safe();
@@ -1047,7 +1340,12 @@ fn worker_loop(
                     id: w.id.clone(),
                     size: w.size,
                     config: w.custom_state.clone(),
+                    template_kind: w.template_kind,
                     in_customization: w.in_customization,
+                    last_data_hash: w.last_data_hash,
+                    last_data_json: w.last_data_json.clone(),
+                    last_data_published_at: w.last_data_published_at,
+                    force_data_publish: w.force_data_publish,
                 })
                 .collect()
         };
@@ -1057,18 +1355,46 @@ fn worker_loop(
         }
 
         if let Ok(manager) = WidgetManager::GetDefault() {
+            let mut published_any = false;
             for target in &targets {
-                if target.in_customization {
+                if target.in_customization || target.template_kind != TemplateKind::Live {
                     continue;
                 }
-                update_widget(
-                    &manager,
-                    &target.id,
-                    target.size,
-                    &target.config,
-                    false,
+                let data_json = build_adaptive_card_data_string(
                     &snapshot,
+                    &target.config,
+                    widget_size_to_str(target.size),
                 );
+                let current_hash = compute_payload_hash(&data_json);
+                let must_force = force_ui || target.force_data_publish;
+                if !should_publish_data(
+                    must_force,
+                    current_hash,
+                    &data_json,
+                    target.last_data_hash,
+                    target.last_data_json.as_deref(),
+                    target.last_data_published_at,
+                ) {
+                    log_widget_verbose(&format!(
+                        "UpdateWidget (Data only) id={}: skipped (payload identical, heartbeat not due)",
+                        target.id
+                    ));
+                    continue;
+                }
+
+                update_widget_data_only(&manager, &target.id, &data_json);
+                published_any = true;
+
+                let mut s = state.lock_safe();
+                if let Some(w) = s.widgets.get_mut(&target.id) {
+                    w.last_data_hash = Some(current_hash);
+                    w.last_data_json = Some(data_json);
+                    w.last_data_published_at = Some(Instant::now());
+                    w.force_data_publish = false;
+                }
+            }
+            if published_any {
+                last_data_published_at = Instant::now();
             }
         }
     }
@@ -1131,10 +1457,15 @@ mod tests {
             id: "test-widget-1".to_string(),
             size: WidgetSize::Medium,
             is_active: true,
+            template_kind: TemplateKind::Live,
             in_customization: false,
             custom_state: WidgetConfig::default(),
             draft_state: None,
             customization_requested_at: None,
+            last_data_hash: None,
+            last_data_json: None,
+            last_data_published_at: None,
+            force_data_publish: false,
         };
 
         // Step 1: OnCustomizationRequested triggers
@@ -1193,11 +1524,16 @@ mod tests {
             id: "test-widget-2".to_string(),
             size: WidgetSize::Medium,
             is_active: true,
+            template_kind: TemplateKind::Live,
             in_customization: true,
             custom_state: WidgetConfig::default(),
             draft_state: Some(WidgetConfig::default()),
             // Simulated stale transition older than 1.5s
             customization_requested_at: Some(Instant::now() - Duration::from_secs(5)),
+            last_data_hash: None,
+            last_data_json: None,
+            last_data_published_at: None,
+            force_data_publish: false,
         };
 
         let is_opening = widget
@@ -1217,5 +1553,188 @@ mod tests {
         assert!(!widget.in_customization);
         assert!(widget.draft_state.is_none());
         assert!(widget.customization_requested_at.is_none());
+    }
+
+    #[test]
+    fn test_telemetry_update_does_not_set_template() {
+        unsafe {
+            #[link(name = "ole32")]
+            unsafe extern "system" {
+                fn CoInitializeEx(
+                    pv_reserved: *const core::ffi::c_void,
+                    dw_co_init: u32,
+                ) -> windows_core::HRESULT;
+            }
+            let _ = CoInitializeEx(core::ptr::null(), 0);
+        }
+
+        match build_data_update_options("test-widget-telemetry", r#"{"downloadRate":"12.5 MB/s"}"#)
+        {
+            Ok(opts) => {
+                assert_eq!(
+                    opts.WidgetId()
+                        .map(|s| s.to_string_lossy())
+                        .unwrap_or_default(),
+                    "test-widget-telemetry"
+                );
+                assert_eq!(
+                    opts.Data().map(|s| s.to_string_lossy()).unwrap_or_default(),
+                    r#"{"downloadRate":"12.5 MB/s"}"#
+                );
+                // Invariant: Template must NOT be set on telemetry data updates
+                let template = opts
+                    .Template()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default();
+                assert!(
+                    template.is_empty(),
+                    "Template must remain unset in data-only updates"
+                );
+                // Invariant: CustomState must NOT be set on telemetry data updates
+                let custom_state = opts
+                    .CustomState()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default();
+                assert!(
+                    custom_state.is_empty(),
+                    "CustomState must remain unset in data-only updates"
+                );
+            }
+            Err(e) => {
+                // If running in an uncontained unit test environment where WinRT activation
+                // for Microsoft.Windows.Widgets.Providers is not registered in the test runner,
+                // verify that ClassNotRegistered is the only error code received.
+                assert_eq!(
+                    e.code().0 as u32,
+                    0x80040154,
+                    "Expected ClassNotRegistered in bare test runner: {:?}",
+                    e
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_payload_hash_consistency() {
+        let p1 = r#"{"downloadRate":"10 KB/s","uploadRate":"2 KB/s"}"#;
+        let p2 = r#"{"downloadRate":"10 KB/s","uploadRate":"2 KB/s"}"#;
+        let p3 = r#"{"downloadRate":"11 KB/s","uploadRate":"2 KB/s"}"#;
+
+        assert_eq!(compute_payload_hash(p1), compute_payload_hash(p2));
+        assert_ne!(compute_payload_hash(p1), compute_payload_hash(p3));
+    }
+
+    #[test]
+    fn test_should_publish_data_forced() {
+        let json = r#"{"downloadRate":"0 B/s"}"#;
+        let hash = compute_payload_hash(json);
+
+        // Even with matching hash, matching string, and fresh publication timestamp,
+        // force = true MUST trigger publication (e.g. user paged apps or clicked reset session).
+        let publish = should_publish_data(
+            true,
+            hash,
+            json,
+            Some(hash),
+            Some(json),
+            Some(Instant::now()),
+        );
+        assert!(publish, "force = true must always publish");
+    }
+
+    #[test]
+    fn test_should_publish_data_skips_identical_payload() {
+        let json = r#"{"downloadRate":"0 B/s","sessionText":"Session (1m)"}"#;
+        let hash = compute_payload_hash(json);
+        let recent = Some(Instant::now());
+
+        let publish = should_publish_data(false, hash, json, Some(hash), Some(json), recent);
+        assert!(
+            !publish,
+            "Identical payload within heartbeat window must be skipped"
+        );
+    }
+
+    #[test]
+    fn test_should_publish_data_detects_hash_or_string_change() {
+        let json1 = r#"{"downloadRate":"10 KB/s"}"#;
+        let json2 = r#"{"downloadRate":"20 KB/s"}"#;
+        let hash1 = compute_payload_hash(json1);
+        let hash2 = compute_payload_hash(json2);
+        let recent = Some(Instant::now());
+
+        // Hash differs
+        assert!(should_publish_data(
+            false,
+            hash2,
+            json2,
+            Some(hash1),
+            Some(json1),
+            recent
+        ));
+
+        // Theoretical hash collision simulation: hashes match but strings differ
+        assert!(
+            should_publish_data(false, hash1, json2, Some(hash1), Some(json1), recent),
+            "String mismatch must publish even if hashes were to collide"
+        );
+    }
+
+    #[test]
+    fn test_should_publish_data_heartbeat() {
+        let json = r#"{"downloadRate":"0 B/s"}"#;
+        let hash = compute_payload_hash(json);
+        // Stale publication timestamp beyond REDUNDANT_UPDATE_HEARTBEAT (15s)
+        let expired = Some(Instant::now() - Duration::from_secs(20));
+
+        let publish = should_publish_data(false, hash, json, Some(hash), Some(json), expired);
+        assert!(
+            publish,
+            "Expired heartbeat safety interval must trigger publication even if payload is identical"
+        );
+    }
+
+    #[test]
+    fn test_is_publication_cadence_due() {
+        let now = Instant::now();
+        let interval_500ms = Duration::from_millis(500);
+        let interval_1500ms = Duration::from_millis(1500);
+
+        // 1. force_ui always triggers immediately regardless of elapsed duration
+        assert!(
+            is_publication_cadence_due(true, interval_500ms, now, now),
+            "force_ui must bypass cadence immediately"
+        );
+
+        // 2. Normal wait: interval has not elapsed
+        let recent_gen = now - Duration::from_millis(200);
+        let recent_pub = now - Duration::from_millis(200);
+        assert!(
+            !is_publication_cadence_due(false, interval_500ms, recent_gen, recent_pub),
+            "Must wait when elapsed time is less than adaptive interval"
+        );
+
+        // 3. Normal elapsed: interval has elapsed
+        let past_gen = now - Duration::from_millis(505);
+        assert!(
+            is_publication_cadence_due(false, interval_500ms, past_gen, recent_pub),
+            "Must trigger once adaptive interval has elapsed"
+        );
+
+        // 4. Traffic spike from idle:
+        // When traffic accelerates to 500ms cadence and widget hasn't published in >= 500ms,
+        // it triggers immediately even if the last generation check was 250ms ago.
+        let idle_last_pub = now - Duration::from_millis(1200);
+        let recent_idle_gen = now - Duration::from_millis(250);
+        assert!(
+            is_publication_cadence_due(false, interval_500ms, recent_idle_gen, idle_last_pub),
+            "Traffic spike from idle must trigger immediate publication"
+        );
+
+        // 5. In steady-state idle (1500ms interval), waiting continues until 1500ms elapses
+        assert!(
+            !is_publication_cadence_due(false, interval_1500ms, recent_idle_gen, idle_last_pub),
+            "Steady-state idle must wait for full 1500ms cadence"
+        );
     }
 }
