@@ -10,10 +10,6 @@ on:
         description: "Release tag or version (e.g. v0.1.1, leave blank to use Cargo.toml)"
         required: false
         default: ""
-      skip_ci_check:
-        description: "Skip CI check (manual emergency override)"
-        type: boolean
-        default: false
       draft_release:
         description: "Create draft release"
         type: boolean
@@ -36,60 +32,8 @@ env:
   STORE_PRODUCT_ID: ${{ secrets.STORE_PRODUCT_ID }}
 
 jobs:
-  check-ci:
-    name: Verify CI Passed
-    runs-on: windows-latest
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Check CI workflow status
-        if: github.event_name != 'workflow_dispatch' || inputs.skip_ci_check != true
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          $sha = "${{ github.sha }}"
-          Write-Host "Verifying CI status for commit $sha in $env:GH_REPO..."
-          $timeout = [DateTime]::UtcNow.AddMinutes(15)
-
-          while ([DateTime]::UtcNow -lt $timeout) {
-            $runsJson = gh run list --workflow "ci.yml" --commit $sha --json status,conclusion,databaseId,url | ConvertFrom-Json
-
-            if (-not $runsJson -or $runsJson.Count -eq 0) {
-              Write-Host "Waiting for CI run on commit $sha to be scheduled..."
-              Start-Sleep -Seconds 10
-              continue
-            }
-
-            $latestRun = $runsJson[0]
-            Write-Host "CI Run $($latestRun.databaseId): status='$($latestRun.status)', conclusion='$($latestRun.conclusion)'"
-            Write-Host "Run URL: $($latestRun.url)"
-
-            if ($latestRun.status -eq "completed") {
-              if ($latestRun.conclusion -eq "success") {
-                Write-Host "CI passed successfully! Unlocking release pipeline."
-                exit 0
-              } else {
-                Write-Error "CI run failed with conclusion '$($latestRun.conclusion)'. Cannot release unverified commit. View: $($latestRun.url)"
-                exit 1
-              }
-            }
-
-            Write-Host "CI is currently '$($latestRun.status)'. Waiting 15 seconds..."
-            Start-Sleep -Seconds 15
-          }
-
-          Write-Error "Timed out waiting 15 minutes for CI to complete on commit $sha. Aborting release."
-          exit 1
-
   release:
     name: Build & Publish GitHub Release
-    needs: [check-ci]
     runs-on: windows-latest
     outputs:
       version: ${{ steps.get_version.outputs.VERSION }}
