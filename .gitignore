@@ -18,7 +18,7 @@ windows-rs/
 *.pri
 *.nupkg
 *.zip
-
+scripts/NetFlow.msix
 # Visual Studio & VS Code
 .vscode/
 .idea/
