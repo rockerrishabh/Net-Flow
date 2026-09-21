@@ -43,6 +43,18 @@
 
 ---
 
+## 🚀 What's New in v0.1.1
+
+- **⚡ High-Fidelity 4 Hz Telemetry**: Decoupled high-frequency sampling (250 ms / 4 Hz) from widget card publication (500 ms / 2 Hz), expanding the rolling history ring buffer from 60 to 240 samples for ultra-smooth waveform fidelity without increasing UI load.
+- **❄️ Precomputed Idle Chart Cache**: Implemented an immutable `OnceLock` cache for standard widget dimensions and time windows, bypassing the rasterizer during idle network periods and reducing idle CPU overhead to just **0.024% of 1 core** (a **55x speedup** from 6.68 ms down to 120 µs).
+- **🚀 Accelerated Sparkline Rasterizer**: Optimized blend loops with a zero-alpha destination fast-path, hoisted invariant scales, unrolled color channels, and branchless interior fills, cutting active rasterization latency by **45%** (from 6.52 ms to 3.58 ms).
+- **🎯 Incremental O(1) Peak Tracking**: Replaced O(N) full-history scans on every UI tick with O(1) running maximum peak tracking in `NetworkBackend`.
+- **🌐 Official Product Showcase**: Updated product links to [`netflow.rockerrishabh.me`](https://netflow.rockerrishabh.me) and dedicated privacy policy at [`netflow.rockerrishabh.me/privacy`](https://netflow.rockerrishabh.me/privacy).
+
+📖 For the full historical log, check out [CHANGELOG.md](CHANGELOG.md).
+
+---
+
 ## 📥 Installation
 
 ### 1. Microsoft Store (Recommended)
@@ -90,9 +102,12 @@ Net Flow is engineered from the ground up for zero distraction, extreme reliabil
 | Metric / Component | Implementation | Impact |
 | :--- | :--- | :--- |
 | **Release Binary Size** | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`) | **1.24 MB** standalone executable |
-| **CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing | **< 0.1% CPU** during active monitoring |
-| **Memory Footprint** | Bounded caches & in-memory rasterization | **< 15 MB** working set |
-| **Process Sampling** | Decoupled 1.0s process inspection + 500ms network throughput polling | Zero system scheduler jitter or scaling distortion |
+| **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing | **< 0.1% CPU** during active monitoring |
+| **Idle CPU Overhead** | Precomputed `OnceLock` idle chart cache bypassing rasterizer | **0.024% of 1 core** (55x speedup; 120 µs idle bypass) |
+| **Memory Footprint** | Bounded ring buffers (240 samples) & in-memory rasterization | **< 15 MB** working set |
+| **Telemetry Cadence** | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication | High-resolution waveforms with zero system scheduler jitter |
+| **Process Attribution** | Decoupled 1.0s process inspection with 256-entry bounded icon cache | Per-app network tracking without UI thread blocking |
+| **Chart Peak Tracking** | Incremental O(1) running maximum tracking | Eliminates O(N) buffer scans on every render tick |
 | **COM Lifetime** | Automatic idle detection with 30s grace period and `CoRevokeClassObject` | **Zero zombie background processes** when unpinned |
 | **Lock Poison-Safety** | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"` |
 | **Log Management** | Thread-safe 1MB rotating logger in `%TEMP%` | Prevents disk bloat; quiet by default |
@@ -126,8 +141,7 @@ net-flow/
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                     # Continuous integration & MSIX packaging validation
-│       ├── release.yml                # GitHub Release pipeline (triggered on Git tags)
-│       └── store-publish.yml          # Microsoft Store submission pipeline (manual dispatch)
+│       └── release.yml                # Unified GitHub Release & Microsoft Store publishing pipeline
 ├── crates/
 │   └── core/                          # net-flow-core (pure Rust core logic)
 │       ├── src/
@@ -190,8 +204,7 @@ cargo build --release --workspace
 Net Flow includes automated GitHub Actions workflows:
 
 1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 75 unit tests, and verifies MSIX layout packaging.
-2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.0`) or manual workflow dispatch. Builds the optimized binary, packages the MSIX, creates public sideload certificates, computes SHA256 checksums, extracts release notes from `CHANGELOG.md`, and publishes the **GitHub Release**.
-3. **`store-publish.yml`**: Triggered manually via workflow dispatch. Builds the Store MSIX with Partner Center credentials and submits updates to the **Microsoft Store** via the Store Submission API.
+2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.1`) or manual workflow dispatch. Builds the optimized binary, packages both public sideload MSIX and Microsoft Store MSIX, generates SHA256 checksums, extracts sanitized release notes from `CHANGELOG.md`, publishes the **GitHub Release**, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** via Partner Center.
 
 ---
 

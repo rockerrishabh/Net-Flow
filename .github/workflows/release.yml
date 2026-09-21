@@ -241,8 +241,34 @@ jobs:
               $header = "# Net Flow v$semver`n`n"
               [System.IO.File]::WriteAllText($notesPath, $header + $extracted + "`n", [System.Text.Encoding]::UTF8)
               Write-Host "Extracted release notes for v$semver"
+
+              # Format clean plain-text release notes for Microsoft Partner Center listing
+              $lines = $extracted -split "\r?\n"
+              $cleanedLines = @()
+              foreach ($line in $lines) {
+                $trimmed = $line.Trim()
+                if ($trimmed -match '^###\s+' -or $trimmed -match '^[-*_]{3,}$' -or [string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                $clean = $trimmed -replace '`', ''
+                if ($clean -match '^-\s+\*\*([^\*]+)\*\*:\s*(.*)$') {
+                  $cleanedLines += if ($matches[2].Trim()) { "• $($matches[1].Trim()): $($matches[2].Trim())" } else { "• $($matches[1].Trim()):" }
+                } elseif ($clean -match '^-\s+\*\*([^\*]+)\*\*$') {
+                  $cleanedLines += "• $($matches[1].Trim())"
+                } elseif ($clean -match '^-\s+(.*)$') {
+                  $cleanedLines += "  - $($matches[1].Trim())"
+                } else {
+                  $cleanedLines += ($clean -replace '\*\*', '')
+                }
+              }
+              $storeNotes = "What's New in v${semver}:`n`n" + ($cleanedLines -join "`n")
+              if ($storeNotes.Length -gt 1490) {
+                $cutoff = $storeNotes.LastIndexOf("`n", 1480)
+                $storeNotes = if ($cutoff -gt 100) { $storeNotes.Substring(0, $cutoff) } else { $storeNotes.Substring(0, 1485) + "..." }
+              }
+              [System.IO.File]::WriteAllText("target/STORE_RELEASE_NOTES.txt", $storeNotes, [System.Text.Encoding]::UTF8)
+              Write-Host "Generated target/STORE_RELEASE_NOTES.txt ($($storeNotes.Length) chars)"
             } else {
               [System.IO.File]::WriteAllText($notesPath, "# Net Flow v$semver`n", [System.Text.Encoding]::UTF8)
+              [System.IO.File]::WriteAllText("target/STORE_RELEASE_NOTES.txt", "What's New in v${semver}:`n`n• Performance and reliability improvements for Net Flow on Windows 11.", [System.Text.Encoding]::UTF8)
             }
           }
 
@@ -282,6 +308,7 @@ jobs:
           path: |
             target/release/net-flow.exe
             target/layout/resources.pri
+            target/STORE_RELEASE_NOTES.txt
           if-no-files-found: error
 
   publish-to-store:
@@ -377,8 +404,62 @@ jobs:
             --clientId "$env:PARTNER_CENTER_CLIENT_ID" `
             --clientSecret "$env:PARTNER_CENTER_CLIENT_SECRET"
 
-          Write-Host "Publishing submission for Product ID $env:STORE_PRODUCT_ID..."
-          msstore publish -v "target/NetFlow_Store.msix" --appId "$env:STORE_PRODUCT_ID"
-          Write-Host "Package uploaded and draft submitted. Polling submission status until published..."
+          # Read Store release notes from build assets
+          $notesFile = "target/store_input/STORE_RELEASE_NOTES.txt"
+          if (-not (Test-Path $notesFile)) {
+            $notesFile = "target/STORE_RELEASE_NOTES.txt"
+          }
+          $storeNotes = if (Test-Path $notesFile) { (Get-Content $notesFile -Raw).Trim() } else { "" }
+          Write-Host "Loaded $( $storeNotes.Length ) characters of Store release notes."
+
+          Write-Host "Uploading package as draft submission (noCommit) for Product ID $env:STORE_PRODUCT_ID..."
+          msstore publish -v "target/NetFlow_Store.msix" --appId "$env:STORE_PRODUCT_ID" --noCommit
+
+          # Update submission metadata with What's New release notes
+          if ($storeNotes) {
+            Write-Host "Fetching current submission metadata from Partner Center..."
+            try {
+              $subJsonRaw = msstore submission get "$env:STORE_PRODUCT_ID"
+              $firstBrace = $subJsonRaw.IndexOf('{')
+              if ($firstBrace -ge 0) {
+                $subJsonRaw = $subJsonRaw.Substring($firstBrace)
+              }
+              $subObj = $subJsonRaw | ConvertFrom-Json
+
+              if ($subObj.listings) {
+                $listingKeys = if ($subObj.listings -is [System.Collections.IDictionary]) {
+                  $subObj.listings.Keys
+                } else {
+                  $subObj.listings.PSObject.Properties.Name
+                }
+
+                foreach ($lang in $listingKeys) {
+                  $listing = $subObj.listings.$lang
+                  if ($listing.baseListing) {
+                    $listing.baseListing.releaseNotes = $storeNotes
+                    Write-Host "Updated releaseNotes for listing locale: $lang"
+                  } elseif ($listing.releaseNotes -ne $null) {
+                    $listing.releaseNotes = $storeNotes
+                    Write-Host "Updated releaseNotes for listing: $lang"
+                  }
+                }
+
+                $updatedPayload = $subObj | ConvertTo-Json -Depth 100 -Compress
+                Write-Host "Updating submission metadata with What's New notes..."
+                msstore submission updateMetadata "$env:STORE_PRODUCT_ID" $updatedPayload
+                Write-Host "Submission metadata successfully updated!"
+              } else {
+                Write-Warning "No listings property found in submission JSON. Skipping release notes update."
+              }
+            } catch {
+              Write-Warning "Failed to update Store submission release notes metadata: $_"
+              Write-Warning "Proceeding to commit package submission..."
+            }
+          }
+
+          Write-Host "Committing submission for certification and publishing..."
+          msstore submission publish "$env:STORE_PRODUCT_ID"
+
+          Write-Host "Polling submission status until published..."
           msstore submission poll "$env:STORE_PRODUCT_ID"
           Write-Host "Submission certified and published to Microsoft Store catalog successfully!"
