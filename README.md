@@ -1,4 +1,4 @@
-<div align="center">
+<div align="center" markdown="1">
 
 <img src="widget/Assets/MasterLogo.png" alt="Net Flow Logo" width="128" height="128" style="border-radius: 28px;" />
 

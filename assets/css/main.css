@@ -1,0 +1,998 @@
+/* ==========================================================================
+   Net Flow - Windows 11 Fluent 2 Design System & Mica Glassmorphism Stylesheet
+   ========================================================================== */
+
+:root {
+  --font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Inter', Roboto, sans-serif;
+  --font-mono: 'Cascadia Code', 'Consolas', 'Fira Code', monospace;
+
+  /* Color Palette */
+  --bg-base: #090c12;
+  --bg-card: rgba(18, 24, 38, 0.65);
+  --bg-card-hover: rgba(24, 32, 50, 0.8);
+  --bg-card-solid: #121826;
+  --bg-elevated: rgba(30, 41, 59, 0.7);
+
+  /* Accents */
+  --accent-cyan: #38d9f0;
+  --accent-cyan-glow: rgba(56, 217, 240, 0.35);
+  --accent-cyan-subtle: rgba(56, 217, 240, 0.12);
+  --accent-amber: #ffb020;
+  --accent-amber-glow: rgba(255, 176, 32, 0.35);
+  --accent-amber-subtle: rgba(255, 176, 32, 0.12);
+  --accent-green: #22c55e;
+  --accent-blue: #0078d4;
+
+  /* Text Colors */
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+
+  /* Windows 11 Widget Specific Colors */
+  --w11-card-bg: #202020;
+  --w11-border: rgba(255, 255, 255, 0.08);
+  --w11-text: #ffffff;
+  --w11-muted: #888888;
+  --w11-subtle: #555555;
+
+  /* Borders & Shadows */
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-highlight: rgba(255, 255, 255, 0.18);
+  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 32px rgba(56, 217, 240, 0.15);
+
+  /* Dimensions & Transitions */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-full: 9999px;
+  --transition-fast: 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-normal: 250ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+  color-scheme: dark;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  line-height: 1.6;
+  overflow-x: hidden;
+  position: relative;
+  min-height: 100vh;
+}
+
+/* Ambient Background Light Mesh */
+.ambient-glow {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.ambient-glow::before {
+  content: '';
+  position: absolute;
+  top: -15%;
+  left: 20%;
+  width: 650px;
+  height: 650px;
+  background: radial-gradient(circle, rgba(56, 217, 240, 0.12) 0%, rgba(56, 217, 240, 0) 70%);
+  filter: blur(80px);
+}
+
+.ambient-glow::after {
+  content: '';
+  position: absolute;
+  top: 30%;
+  right: 15%;
+  width: 550px;
+  height: 550px;
+  background: radial-gradient(circle, rgba(255, 176, 32, 0.08) 0%, rgba(255, 176, 32, 0) 70%);
+  filter: blur(80px);
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 24px;
+  position: relative;
+  z-index: 1;
+}
+
+/* ==========================================================================
+   Navigation Bar
+   ========================================================================== */
+
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  background: rgba(9, 12, 18, 0.8);
+  border-bottom: 1px solid var(--border-subtle);
+  transition: var(--transition-normal);
+}
+
+.nav-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 72px;
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: var(--text-primary);
+  font-weight: 700;
+  font-size: 1.25rem;
+  letter-spacing: -0.02em;
+}
+
+.nav-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  list-style: none;
+}
+
+.nav-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: var(--transition-fast);
+}
+
+.nav-link:hover {
+  color: var(--text-primary);
+}
+
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.btn-nav-github {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  transition: var(--transition-fast);
+}
+
+.btn-nav-github:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--border-highlight);
+}
+
+/* ==========================================================================
+   Hero Section
+   ========================================================================== */
+
+.hero-section {
+  padding: 70px 0 60px;
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  align-items: flex-start;
+  gap: 48px;
+}
+
+.hero-content {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding-top: 12px;
+}
+
+.hero-badge-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(56, 217, 240, 0.1);
+  border: 1px solid rgba(56, 217, 240, 0.25);
+  color: var(--accent-cyan);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  width: fit-content;
+}
+
+.hero-badge-pill .pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 10px var(--accent-cyan);
+  animation: pulse-ring 2s infinite ease-out;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 1; }
+  50% { transform: scale(1.3); opacity: 0.5; }
+  100% { transform: scale(0.95); opacity: 1; }
+}
+
+.hero-title {
+  font-size: 3.2rem;
+  font-weight: 800;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 55%, #94a3b8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-title .highlight-cyan {
+  background: linear-gradient(135deg, #38d9f0 0%, #00b4d8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.hero-subtitle {
+  font-size: 1.12rem;
+  color: var(--text-secondary);
+  line-height: 1.65;
+  max-width: 560px;
+}
+
+.hero-cta-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 6px;
+}
+
+.store-badge-link {
+  display: inline-block;
+  transition: transform var(--transition-fast), filter var(--transition-fast);
+  border-radius: 8px;
+}
+
+.store-badge-link:hover {
+  transform: translateY(-2px);
+  filter: drop-shadow(0 6px 16px rgba(0, 120, 212, 0.4));
+}
+
+.store-badge-link img {
+  display: block;
+  height: 52px;
+  width: auto;
+}
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 22px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(10px);
+  transition: var(--transition-fast);
+  height: 52px;
+}
+
+.btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--border-highlight);
+  transform: translateY(-2px);
+}
+
+.hero-meta-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.meta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.meta-chip strong {
+  color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   Hero Preview: Pixel-Perfect Windows 11 Adaptive Card Widget
+   ========================================================================== */
+
+.hero-widget-showcase {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.widget-size-switcher {
+  display: flex;
+  background: rgba(18, 24, 38, 0.8);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: 4px;
+  backdrop-filter: blur(12px);
+}
+
+.size-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-family);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.size-btn:hover {
+  color: var(--text-secondary);
+}
+
+.size-btn.active {
+  background: rgba(56, 217, 240, 0.15);
+  color: var(--accent-cyan);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+/* Simulated Windows 11 Widgets Board Wrapper */
+.w11-widgets-board {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 440px;
+  transition: max-width var(--transition-normal);
+}
+
+.w11-board-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #a0a0a0;
+  letter-spacing: -0.01em;
+  padding-left: 2px;
+}
+
+/* Authentic Windows 11 Adaptive Card */
+.w11-card {
+  background: var(--w11-card-bg);
+  border: 1px solid var(--w11-border);
+  border-radius: 10px;
+  padding: 16px 18px 14px 18px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: 'Segoe UI', var(--font-family);
+  user-select: none;
+  transition: all var(--transition-normal);
+}
+
+/* 1. Header: App Icon + Net Flow + ··· */
+.w11-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.w11-top-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.w11-app-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+}
+
+.w11-app-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.w11-menu-dots {
+  color: var(--w11-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  letter-spacing: 2px;
+  cursor: pointer;
+}
+
+/* 2. Subheader: 📶 WiFi + 180 conns ⚙️ */
+.w11-interface-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: -2px;
+}
+
+.w11-interface-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.w11-interface-name svg {
+  fill: #ffffff;
+}
+
+.w11-conns-gear {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--w11-muted);
+}
+
+.w11-gear-btn {
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity var(--transition-fast);
+}
+
+.w11-gear-btn:hover {
+  opacity: 1;
+}
+
+/* 3. Speed Readouts with Peaks */
+.w11-speed-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding-top: 2px;
+}
+
+.w11-speed-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.w11-dir-label {
+  font-size: 0.74rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.w11-dir-label.download {
+  color: var(--accent-cyan);
+}
+
+.w11-dir-label.upload {
+  color: var(--accent-amber);
+}
+
+.w11-speed-val {
+  font-size: 1.32rem;
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: -0.02em;
+  font-family: var(--font-family);
+  line-height: 1.25;
+}
+
+.w11-peak-label {
+  font-size: 0.72rem;
+  color: var(--w11-muted);
+}
+
+/* 4. Slim Mirrored Sparkline Canvas (~42px) */
+.w11-sparkline-box {
+  position: relative;
+  width: 100%;
+  height: 44px;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+
+#widgetCanvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 5. Active Apps Drawer */
+.w11-apps-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 8px;
+}
+
+.w11-apps-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.76rem;
+  color: #f0f0f0;
+  font-weight: 600;
+}
+
+.w11-apps-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.w11-apps-title svg {
+  stroke: var(--accent-cyan);
+}
+
+.w11-apps-pagination {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--w11-muted);
+}
+
+.w11-apps-pagination span.arrow {
+  cursor: pointer;
+  user-select: none;
+}
+
+.w11-apps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.w11-app-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  padding: 3px 0;
+}
+
+.w11-app-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f1f5f9;
+}
+
+.w11-app-glyph {
+  font-size: 0.85rem;
+}
+
+.w11-app-rate {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: #cbd5e1;
+}
+
+.w11-app-rate .c-cyan { color: var(--accent-cyan); }
+.w11-app-rate .c-amber { color: var(--accent-amber); }
+.w11-app-rate .c-conns { color: var(--w11-muted); margin-left: 2px; }
+
+/* 6. Session Footer Row */
+.w11-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 8px;
+  font-size: 0.73rem;
+  color: var(--w11-muted);
+}
+
+.w11-session-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.w11-reset-btn {
+  cursor: pointer;
+  opacity: 0.8;
+  transition: opacity var(--transition-fast);
+}
+
+.w11-reset-btn:hover {
+  opacity: 1;
+}
+
+.w11-session-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.w11-session-right .c-cyan { color: var(--accent-cyan); }
+.w11-session-right .c-amber { color: var(--accent-amber); }
+
+/* ==========================================================================
+   Engineering Performance Strip
+   ========================================================================== */
+
+.stats-strip {
+  padding: 48px 0;
+  margin: 40px 0;
+  background: linear-gradient(180deg, rgba(18, 24, 38, 0.4) 0%, rgba(10, 13, 20, 0.6) 100%);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 32px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 2.2rem;
+  font-weight: 800;
+  background: linear-gradient(135deg, #ffffff 0%, var(--accent-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  letter-spacing: -0.03em;
+}
+
+.stat-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.stat-desc {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ==========================================================================
+   Feature Grid (6 Cards)
+   ========================================================================== */
+
+.features-section {
+  padding: 80px 0;
+}
+
+.section-header {
+  text-align: center;
+  max-width: 680px;
+  margin: 0 auto 56px;
+}
+
+.section-tag {
+  color: var(--accent-cyan);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 12px;
+}
+
+.section-title {
+  font-size: 2.4rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-bottom: 16px;
+}
+
+.section-subtitle {
+  font-size: 1.05rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+
+.feature-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 32px 28px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  transition: transform var(--transition-normal), border-color var(--transition-normal), box-shadow var(--transition-normal);
+}
+
+.feature-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--border-highlight);
+  box-shadow: var(--shadow-lg), 0 0 24px rgba(56, 217, 240, 0.08);
+}
+
+.feature-icon-box {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  background: rgba(56, 217, 240, 0.1);
+  border: 1px solid rgba(56, 217, 240, 0.2);
+}
+
+.feature-icon-box.amber {
+  background: rgba(255, 176, 32, 0.1);
+  border-color: rgba(255, 176, 32, 0.2);
+}
+
+.feature-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.feature-description {
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* ==========================================================================
+   Quick Installation & Download Section
+   ========================================================================== */
+
+.install-section {
+  padding: 80px 0;
+}
+
+.install-card-wrapper {
+  background: linear-gradient(135deg, rgba(22, 29, 46, 0.8) 0%, rgba(14, 18, 30, 0.9) 100%);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 56px 48px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(24px);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+  align-items: center;
+}
+
+.install-left {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.install-right {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.code-box {
+  background: #06090e;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.code-box code {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  color: #38d9f0;
+  word-break: break-all;
+}
+
+.copy-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-family: var(--font-family);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+
+.copy-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text-primary);
+}
+
+.copy-btn.copied {
+  background: var(--accent-green);
+  color: #000;
+  border-color: var(--accent-green);
+}
+
+/* ==========================================================================
+   Footer
+   ========================================================================== */
+
+.footer {
+  padding: 60px 0 40px;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 60px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.footer-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.footer-links {
+  display: flex;
+  gap: 24px;
+  list-style: none;
+}
+
+.footer-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: var(--transition-fast);
+}
+
+.footer-link:hover {
+  color: var(--text-primary);
+}
+
+/* ==========================================================================
+   Responsive Media Queries
+   ========================================================================== */
+
+@media (max-width: 992px) {
+  .hero-grid {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    text-align: center;
+  }
+  .hero-content {
+    align-items: center;
+  }
+  .hero-title {
+    font-size: 2.8rem;
+  }
+  .hero-cta-group {
+    justify-content: center;
+  }
+  .hero-meta-badges {
+    justify-content: center;
+  }
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .features-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .install-card-wrapper {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .hero-title {
+    font-size: 2.2rem;
+  }
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+  .features-grid {
+    grid-template-columns: 1fr;
+  }
+  .nav-links {
+    display: none;
+  }
+  .install-card-wrapper {
+    padding: 32px 24px;
+  }
+}
+
+/* ==========================================================================
+   Real Widget Screenshot Showcase Frame
+   ========================================================================== */
+
+.screenshot-frame {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  background: radial-gradient(circle at 50% 30%, rgba(30, 41, 59, 0.45) 0%, rgba(15, 20, 32, 0.8) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.6), 0 0 32px rgba(56, 217, 240, 0.12);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  min-height: 400px;
+  width: 100%;
+  max-width: 460px;
+  transition: max-width var(--transition-normal), transform var(--transition-normal);
+}
+
+.real-widget-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.7);
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1), transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.real-widget-img.fade-out {
+  opacity: 0;
+  transform: scale(0.97);
+}

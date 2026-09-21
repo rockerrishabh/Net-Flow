@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Primary Meta Tags -->
+  <title>Net Flow | Real-Time Network Bandwidth Telemetry &amp; Windows 11 Widget</title>
+  <meta name="title" content="Net Flow | Real-Time Network Bandwidth Telemetry &amp; Windows 11 Widget">
+  <meta name="description" content="⚡ Real-time network bandwidth monitor and telemetry widget for Windows 11. Built with pure Rust, dual-stream mirrored waveforms, and featherweight footprint.">
+  <link rel="canonical" href="https://netflow.rockerrishabh.me/">
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://netflow.rockerrishabh.me/">
+  <meta property="og:title" content="Net Flow | Real-Time Network Bandwidth Telemetry &amp; Windows 11 Widget">
+  <meta property="og:description" content="⚡ Real-time network bandwidth monitor and telemetry widget for Windows 11. Built with pure Rust, dual-stream mirrored waveforms, and featherweight footprint.">
+  <meta property="og:image" content="https://netflow.rockerrishabh.me/assets/images/logo.png">
+
+  <!-- Twitter -->
+  <meta property="twitter:card" content="summary">
+  <meta property="twitter:url" content="https://netflow.rockerrishabh.me/">
+  <meta property="twitter:title" content="Net Flow | Real-Time Network Bandwidth Telemetry &amp; Windows 11 Widget">
+  <meta property="twitter:description" content="⚡ Real-time network bandwidth monitor and telemetry widget for Windows 11. Built with pure Rust, dual-stream mirrored waveforms, and featherweight footprint.">
+  <meta property="twitter:image" content="https://netflow.rockerrishabh.me/assets/images/logo.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="/assets/images/logo.png">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="/assets/css/main.css">
+</head>
+<body>
+
+  <!-- Ambient Light Mesh -->
+  <div class="ambient-glow" aria-hidden="true"></div>
+
+  <!-- Navigation Bar -->
+  <header class="navbar">
+    <div class="container nav-container">
+      <a href="/" class="nav-brand" aria-label="Net Flow Homepage">
+        <img src="/assets/images/logo.png" alt="Net Flow Logo" class="nav-logo" width="36" height="36">
+        <span>Net Flow</span>
+      </a>
+
+      <nav aria-label="Main Navigation">
+        <ul class="nav-links">
+          <li><a href="#features" class="nav-link">Features</a></li>
+          <li><a href="#performance" class="nav-link">Performance</a></li>
+          <li><a href="#install" class="nav-link">Install</a></li>
+          <li><a href="/privacy/" class="nav-link">Privacy</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-actions">
+        <a href="https://github.com/rockerrishabh/Net-Flow" class="btn-nav-github" target="_blank" rel="noopener">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero Section -->
+    <section class="hero-section">
+      <div class="container hero-grid">
+        <div class="hero-content">
+          <div class="hero-badge-pill">
+            <span class="pulse-dot"></span>
+            <span>Native Windows 11 Widget • Built with Pure Rust</span>
+          </div>
+
+          <h1 class="hero-title">
+            Real-Time Network Telemetry, <span class="highlight-cyan">Right on Your Desktop.</span>
+          </h1>
+
+          <p class="hero-subtitle">
+            Buttery-smooth mirrored waveforms, per-app bandwidth attribution, and near-zero system resource consumption inside the Windows 11 Widgets Board (<kbd>Win</kbd> + <kbd>W</kbd>).
+          </p>
+
+          <div class="hero-cta-group">
+            <a href="https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&amp;cid=website_hero" class="store-badge-link" target="_blank" rel="noopener" aria-label="Get Net Flow on Microsoft Store">
+              <picture>
+                <source media="(prefers-color-scheme: dark)" srcset="https://get.microsoft.com/images/en-us%20dark.svg">
+                <source media="(prefers-color-scheme: light)" srcset="https://get.microsoft.com/images/en-us%20light.svg">
+                <img src="https://get.microsoft.com/images/en-us%20dark.svg" alt="Get it from Microsoft" width="220">
+              </picture>
+            </a>
+
+            <a href="#install" class="btn-secondary">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Quick Install</span>
+            </a>
+          </div>
+
+          <div class="hero-meta-badges">
+            <span class="meta-chip"><strong>OS:</strong> Windows 11</span>
+            <span class="meta-chip">•</span>
+            <span class="meta-chip"><strong>Engine:</strong> Rust 2024</span>
+            <span class="meta-chip">•</span>
+            <span class="meta-chip"><strong>Version:</strong> v0.1.1</span>
+            <span class="meta-chip">•</span>
+            <span class="meta-chip"><strong>Store ID:</strong> 9PCR54NGJ94J</span>
+          </div>
+        </div>
+
+        <!-- Real Widget Screenshots Showcase -->
+        <div class="hero-widget-showcase">
+          <div class="widget-size-switcher" role="tablist" aria-label="Widget Size Selector">
+            <button class="size-btn" data-size="small" role="tab">Small (1x1)</button>
+            <button class="size-btn active" data-size="medium" role="tab">Medium (2x1)</button>
+            <button class="size-btn" data-size="large" role="tab">Large (2x2)</button>
+            <button class="size-btn" data-size="board" role="tab">Widgets Board</button>
+          </div>
+
+          <!-- Real Screenshot Container -->
+          <div class="screenshot-frame" id="screenshotFrame">
+            <img id="widgetScreenshot" src="/assets/images/widget-medium.png" alt="Net Flow Real Windows 11 Widget Screenshot" class="real-widget-img">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Engineering Performance Metrics Strip -->
+    <section class="stats-strip" id="performance">
+      <div class="container stats-grid">
+        <div class="stat-item">
+          <span class="stat-value">&lt; 3 MB</span>
+          <span class="stat-label">Featherweight Footprint</span>
+          <span class="stat-desc">2.8 MB packaged Microsoft Store MSIX and 1.24 MB stripped Rust core.</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-value">&lt; 0.1%</span>
+          <span class="stat-label">Active CPU Usage</span>
+          <span class="stat-desc">Direct Win32 IP Helper polling without WMI or polling locks.</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-value">&lt; 15 MB</span>
+          <span class="stat-label">RAM Footprint</span>
+          <span class="stat-desc">Bounded in-memory ring buffers and zero GC interruptions.</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-value">0 Zombie</span>
+          <span class="stat-label">Background Processes</span>
+          <span class="stat-desc">Automatic COM unregistration after 30s unpin grace period.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features-section" id="features">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-tag">Engineered for Windows 11</div>
+          <h2 class="section-title">Telemetry Built for Enthusiasts and Developers</h2>
+          <p class="section-subtitle">
+            Most bandwidth utilities run heavy web runtimes or clunky system tray menus. Net Flow lives natively where you want it, with zero distraction.
+          </p>
+        </div>
+
+        <div class="features-grid">
+          <!-- Card 1 -->
+          <div class="feature-card">
+            <div class="feature-icon-box">🪟</div>
+            <h3 class="feature-title">Native Windows 11 Widgets</h3>
+            <p class="feature-description">
+              Directly integrates into the Windows 11 Widgets Board (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 across Small, Medium, and Large dimensions.
+            </p>
+          </div>
+
+          <!-- Card 2 -->
+          <div class="feature-card">
+            <div class="feature-icon-box">📈</div>
+            <h3 class="feature-title">Mirrored Dual-Stream Waveforms</h3>
+            <p class="feature-description">
+              In-memory supersampled rasterizer draws download traffic above the baseline in cyan (<code style="color:#38d9f0;">#38D9F0</code>) and upload below in amber (<code style="color:#ffb020;">#FFB020</code>) with glowing pulse nodes.
+            </p>
+          </div>
+
+          <!-- Card 3 -->
+          <div class="feature-card">
+            <div class="feature-icon-box amber">⚡</div>
+            <h3 class="feature-title">Native IP Helper Backend</h3>
+            <p class="feature-description">
+              Bypasses slow WMI and PowerShell wrappers by calling native Win32 <code style="color:#38d9f0;">GetIfTable2</code> APIs in asynchronous pure Rust.
+            </p>
+          </div>
+
+          <!-- Card 4 -->
+          <div class="feature-card">
+            <div class="feature-icon-box">🛜</div>
+            <h3 class="feature-title">Smart Active Adapter Detection</h3>
+            <p class="feature-description">
+              Auto-detects the primary default network interface with contextual badges: Wi-Fi with friendly SSID, Ethernet, Cellular, or VPN tunnels.
+            </p>
+          </div>
+
+          <!-- Card 5 -->
+          <div class="feature-card">
+            <div class="feature-icon-box amber">📱</div>
+            <h3 class="feature-title">Per-App Bandwidth Attribution</h3>
+            <p class="feature-description">
+              Identifies which applications are actively consuming throughput with compact rate formatting and generous process name budgets on Large widget cards.
+            </p>
+          </div>
+
+          <!-- Card 6 -->
+          <div class="feature-card">
+            <div class="feature-icon-box">🔒</div>
+            <h3 class="feature-title">100% Offline &amp; Private</h3>
+            <p class="feature-description">
+              Contains zero telemetry, zero analytics, zero GPS coordinates, and makes zero network requests. Your data never leaves your computer.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quick Installation Section -->
+    <section class="install-section" id="install">
+      <div class="container">
+        <div class="install-card-wrapper">
+          <div class="install-left">
+            <div class="section-tag">Get Net Flow</div>
+            <h2 class="section-title" style="font-size: 2rem; margin-bottom: 0;">Installation Options</h2>
+            <p class="feature-description">
+              Install directly from the Microsoft Store for automatic background updates, or build and sideload locally with one command.
+            </p>
+
+            <div style="margin-top: 8px;">
+              <a href="https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&amp;cid=website_install" class="store-badge-link" target="_blank" rel="noopener" aria-label="Get Net Flow on Microsoft Store">
+                <picture>
+                  <source media="(prefers-color-scheme: dark)" srcset="https://get.microsoft.com/images/en-us%20dark.svg">
+                  <source media="(prefers-color-scheme: light)" srcset="https://get.microsoft.com/images/en-us%20light.svg">
+                  <img src="https://get.microsoft.com/images/en-us%20dark.svg" alt="Get it from Microsoft" width="200">
+                </picture>
+              </a>
+            </div>
+
+            <p style="font-size: 0.82rem; color: var(--text-muted);">
+              Direct Windows Store link: <a href="ms-windows-store://pdp/?productid=9PCR54NGJ94J" style="color: var(--accent-cyan);">ms-windows-store://pdp/?productid=9PCR54NGJ94J</a>
+            </p>
+          </div>
+
+          <div class="install-right">
+            <span style="font-size: 0.9rem; font-weight: 600; color: var(--text-secondary);">One-Command Sideload Script</span>
+            <div class="code-box">
+              <code id="installCode">git clone https://github.com/rockerrishabh/net-flow.git &amp;&amp; cd net-flow &amp;&amp; powershell -ExecutionPolicy Bypass -File scripts/install.ps1</code>
+              <button class="copy-btn" id="copyBtn" aria-label="Copy installation command">Copy</button>
+            </div>
+            <p style="font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;">
+              Automatically builds, provisions a local test certificate, creates an MSIX package, and registers the widget directly into the Windows 11 Widgets Board.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-container">
+      <div>
+        <p>&copy; 2026 Rishabh Kumar. Released under MIT or Apache-2.0 License.</p>
+        <p style="font-size: 0.8rem; margin-top: 4px;">Designed for Windows 11.</p>
+      </div>
+
+      <ul class="footer-links">
+        <li><a href="/privacy/" class="footer-link">Privacy Policy</a></li>
+        <li><a href="https://github.com/rockerrishabh/Net-Flow" class="footer-link" target="_blank" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/rockerrishabh/Net-Flow/releases" class="footer-link" target="_blank" rel="noopener">Releases</a></li>
+        <li><a href="https://apps.microsoft.com/detail/9PCR54NGJ94J" class="footer-link" target="_blank" rel="noopener">Microsoft Store</a></li>
+      </ul>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="/assets/js/widget-preview.js"></script>
+</body>
+</html>
