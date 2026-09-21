@@ -6,10 +6,10 @@
   'use strict';
 
   const screenshots = {
-    small: '/assets/images/widget-small.png',
-    medium: '/assets/images/widget-medium.png',
-    large: '/assets/images/widget-large.png',
-    board: '/assets/images/widget-board.png'
+    small: '/assets/images/widget-small.png?v=2',
+    medium: '/assets/images/widget-medium.png?v=2',
+    large: '/assets/images/widget-large.png?v=2',
+    board: '/assets/images/widget-board.png?v=2'
   };
 
   // Preload all high-res screenshots for zero-delay switching
