@@ -6,7 +6,7 @@
 
 **Real-Time Network Bandwidth Telemetry & Native Windows 11 Widget**
 
-*Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint.*
+_Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/Version-0.2.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
@@ -46,22 +46,10 @@
 
 ---
 
-## 🚀 What's New in v0.2.0
-
-- **🚀 Auto-Start on Windows Login**: Added native packaged Win32 `<uap5:StartupTask>` (`NetFlowStartup`) integration. Net Flow now launches cleanly on Windows user login, ensuring pinned widgets are always populated without manual intervention or resident background services.
-- **🌓 Windows System Theme-Aware Sparklines**: Implemented automatic Windows Light/Dark mode detection querying `SystemUsesLightTheme` and `AppsUseLightTheme` registry keys with resilient dark fallback. The dual-stream waveform dynamically switches between Dark mode (cyan `#38D9F0` / amber `#FFB020`) and Light mode (crisp ocean `#008CB4` / warm solar `#D75F00`) high-contrast palettes, automatically matching the Windows 11 Widgets Board surface.
-- **📊 Customizable Graph Styles**: Added selectable visual rendering styles: `Area` (classic Catmull-Rom filled spline), `Line` (clean minimalist strokes), and `Bar` (discrete quantized bandwidth histogram columns).
-- **❄️ Theme & Style-Aware Idle Cache**: Upgraded the precomputed zero-CPU idle chart cache to index by resolved theme and graph style, guaranteeing zero rendering overhead during quiet network periods while instantaneously reflecting OS theme changes.
-- **🧈 Fluid Widget Rendering & Flicker Elimination**: Architected strict separation between static visual layout templates (`SetTemplate`) and dynamic telemetry payloads (`SetData`), eliminating 500 ms full-card visual tree tearing in the Windows Widgets Board. Added collision-free payload diffing with fast 64-bit hashing and exact string equality to bypass redundant WinRT IPC updates when telemetry is static, reducing idle IPC calls by up to 96%.
-- **⚙️ Enhanced In-Card Settings**: Added Theme and Graph Style ChoiceSets to the widget flip-card settings across Small, Medium, and Large form factors with full backward-compatible configuration migration.
-
-📖 For the full historical log, check out [CHANGELOG.md](CHANGELOG.md).
-
----
-
 ## 📥 Installation
 
 ### 1. Microsoft Store (Recommended)
+
 Net Flow is available directly through the Microsoft Store with seamless background updates:
 
 <a href="https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_install">
@@ -72,9 +60,10 @@ Net Flow is available directly through the Microsoft Store with seamless backgro
   </picture>
 </a>
 
-👉 *Or launch directly in the Windows Store app via protocol:* [`ms-windows-store://pdp/?productid=9PCR54NGJ94J`](ms-windows-store://pdp/?productid=9PCR54NGJ94J)
+👉 _Or launch directly in the Windows Store app via protocol:_ [`ms-windows-store://pdp/?productid=9PCR54NGJ94J`](ms-windows-store://pdp/?productid=9PCR54NGJ94J)
 
 ### 2. Local Developer Sideloading
+
 If building from source or testing modifications locally:
 
 ```powershell
@@ -87,15 +76,17 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
 Once installed:
+
 1. Press <kbd>Win</kbd> + <kbd>W</kbd> to open the **Windows Widgets Board**.
 2. Click **+** (**Add Widgets**) in the top-right corner.
 3. Select **Net Flow** and pin your preferred size (Small, Medium, or Large).
 
 ### 3. Sideload Release Bundle
+
 1. Download `net-flow-windows-x64.zip` from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases).
 2. Extract the archive.
 3. Run `.\install.ps1` in PowerShell (or right-click `install.ps1` → **Run with PowerShell**).
-The installer automatically provisions a local signing certificate, packages `NetFlow.msix`, and registers the widget package into Windows 11. To uninstall, run `.\install.ps1 -Uninstall`.
+   The installer automatically provisions a local signing certificate, packages `NetFlow.msix`, and registers the widget package into Windows 11. To uninstall, run `.\install.ps1 -Uninstall`.
 
 ---
 
@@ -103,31 +94,33 @@ The installer automatically provisions a local signing certificate, packages `Ne
 
 Net Flow is engineered from the ground up for zero distraction, extreme reliability, and minimal system impact:
 
-| Metric / Component | Implementation | Impact |
-| :--- | :--- | :--- |
-| **Release Binary Size** | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`) | **1.24 MB** standalone executable |
-| **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing | **< 0.1% CPU** during active monitoring |
-| **Idle CPU Overhead** | Precomputed `OnceLock` idle chart cache bypassing rasterizer | **0.024% of 1 core** (55x speedup; 120 µs idle bypass) |
-| **Memory Footprint** | Bounded ring buffers (240 samples) & in-memory rasterization | **< 15 MB** working set |
-| **Telemetry Cadence** | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication | High-resolution waveforms with zero system scheduler jitter |
-| **Process Attribution** | Decoupled 1.0s process inspection with 256-entry bounded icon cache | Per-app network tracking without UI thread blocking |
-| **Chart Peak Tracking** | Incremental O(1) running maximum tracking | Eliminates O(N) buffer scans on every render tick |
-| **COM Lifetime** | Automatic idle detection with 30s grace period and `CoRevokeClassObject` | **Zero zombie background processes** when unpinned |
-| **Lock Poison-Safety** | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"` |
-| **Log Management** | Thread-safe 1MB rotating logger in `%TEMP%` | Prevents disk bloat; quiet by default |
+| Metric / Component         | Implementation                                                              | Impact                                                      |
+| :------------------------- | :-------------------------------------------------------------------------- | :---------------------------------------------------------- |
+| **Release Binary Size**    | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`)  | **1.24 MB** standalone executable                           |
+| **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing                    | **< 0.1% CPU** during active monitoring                     |
+| **Idle CPU Overhead**      | Precomputed `OnceLock` idle chart cache bypassing rasterizer                | **0.024% of 1 core** (55x speedup; 120 µs idle bypass)      |
+| **Memory Footprint**       | Bounded ring buffers (240 samples) & in-memory rasterization                | **< 15 MB** working set                                     |
+| **Telemetry Cadence**      | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication             | High-resolution waveforms with zero system scheduler jitter |
+| **Process Attribution**    | Decoupled 1.0s process inspection with 256-entry bounded icon cache         | Per-app network tracking without UI thread blocking         |
+| **Chart Peak Tracking**    | Incremental O(1) running maximum tracking                                   | Eliminates O(N) buffer scans on every render tick           |
+| **COM Lifetime**           | Automatic idle detection with 30s grace period and `CoRevokeClassObject`    | **Zero zombie background processes** when unpinned          |
+| **Lock Poison-Safety**     | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"`                      |
+| **Log Management**         | Thread-safe 1MB rotating logger in `%TEMP%`                                 | Prevents disk bloat; quiet by default                       |
 
 ---
 
 ## 🔒 Privacy & Permissions (Why "Precise Location"?)
 
-When running Net Flow, Windows 11 may show Net Flow under **Settings → Privacy & security → Location** or briefly show the taskbar location icon. 
+When running Net Flow, Windows 11 may show Net Flow under **Settings → Privacy & security → Location** or briefly show the taskbar location icon.
 
 ### Why Does Windows Flag This?
+
 1. **Friendly Wi-Fi Name**: In the card header, Net Flow displays the name of your active Wi-Fi network (e.g. `Home-5G` instead of generic `Wi-Fi`).
 2. **The Win32 Wi-Fi API**: To read that SSID, Net Flow queries the Windows Native Wi-Fi API (`wlanapi.dll` via `WlanQueryInterface`).
 3. **Microsoft's Privacy Grouping**: Because nearby Wi-Fi network names (SSIDs and BSSIDs) can theoretically be cross-referenced against global Wi-Fi positioning databases to estimate a device's physical location, Windows 10/11 classifies all native Wi-Fi scanning and query APIs under the **"Precise Location"** permission toggle.
 
 ### Our Privacy Guarantee
+
 - **Zero Location Tracking**: Net Flow contains **zero GPS code, zero geolocation libraries, and makes zero network requests**.
 - **100% Offline**: Net Flow does not transmit any data over the internet. There are **zero diagnostics, zero analytics, and zero telemetry servers**.
 - **Completely Optional**: If you disable location in Windows Settings, Net Flow continues running with 100% functionality—it simply displays `Wi-Fi` in the header instead of your network name.
@@ -187,16 +180,19 @@ net-flow/
 ## 🧪 Testing & Verification
 
 Run all 75 workspace unit tests:
+
 ```powershell
 cargo test --workspace
 ```
 
 Run Clippy with strict zero-warnings enforcement:
+
 ```powershell
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Build the optimized release binary (1.24 MB):
+
 ```powershell
 cargo build --release --workspace
 ```
@@ -242,4 +238,5 @@ This project is dual-licensed under either of:
 at your option.
 
 ### Contributions
+
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Net Flow by you shall be dual-licensed as above, without any additional terms or conditions.
