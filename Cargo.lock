@@ -130,11 +130,12 @@ dependencies = [
 
 [[package]]
 name = "net-flow"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "net-flow-core",
  "serde",
  "serde_json",
+ "windows",
  "windows-bindgen",
  "windows-collections 0.100.0",
  "windows-core 0.100.0",
@@ -145,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "net-flow-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "image",

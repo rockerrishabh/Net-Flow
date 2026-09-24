@@ -22,6 +22,7 @@ pub fn clamp_chart_window(secs: u32) -> u32 {
     }
 }
 
+pub mod alerts;
 pub mod backend;
 pub mod card;
 pub mod chart;
@@ -29,6 +30,10 @@ pub mod format;
 pub mod icons;
 pub mod process;
 
+pub use alerts::{
+    AlertDirection, AlertEvent, BandwidthAlertConfig, BandwidthAlertEngine, get_alert_config_path,
+    load_alert_config, save_alert_config,
+};
 pub use backend::{
     AggregateMode, HISTORY_CAPACITY, HistorySample, InterfaceCategory, InterfaceInfo,
     InterfaceLuid, InterfaceSample, NetworkBackend, NetworkSnapshot, classify_interface,

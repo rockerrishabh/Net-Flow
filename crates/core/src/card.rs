@@ -1,4 +1,5 @@
-use crate::backend::{InterfaceMedium, NetworkSnapshot};
+use crate::alerts::BandwidthAlertConfig;
+use crate::backend::{InterfaceMedium, InterfaceSample, NetworkSnapshot};
 use crate::chart::{
     GraphStyle, ThemeMode, render_idle_unified_chart_data_uri, render_unified_chart_data_uri,
 };
@@ -49,6 +50,12 @@ pub struct WidgetConfig {
     /// Presentation style of the sparkline chart: Area, Line, or Bar.
     #[serde(default)]
     pub graph_style: GraphStyle,
+    /// Optional LUID of the adapter shown in headline metrics. None means aggregate traffic.
+    #[serde(default)]
+    pub selected_adapter_luid: Option<u64>,
+    /// Alert preferences mirrored to `%LOCALAPPDATA%\\NetFlow\\alerts.json` by the widget host.
+    #[serde(default)]
+    pub alerts: BandwidthAlertConfig,
 }
 
 impl Default for WidgetConfig {
@@ -60,8 +67,22 @@ impl Default for WidgetConfig {
             apps_page: 0,
             theme: ThemeMode::Auto,
             graph_style: GraphStyle::Area,
+            selected_adapter_luid: None,
+            alerts: BandwidthAlertConfig::default(),
         }
     }
+}
+
+fn selected_adapter<'a>(
+    snapshot: &'a NetworkSnapshot,
+    config: &WidgetConfig,
+) -> Option<&'a InterfaceSample> {
+    config.selected_adapter_luid.and_then(|luid| {
+        snapshot
+            .per_interface
+            .iter()
+            .find(|iface| iface.luid == luid)
+    })
 }
 
 /// Visual layout budget and typography sizing for each widget form factor (Small, Medium, Large).
@@ -606,8 +627,18 @@ fn metric_column(
 }
 
 fn metrics_row(snapshot: &NetworkSnapshot, config: &WidgetConfig, value_size: &str) -> Value {
+    let selected = selected_adapter(snapshot, config);
+    let display_rx_bps = selected.map_or(snapshot.rx_bps, |iface| iface.rx_bps);
+    let display_tx_bps = selected.map_or(snapshot.tx_bps, |iface| iface.tx_bps);
+
     let window_samples = crate::history_samples_for_secs(config.chart_window);
-    let (window_peak_rx, window_peak_tx) = snapshot.chart_window_peak(window_samples);
+    // The chart history is aggregate traffic. For an adapter view, show the current
+    // adapter rate as its peak rather than incorrectly labeling the aggregate peak.
+    let (window_peak_rx, window_peak_tx) = if selected.is_some() {
+        (display_rx_bps, display_tx_bps)
+    } else {
+        snapshot.chart_window_peak(window_samples)
+    };
 
     json!({
         "type": "ColumnSet",
@@ -616,7 +647,7 @@ fn metrics_row(snapshot: &NetworkSnapshot, config: &WidgetConfig, value_size: &s
             metric_column(
                 icons::ARROW_DOWN,
                 "Download",
-                &fmt_bw(snapshot.rx_bps, config.speed_unit),
+                &fmt_bw(display_rx_bps, config.speed_unit),
                 &fmt_bw(window_peak_rx, config.speed_unit),
                 value_size,
                 false
@@ -624,7 +655,7 @@ fn metrics_row(snapshot: &NetworkSnapshot, config: &WidgetConfig, value_size: &s
             metric_column(
                 icons::ARROW_UP,
                 "Upload",
-                &fmt_bw(snapshot.tx_bps, config.speed_unit),
+                &fmt_bw(display_tx_bps, config.speed_unit),
                 &fmt_bw(window_peak_tx, config.speed_unit),
                 value_size,
                 true
@@ -1147,6 +1178,49 @@ pub fn build_adaptive_card_template(size: &str) -> String {
         "spacing": "Medium"
     }));
 
+    // Large cards have enough space for a compact live breakdown of every
+    // connected adapter. Slots are fixed to preserve flicker-free data updates.
+    if size == "Large" {
+        body.push(json!({
+            "type": "TextBlock",
+            "text": "Active adapters",
+            "size": "Small",
+            "weight": "Bolder",
+            "spacing": "Medium",
+            "wrap": false
+        }));
+        for slot in 0..4 {
+            body.push(json!({
+                "type": "ColumnSet",
+                "$when": format!("${{adapter{}_visible == true}}", slot),
+                "spacing": "Small",
+                "columns": [
+                    {
+                        "type": "Column",
+                        "width": "stretch",
+                        "items": [{
+                            "type": "TextBlock",
+                            "text": format!("${{adapter{}_name}}", slot),
+                            "size": "Small",
+                            "wrap": false
+                        }]
+                    },
+                    {
+                        "type": "Column",
+                        "width": "auto",
+                        "items": [{
+                            "type": "TextBlock",
+                            "text": format!("${{adapter{}_rate}}", slot),
+                            "size": "Small",
+                            "isSubtle": true,
+                            "wrap": false
+                        }]
+                    }
+                ]
+            }));
+        }
+    }
+
     // 4. Active Apps Section (Medium and Large only)
     if layout.apps_collapsed > 0 {
         let max_slots = layout.apps_page_size;
@@ -1314,8 +1388,20 @@ pub fn build_adaptive_card_data(
         snapshot.active_apps.len()
     };
 
+    let selected = selected_adapter(snapshot, config);
+    let display_rx_bps = selected.map_or(snapshot.rx_bps, |iface| iface.rx_bps);
+    let display_tx_bps = selected.map_or(snapshot.tx_bps, |iface| iface.tx_bps);
+    let display_medium = selected.map_or(snapshot.primary_medium, |iface| iface.medium);
+    let display_name = selected.map_or(snapshot.primary_name.as_str(), |iface| iface.name.as_str());
+
     let window_samples = crate::history_samples_for_secs(config.chart_window);
-    let (window_peak_rx, window_peak_tx) = snapshot.chart_window_peak(window_samples);
+    // The chart history is aggregate traffic. For an adapter view, show the current
+    // adapter rate as its peak rather than incorrectly labeling the aggregate peak.
+    let (window_peak_rx, window_peak_tx) = if selected.is_some() {
+        (display_rx_bps, display_tx_bps)
+    } else {
+        snapshot.chart_window_peak(window_samples)
+    };
 
     let resolved_theme = config.theme.resolve();
     let graph_style = config.graph_style;
@@ -1465,11 +1551,11 @@ pub fn build_adaptive_card_data(
 
     data_map.insert(
         "primaryMediumGlyph".to_string(),
-        json!(medium_glyph(snapshot.primary_medium)),
+        json!(medium_glyph(display_medium)),
     );
     data_map.insert(
         "primaryName".to_string(),
-        json!(truncate_name(&snapshot.primary_name, 22)),
+        json!(truncate_name(display_name, 22)),
     );
     data_map.insert(
         "activeConnsText".to_string(),
@@ -1477,7 +1563,7 @@ pub fn build_adaptive_card_data(
     );
     data_map.insert(
         "downloadRate".to_string(),
-        json!(fmt_bw(snapshot.rx_bps, config.speed_unit)),
+        json!(fmt_bw(display_rx_bps, config.speed_unit)),
     );
     data_map.insert(
         "downloadPeak".to_string(),
@@ -1488,7 +1574,7 @@ pub fn build_adaptive_card_data(
     );
     data_map.insert(
         "uploadRate".to_string(),
-        json!(fmt_bw(snapshot.tx_bps, config.speed_unit)),
+        json!(fmt_bw(display_tx_bps, config.speed_unit)),
     );
     data_map.insert(
         "uploadPeak".to_string(),
@@ -1518,6 +1604,24 @@ pub fn build_adaptive_card_data(
         json!(format_bytes(snapshot.session_tx)),
     );
 
+    // Fixed slots keep the Large-card adapter section data-only during telemetry updates.
+    for (slot, iface) in snapshot.per_interface.iter().take(4).enumerate() {
+        data_map.insert(format!("adapter{}_visible", slot), json!(true));
+        data_map.insert(
+            format!("adapter{}_name", slot),
+            json!(truncate_name(&iface.name, 24)),
+        );
+        data_map.insert(
+            format!("adapter{}_rate", slot),
+            json!(fmt_dual_compact_bw(iface.rx_bps, iface.tx_bps)),
+        );
+    }
+    for slot in snapshot.per_interface.len().min(4)..4 {
+        data_map.insert(format!("adapter{}_visible", slot), json!(false));
+        data_map.insert(format!("adapter{}_name", slot), json!(""));
+        data_map.insert(format!("adapter{}_rate", slot), json!(""));
+    }
+
     Value::Object(data_map)
 }
 
@@ -1533,7 +1637,7 @@ pub fn build_adaptive_card_data_string(
 
 /// Builds the default settings card template for the customization flyout.
 pub fn build_settings_card(current_config: &WidgetConfig) -> String {
-    build_settings_card_for_size(current_config, "Medium", 0)
+    build_settings_card_for_size(current_config, "Medium", 0, &NetworkSnapshot::default())
 }
 
 /// Builds a size-optimized settings card template.
@@ -1544,6 +1648,7 @@ pub fn build_settings_card_for_size(
     current_config: &WidgetConfig,
     size: &str,
     _session_duration_secs: u64,
+    snapshot: &NetworkSnapshot,
 ) -> String {
     let (cancel_w, save_w, save_spacing) = if size == "Small" {
         (48, 42, "Small")
@@ -1610,6 +1715,18 @@ pub fn build_settings_card_for_size(
 
     let mut body = vec![header];
 
+    let mut adapter_choices = vec![json!({ "title": "All active adapters", "value": "auto" })];
+    for iface in snapshot.per_interface.iter().take(16) {
+        adapter_choices.push(json!({
+            "title": format!("{} ({})", truncate_name(&iface.name, 28), iface.medium.label()),
+            "value": iface.luid.to_string()
+        }));
+    }
+    let adapter_value = current_config
+        .selected_adapter_luid
+        .map(|luid| luid.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+
     if size == "Small" {
         // Small widget (~160px): 2 balanced rows of 2-column compact grids
         // Row 1: Units and History
@@ -1673,6 +1790,15 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
+        body.push(json!({
+            "type": "Input.ChoiceSet",
+            "id": "adapter_luid",
+            "style": "compact",
+            "spacing": "Small",
+            "value": adapter_value,
+            "choices": adapter_choices
+        }));
+
         // Row 2: Graph style
         body.push(json!({
             "type": "ColumnSet",
@@ -1704,6 +1830,39 @@ pub fn build_settings_card_for_size(
                     ]
                 }
             ]
+        }));
+
+        body.push(json!({
+            "type": "TextBlock",
+            "text": "Bandwidth alerts",
+            "weight": "Bolder",
+            "size": "Small",
+            "spacing": "Medium",
+            "wrap": false
+        }));
+        body.push(json!({
+            "type": "Input.Toggle",
+            "id": "alerts_enabled",
+            "title": "Notify on sustained high download",
+            "value": if current_config.alerts.enabled { "true" } else { "false" },
+            "valueOn": "true",
+            "valueOff": "false"
+        }));
+        body.push(json!({
+            "type": "Input.Number",
+            "id": "alert_threshold_mbps",
+            "min": 1,
+            "max": 100000,
+            "value": ((current_config.alerts.threshold_bps / 1024 / 1024).max(1)).to_string(),
+            "placeholder": "Threshold (MiB/s)"
+        }));
+        body.push(json!({
+            "type": "Input.Number",
+            "id": "alert_sustain_secs",
+            "min": 1,
+            "max": 3600,
+            "value": current_config.alerts.sustain_secs.to_string(),
+            "placeholder": "Sustain seconds"
         }));
     } else {
         // Medium & Large (~340px): balanced rows for clear organization
@@ -1801,7 +1960,49 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Row 3: Active apps section
+        // Row 3: Adapter selection and alert threshold.
+        body.push(json!({
+            "type": "Input.ChoiceSet",
+            "id": "adapter_luid",
+            "style": "compact",
+            "spacing": "Medium",
+            "value": adapter_value,
+            "choices": adapter_choices
+        }));
+        body.push(json!({
+            "type": "TextBlock",
+            "text": "Bandwidth alerts",
+            "weight": "Bolder",
+            "size": "Small",
+            "spacing": "Medium",
+            "wrap": false
+        }));
+        body.push(json!({
+            "type": "Input.Toggle",
+            "id": "alerts_enabled",
+            "title": "Notify on sustained high download",
+            "value": if current_config.alerts.enabled { "true" } else { "false" },
+            "valueOn": "true",
+            "valueOff": "false"
+        }));
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                { "type": "Column", "width": "stretch", "items": [{
+                    "type": "Input.Number", "id": "alert_threshold_mbps", "min": 1, "max": 100000,
+                    "value": ((current_config.alerts.threshold_bps / 1024 / 1024).max(1)).to_string(),
+                    "placeholder": "MiB/s"
+                }] },
+                { "type": "Column", "width": "stretch", "items": [{
+                    "type": "Input.Number", "id": "alert_sustain_secs", "min": 1, "max": 3600,
+                    "value": current_config.alerts.sustain_secs.to_string(),
+                    "placeholder": "Seconds"
+                }] }
+            ]
+        }));
+
+        // Row 4: Active apps section
         body.push(json!({
             "type": "TextBlock",
             "text": "Active apps",
@@ -2132,7 +2333,12 @@ mod tests {
 
     #[test]
     fn settings_card_adapts_to_small_and_large_sizes() {
-        let small_json = build_settings_card_for_size(&WidgetConfig::default(), "Small", 185);
+        let small_json = build_settings_card_for_size(
+            &WidgetConfig::default(),
+            "Small",
+            185,
+            &NetworkSnapshot::default(),
+        );
         assert!(small_json.contains("speed_unit"));
         assert!(small_json.contains("chart_window"));
         assert!(
@@ -2146,7 +2352,12 @@ mod tests {
         assert!(small_json.contains("save_settings"));
         assert!(small_json.contains("cancel_settings"));
 
-        let med_json = build_settings_card_for_size(&WidgetConfig::default(), "Medium", 0);
+        let med_json = build_settings_card_for_size(
+            &WidgetConfig::default(),
+            "Medium",
+            0,
+            &NetworkSnapshot::default(),
+        );
         assert!(med_json.contains("speed_unit"));
         assert!(med_json.contains("chart_window"));
         assert!(med_json.contains("apps_expanded"));
@@ -2165,6 +2376,13 @@ mod tests {
             apps_page: 0,
             theme: ThemeMode::Auto,
             graph_style: GraphStyle::Area,
+            selected_adapter_luid: Some(123_456),
+            alerts: BandwidthAlertConfig {
+                enabled: true,
+                threshold_bps: 50 * 1024 * 1024,
+                sustain_secs: 15,
+                ..BandwidthAlertConfig::default()
+            },
         };
         let parsed: WidgetConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -2421,7 +2639,12 @@ mod tests {
         assert_eq!(icon_when_col["roundedCorners"], true);
 
         // Verify Settings card header has explicit column widths and rounded corners
-        let settings_medium = build_settings_card_for_size(&WidgetConfig::default(), "Medium", 0);
+        let settings_medium = build_settings_card_for_size(
+            &WidgetConfig::default(),
+            "Medium",
+            0,
+            &NetworkSnapshot::default(),
+        );
         let parsed_med: Value = serde_json::from_str(&settings_medium).unwrap();
         let header_cols = &parsed_med["body"][0]["columns"];
         let cancel_col = &header_cols[1];
@@ -2432,7 +2655,12 @@ mod tests {
         assert_eq!(save_col["roundedCorners"], true);
         assert_eq!(save_col["spacing"], "Medium");
 
-        let settings_small = build_settings_card_for_size(&WidgetConfig::default(), "Small", 0);
+        let settings_small = build_settings_card_for_size(
+            &WidgetConfig::default(),
+            "Small",
+            0,
+            &NetworkSnapshot::default(),
+        );
         let parsed_small: Value = serde_json::from_str(&settings_small).unwrap();
         let small_header_cols = &parsed_small["body"][0]["columns"];
         assert_eq!(small_header_cols[1]["width"], "48px");

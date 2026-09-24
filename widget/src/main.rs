@@ -12,6 +12,8 @@
 mod bindings;
 mod factory;
 mod provider;
+mod toast;
+mod tray;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -139,6 +141,11 @@ fn main() -> windows_core::Result<()> {
         r.store(false, std::sync::atomic::Ordering::SeqCst);
     });
 
+    // Add the notification-area icon. It lives only while this process does, so it
+    // is torn down on idle shutdown below. Failure is non-fatal: the widget keeps
+    // running without a tray presence.
+    let tray = tray::TrayIcon::spawn(Arc::clone(&state), Arc::clone(&running));
+
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(500));
 
@@ -196,6 +203,10 @@ fn main() -> windows_core::Result<()> {
     }
 
     // 6. Stop background worker and release COM registration
+    if let Some(tray) = tray {
+        tray.destroy();
+    }
+
     let worker = {
         let mut s = state.lock_safe();
         s.worker.take()

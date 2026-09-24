@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-09-24
+
+### Added
+
+- **Bandwidth Usage Alerts (Sustained-Threshold Toast Notifications)**:
+  - Added a platform-independent alert engine (`BandwidthAlertEngine`) that fires only after a direction stays above its threshold for a configurable sustain window, with a per-direction cooldown that rate-limits duplicate notifications.
+  - Delivered native Windows toast notifications for packaged apps via `ToastNotificationManager`, using the MSIX package identity (no AppUserModelID shortcut required).
+  - Added in-card alert settings — a "Notify on sustained high download" toggle plus threshold (MiB/s) and sustain (seconds) inputs — across Small, Medium, and Large widgets.
+  - Persisted alert preferences globally to `%LocalAppData%\NetFlow\alerts.json`, mirrored into the live worker engine on save so they survive widget recreation and process restarts.
+- **Multiple Adapter Support**:
+  - Extended the telemetry backend to track every active interface simultaneously (`per_interface` samples sorted by throughput), while aggregate totals remain unchanged.
+  - Added an adapter selector to widget settings ("All active adapters" plus up to 16 named interfaces) driving headline download/upload metrics and peaks for the chosen LUID.
+  - Added a flicker-free "Active adapters" breakdown on the Large card using four fixed data-bound slots (`adapter0`..`adapter3`) with `$when` visibility.
+- **System Tray Icon (Notification Area)**:
+  - Added an in-process tray icon via `Shell_NotifyIconW` on a dedicated message-loop thread, registered with a stable GUID as Microsoft recommends.
+  - Live tooltip refreshes ~1 Hz with current aggregate download/upload rates.
+  - Right-click context menu with "Reset session totals" (mirrors the in-card Reset action) and "Exit Net Flow".
+  - Scoped to the widget host lifetime: the icon is added on activation and removed with `NIM_DELETE` during idle shutdown, preserving the existing clean-exit behaviour. Isolated behind a small `TrayIcon` (`spawn` / `destroy`) abstraction for future relocation to a persistent host.
+
+---
+
 ## [0.2.1] - 2026-09-21
 
 ### Changed

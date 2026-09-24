@@ -20,7 +20,8 @@ use net_flow_core::card::{
 };
 use net_flow_core::format::SpeedUnit;
 use net_flow_core::{
-    GraphStyle, SAMPLING_INTERVAL_MS, ThemeMode, compute_adaptive_ui_interval,
+    BandwidthAlertConfig, BandwidthAlertEngine, GraphStyle, SAMPLING_INTERVAL_MS, ThemeMode,
+    compute_adaptive_ui_interval, load_alert_config, save_alert_config,
 };
 
 /// Maximum data-update suppression interval (application-level empirical safety policy).
@@ -137,6 +138,8 @@ pub struct ProviderState {
     pub latest_snapshot: Arc<RwLock<NetworkSnapshot>>,
     /// Flagged when a user interaction (like resetting session totals) requires an immediate card update.
     pub ui_dirty: Arc<AtomicBool>,
+    /// Global alert preferences survive widget recreation in `%LOCALAPPDATA%\\NetFlow\\alerts.json`.
+    pub alert_config: Arc<Mutex<BandwidthAlertConfig>>,
 }
 
 impl ProviderState {
@@ -157,6 +160,7 @@ impl ProviderState {
             backend,
             latest_snapshot: Arc::new(RwLock::new(initial_snapshot)),
             ui_dirty: Arc::new(AtomicBool::new(false)),
+            alert_config: Arc::new(Mutex::new(load_alert_config())),
         }
     }
 }
@@ -208,6 +212,7 @@ impl NetFlowWidgetProvider {
             let backend_clone = Arc::clone(&state.backend);
             let snapshot_ref = Arc::clone(&state.latest_snapshot);
             let ui_dirty = Arc::clone(&state.ui_dirty);
+            let alert_config = Arc::clone(&state.alert_config);
 
             let handle = std::thread::spawn(move || {
                 worker_loop(
@@ -216,6 +221,7 @@ impl NetFlowWidgetProvider {
                     backend_clone,
                     snapshot_ref,
                     ui_dirty,
+                    alert_config,
                 );
             });
             state.worker = Some(WorkerHandle { handle, shutdown });
@@ -531,6 +537,11 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                             return Ok(());
                         }
                     }
+                    // Mirror the saved alert preferences into the global engine and
+                    // persist them so they survive widget recreation and restarts.
+                    let alert_prefs = new_config.alerts.clone();
+                    *state.alert_config.lock_safe() = alert_prefs.clone();
+                    save_alert_config(&alert_prefs);
                     state.ui_dirty.store(true, Ordering::SeqCst);
                     if let Some(worker) = &state.worker {
                         worker.shutdown.1.notify_all();
@@ -1072,8 +1083,12 @@ impl NetFlowWidgetProvider_Impl {
         let (template, data_json, state_json) = if in_customization
             || template_kind == TemplateKind::Settings
         {
-            let settings_card =
-                build_settings_card_for_size(&config, size_str, snapshot.session_duration_secs);
+            let settings_card = build_settings_card_for_size(
+                &config,
+                size_str,
+                snapshot.session_duration_secs,
+                &snapshot,
+            );
             let state_json = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
             (settings_card, "{}".to_string(), state_json)
         } else {
@@ -1236,6 +1251,35 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         .map(GraphStyle::from_str_value)
         .unwrap_or(current_config.graph_style);
 
+    // Adapter selector submits "auto" for aggregate traffic or a decimal LUID string.
+    let selected_adapter_luid = match parsed.get("adapter_luid").and_then(|v| v.as_str()) {
+        None => current_config.selected_adapter_luid,
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+                None
+            } else {
+                trimmed
+                    .parse::<u64>()
+                    .ok()
+                    .or(current_config.selected_adapter_luid)
+            }
+        }
+    };
+
+    // Alert preferences are mirrored into the global engine when settings are saved.
+    let mut alerts = current_config.alerts.clone();
+    if let Some(enabled) = parse_bool_field(parsed.get("alerts_enabled")) {
+        alerts.enabled = enabled;
+    }
+    if let Some(mbps) = parse_number_field(parsed.get("alert_threshold_mbps")) {
+        alerts.threshold_bps = (mbps.max(1) as u64) * 1024 * 1024;
+    }
+    if let Some(secs) = parse_number_field(parsed.get("alert_sustain_secs")) {
+        alerts.sustain_secs = secs.max(1) as u32;
+    }
+    let alerts = alerts.normalized();
+
     WidgetConfig {
         speed_unit,
         chart_window,
@@ -1243,6 +1287,37 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         apps_page: 0,
         theme,
         graph_style,
+        selected_adapter_luid,
+        alerts,
+    }
+}
+
+/// Interprets an Adaptive Card toggle/boolean input that may arrive as a bool or string.
+fn parse_bool_field(value: Option<&serde_json::Value>) -> Option<bool> {
+    let v = value?;
+    if let Some(b) = v.as_bool() {
+        Some(b)
+    } else {
+        v.as_str()
+            .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+    }
+}
+
+/// Interprets an Adaptive Card numeric input that may arrive as a number or string.
+fn parse_number_field(value: Option<&serde_json::Value>) -> Option<i64> {
+    match value {
+        Some(v) => {
+            if let Some(n) = v.as_i64() {
+                Some(n)
+            } else if let Some(n) = v.as_f64() {
+                Some(n as i64)
+            } else if let Some(s) = v.as_str() {
+                s.trim().parse::<f64>().ok().map(|n| n as i64)
+            } else {
+                None
+            }
+        }
+        None => None,
     }
 }
 
@@ -1275,6 +1350,7 @@ fn worker_loop(
     backend: Arc<Mutex<NetworkBackend>>,
     snapshot_ref: Arc<RwLock<NetworkSnapshot>>,
     ui_dirty: Arc<AtomicBool>,
+    alert_config: Arc<Mutex<BandwidthAlertConfig>>,
 ) {
     let sample_period = Duration::from_millis(SAMPLING_INTERVAL_MS);
     let persist_period = Duration::from_secs(5);
@@ -1283,6 +1359,7 @@ fn worker_loop(
     let mut last_data_published_at = Instant::now();
     let mut last_generation_at = Instant::now();
     let mut last_persist = Instant::now();
+    let mut alert_engine = BandwidthAlertEngine::default();
 
     loop {
         let wait = next_sample.saturating_duration_since(Instant::now());
@@ -1319,6 +1396,17 @@ fn worker_loop(
 
         let force_ui = ui_dirty.swap(false, Ordering::SeqCst);
         let snapshot = snapshot_ref.read_safe().clone();
+        let alert_preferences = alert_config.lock_safe().clone();
+        for event in alert_engine.evaluate(
+            &alert_preferences,
+            snapshot.rx_bps,
+            snapshot.tx_bps,
+            Instant::now(),
+        ) {
+            if let Err(error) = crate::toast::show_bandwidth_alert(event) {
+                log_widget(&format!("Bandwidth toast failed: {error}"));
+            }
+        }
         let adaptive_interval = compute_adaptive_ui_interval(snapshot.rx_bps, snapshot.tx_bps);
 
         if !is_publication_cadence_due(

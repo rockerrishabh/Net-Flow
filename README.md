@@ -9,7 +9,7 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -40,8 +40,11 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 - **🌊 50 KB/s Scale Floor & Headroom**: A vertical scale floor keeps sub-kilobyte background network noise proportional, while 18% vertical headroom cushions traffic spikes from card boundaries.
 - **⚡ Ultra-Low Resource Usage**: Uses native Windows `IP Helper` (`GetIfTable2`) APIs and asynchronous Rust for near-zero CPU (< 0.1%) and negligible RAM footprint (< 15 MB).
 - **🛜 Smart Active Adapter Detection**: Auto-detects the primary active network adapter with contextual badges (Wi-Fi with friendly SSID, Ethernet, Cellular, VPN).
+- **🔀 Multiple Adapter Support**: Tracks every active interface simultaneously, with an in-card adapter selector that drives headline metrics and a per-adapter breakdown on the Large card.
 - **📱 Per-App Bandwidth Attribution**: Tracks active applications consuming network bandwidth with compact rate formatting (`↓ 11.1 ↑ 9.1 KB/s (37)`) and generous 22-character name budgets.
 - **📊 Session Usage Tracking**: Monitors cumulative upload/download data transferred and active session duration with an inline **Reset** button.
+- **🔔 Bandwidth Usage Alerts**: Native Windows toast notifications fire only after traffic stays above a configurable threshold (MiB/s) for a sustained window, with a cooldown that prevents repeat spam.
+- **🖥️ System Tray Icon**: A notification-area icon with a live download/upload tooltip and a right-click menu (reset session, exit), present whenever the widget host is running.
 - **⚙️ In-Card Customization**: Configurable speed units, timeframe windows, theme modes, and graph styles directly inside the widget card.
 
 ---
@@ -142,7 +145,8 @@ net-flow/
 ├── crates/
 │   └── core/                          # net-flow-core (pure Rust core logic)
 │       ├── src/
-│       │   ├── backend.rs             # IP Helper polling, delta computing & interface classification
+│       │   ├── alerts.rs              # Sustained-threshold bandwidth alert engine & config
+│       │   ├── backend.rs             # IP Helper polling, per-adapter tracking & classification
 │       │   ├── card.rs                # Adaptive Cards v1.6 JSON builders & templates
 │       │   ├── chart.rs               # In-memory dual-stream waveform rasteriser
 │       │   ├── format.rs              # Bandwidth scaling & humanized unit formatting
@@ -162,7 +166,9 @@ net-flow/
 │       ├── bindings.rs                # Windows App SDK WinMD bindings
 │       ├── factory.rs                 # Out-of-proc COM ClassFactory implementation
 │       ├── main.rs                    # WinMain entry point, COM lifecycle & idle shutdown
-│       └── provider.rs                # IWidgetProvider2 handler with poison-resilient locks
+│       ├── provider.rs                # IWidgetProvider2 handler with poison-resilient locks
+│       ├── toast.rs                   # Packaged-app bandwidth alert toast delivery
+│       └── tray.rs                    # Notification-area tray icon, tooltip & context menu
 ├── scripts/
 │   └── install.ps1                    # Sideload packaging, certificate provisioning & registration
 ├── Cargo.toml                         # Workspace manifest & LTO release profile
@@ -179,7 +185,7 @@ net-flow/
 
 ## 🧪 Testing & Verification
 
-Run all 75 workspace unit tests:
+Run all 98 workspace unit tests:
 
 ```powershell
 cargo test --workspace
@@ -203,7 +209,7 @@ cargo build --release --workspace
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 75 unit tests, and verifies MSIX layout packaging.
+1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 98 unit tests, and verifies MSIX layout packaging.
 2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.1`) or manual workflow dispatch. Builds the optimized binary, packages both public sideload MSIX and Microsoft Store MSIX, generates SHA256 checksums, extracts sanitized release notes from `CHANGELOG.md`, publishes the **GitHub Release**, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** via Partner Center.
 
 ---
