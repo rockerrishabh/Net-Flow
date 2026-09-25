@@ -214,8 +214,7 @@ impl BandwidthAlertEngine {
             return None;
         }
         let sustained_since = *above_since.get_or_insert(now);
-        if now.saturating_duration_since(sustained_since)
-            < Duration::from_secs(sustain_secs.into())
+        if now.saturating_duration_since(sustained_since) < Duration::from_secs(sustain_secs.into())
         {
             return None;
         }
@@ -323,7 +322,8 @@ mod tests {
         assert_eq!(events_at_5s[0].direction, AlertDirection::Download);
 
         // At +10s: UL triggers (sustain is 10s), while DL is in cooldown
-        let events_at_10s = engine.evaluate(&config, 1200.0, 600.0, start + Duration::from_secs(10));
+        let events_at_10s =
+            engine.evaluate(&config, 1200.0, 600.0, start + Duration::from_secs(10));
         assert_eq!(events_at_10s.len(), 1);
         assert_eq!(events_at_10s[0].direction, AlertDirection::Upload);
     }

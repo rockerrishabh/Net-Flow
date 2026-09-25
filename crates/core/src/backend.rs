@@ -1728,7 +1728,9 @@ pub fn sample_latency_snapshot(
 ) -> LatencySnapshot {
     let gateway = query_ipv4_gateway_address(None);
     let (target, ip) = match mode {
-        LatencyTargetMode::Internet => (LatencyTarget::Internet, std::net::Ipv4Addr::new(1, 1, 1, 1)),
+        LatencyTargetMode::Internet => {
+            (LatencyTarget::Internet, std::net::Ipv4Addr::new(1, 1, 1, 1))
+        }
         LatencyTargetMode::Gateway => {
             if let Some(gw) = gateway {
                 (LatencyTarget::Gateway, gw)
@@ -2484,7 +2486,8 @@ mod tests {
             "upload_bytes": 2000,
             "started_at": 1700000000
         }"#;
-        let from_aliases: SessionState = serde_json::from_str(json_with_aliases).expect("deserialize aliases");
+        let from_aliases: SessionState =
+            serde_json::from_str(json_with_aliases).expect("deserialize aliases");
         assert_eq!(from_aliases.generation, 42);
         assert_eq!(from_aliases.session_rx, 1000);
         assert_eq!(from_aliases.session_tx, 2000);

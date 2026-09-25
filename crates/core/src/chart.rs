@@ -100,7 +100,9 @@ pub fn query_windows_light_theme() -> Result<bool, ThemeDetectionError> {
         }
 
         if query_status2.is_err() {
-            return Err(ThemeDetectionError::QueryValueFailed(query_status2.0 as i32));
+            return Err(ThemeDetectionError::QueryValueFailed(
+                query_status2.0 as i32,
+            ));
         }
 
         Err(ThemeDetectionError::InvalidType)
