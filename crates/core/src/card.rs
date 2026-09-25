@@ -56,6 +56,9 @@ pub struct WidgetConfig {
     /// Alert preferences mirrored to `%LOCALAPPDATA%\\NetFlow\\alerts.json` by the widget host.
     #[serde(default)]
     pub alerts: BandwidthAlertConfig,
+    /// Preferred network latency probe endpoint mode: Auto, Internet, or Gateway.
+    #[serde(default)]
+    pub latency_target: crate::backend::LatencyTargetMode,
 }
 
 impl Default for WidgetConfig {
@@ -69,7 +72,29 @@ impl Default for WidgetConfig {
             graph_style: GraphStyle::Area,
             selected_adapter_luid: None,
             alerts: BandwidthAlertConfig::default(),
+            latency_target: crate::backend::LatencyTargetMode::Auto,
         }
+    }
+}
+
+pub fn get_user_config_path() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join("NetFlow").join("config.json")
+}
+
+pub fn load_user_config() -> WidgetConfig {
+    std::fs::read_to_string(get_user_config_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_user_config(config: &WidgetConfig) {
+    let path = get_user_config_path();
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = crate::backend::write_atomic(&path, json.as_bytes());
     }
 }
 
@@ -481,13 +506,16 @@ fn app_slot_template(slot: usize) -> Value {
     })
 }
 
-/// Header: medium glyph, interface name, live connection count, and settings button.
+/// Header: medium glyph, interface name, live latency + connection count, and settings button.
 fn header_row(snapshot: &NetworkSnapshot) -> Value {
     let active_count = if snapshot.active_connections_count > 0 {
         snapshot.active_connections_count
     } else {
         snapshot.active_apps.len()
     };
+
+    let latency_text = snapshot.latency.display_text();
+    let status_text = format!("{} • {} conns", latency_text, active_count);
 
     json!({
         "type": "ColumnSet",
@@ -521,7 +549,7 @@ fn header_row(snapshot: &NetworkSnapshot) -> Value {
                 "items": [
                     {
                         "type": "TextBlock",
-                        "text": format!("{} conns", active_count),
+                        "text": status_text,
                         "size": "Small",
                         "isSubtle": true,
                         "horizontalAlignment": "Right",
@@ -917,11 +945,13 @@ fn session_row(snapshot: &NetworkSnapshot) -> Value {
     } else {
         "Session".to_string()
     };
+    let latency_summary = snapshot.latency.detailed_display_text();
     let tooltip = format!(
-        "Reset session totals (Duration: {} • All-time peak: ↓ {}  ↑ {})",
+        "Reset session totals (Duration: {} • All-time peak: ↓ {}  ↑ {} • Latency: {})",
         duration_str,
         format_bandwidth(snapshot.session_peak_rx_bps),
-        format_bandwidth(snapshot.session_peak_tx_bps)
+        format_bandwidth(snapshot.session_peak_tx_bps),
+        latency_summary
     );
 
     json!({
@@ -1557,9 +1587,15 @@ pub fn build_adaptive_card_data(
         "primaryName".to_string(),
         json!(truncate_name(display_name, 22)),
     );
+    let latency_text = snapshot.latency.display_text();
     data_map.insert(
         "activeConnsText".to_string(),
-        json!(format!("{} conns", active_count)),
+        json!(format!("{} • {} conns", latency_text, active_count)),
+    );
+    data_map.insert("latencyText".to_string(), json!(latency_text));
+    data_map.insert(
+        "latencyDetailedText".to_string(),
+        json!(snapshot.latency.detailed_display_text()),
     );
     data_map.insert(
         "downloadRate".to_string(),
@@ -1799,7 +1835,7 @@ pub fn build_settings_card_for_size(
             "choices": adapter_choices
         }));
 
-        // Row 2: Graph style
+        // Row 2: Graph style and Latency target
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Small",
@@ -1828,13 +1864,39 @@ pub fn build_settings_card_for_size(
                             ]
                         }
                     ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "spacing": "Small",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Latency target",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "latency_target",
+                            "style": "compact",
+                            "spacing": "None",
+                            "value": current_config.latency_target.to_str_value(),
+                            "choices": [
+                                { "title": "Auto", "value": "auto" },
+                                { "title": "Internet", "value": "internet" },
+                                { "title": "Gateway", "value": "gateway" }
+                            ]
+                        }
+                    ]
                 }
             ]
         }));
 
         body.push(json!({
             "type": "TextBlock",
-            "text": "Bandwidth alerts",
+            "text": "Download alert",
             "weight": "Bolder",
             "size": "Small",
             "spacing": "Medium",
@@ -1842,27 +1904,60 @@ pub fn build_settings_card_for_size(
         }));
         body.push(json!({
             "type": "Input.Toggle",
-            "id": "alerts_enabled",
-            "title": "Notify on sustained high download",
-            "value": if current_config.alerts.enabled { "true" } else { "false" },
+            "id": "alerts_download_enabled",
+            "title": "Notify on high download",
+            "value": if current_config.alerts.download_enabled && current_config.alerts.enabled { "true" } else { "false" },
             "valueOn": "true",
             "valueOff": "false"
         }));
         body.push(json!({
             "type": "Input.Number",
-            "id": "alert_threshold_mbps",
+            "id": "alert_download_threshold_mbps",
             "min": 1,
             "max": 100000,
-            "value": ((current_config.alerts.threshold_bps / 1024 / 1024).max(1)).to_string(),
-            "placeholder": "Threshold (MiB/s)"
+            "value": ((current_config.alerts.download_threshold() / 1024 / 1024).max(1)).to_string(),
+            "placeholder": "DL Threshold (MiB/s)"
         }));
         body.push(json!({
             "type": "Input.Number",
-            "id": "alert_sustain_secs",
+            "id": "alert_download_sustain_secs",
             "min": 1,
             "max": 3600,
-            "value": current_config.alerts.sustain_secs.to_string(),
-            "placeholder": "Sustain seconds"
+            "value": current_config.alerts.download_sustain().to_string(),
+            "placeholder": "DL Sustain seconds"
+        }));
+
+        body.push(json!({
+            "type": "TextBlock",
+            "text": "Upload alert",
+            "weight": "Bolder",
+            "size": "Small",
+            "spacing": "Medium",
+            "wrap": false
+        }));
+        body.push(json!({
+            "type": "Input.Toggle",
+            "id": "alerts_upload_enabled",
+            "title": "Notify on high upload",
+            "value": if current_config.alerts.upload_enabled && current_config.alerts.enabled { "true" } else { "false" },
+            "valueOn": "true",
+            "valueOff": "false"
+        }));
+        body.push(json!({
+            "type": "Input.Number",
+            "id": "alert_upload_threshold_mbps",
+            "min": 1,
+            "max": 100000,
+            "value": ((current_config.alerts.upload_threshold() / 1024 / 1024).max(1)).to_string(),
+            "placeholder": "UL Threshold (MiB/s)"
+        }));
+        body.push(json!({
+            "type": "Input.Number",
+            "id": "alert_upload_sustain_secs",
+            "min": 1,
+            "max": 3600,
+            "value": current_config.alerts.upload_sustain().to_string(),
+            "placeholder": "UL Sustain seconds"
         }));
     } else {
         // Medium & Large (~340px): balanced rows for clear organization
@@ -1927,7 +2022,7 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Row 2: Graph style
+        // Row 2: Graph style and Latency target
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Small",
@@ -1956,11 +2051,37 @@ pub fn build_settings_card_for_size(
                             ]
                         }
                     ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "spacing": "Medium",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Latency target",
+                            "weight": "Bolder",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.ChoiceSet",
+                            "id": "latency_target",
+                            "style": "compact",
+                            "spacing": "Small",
+                            "value": current_config.latency_target.to_str_value(),
+                            "choices": [
+                                { "title": "Auto (Internet/LAN)", "value": "auto" },
+                                { "title": "Internet (1.1.1.1)", "value": "internet" },
+                                { "title": "Gateway (Router)", "value": "gateway" }
+                            ]
+                        }
+                    ]
                 }
             ]
         }));
 
-        // Row 3: Adapter selection and alert threshold.
+        // Row 3: Adapter selection
         body.push(json!({
             "type": "Input.ChoiceSet",
             "id": "adapter_luid",
@@ -1969,6 +2090,8 @@ pub fn build_settings_card_for_size(
             "value": adapter_value,
             "choices": adapter_choices
         }));
+
+        // Row 4: Bandwidth alerts (independent Download & Upload)
         body.push(json!({
             "type": "TextBlock",
             "text": "Bandwidth alerts",
@@ -1979,9 +2102,9 @@ pub fn build_settings_card_for_size(
         }));
         body.push(json!({
             "type": "Input.Toggle",
-            "id": "alerts_enabled",
+            "id": "alerts_download_enabled",
             "title": "Notify on sustained high download",
-            "value": if current_config.alerts.enabled { "true" } else { "false" },
+            "value": if current_config.alerts.download_enabled && current_config.alerts.enabled { "true" } else { "false" },
             "valueOn": "true",
             "valueOff": "false"
         }));
@@ -1990,14 +2113,39 @@ pub fn build_settings_card_for_size(
             "spacing": "Small",
             "columns": [
                 { "type": "Column", "width": "stretch", "items": [{
-                    "type": "Input.Number", "id": "alert_threshold_mbps", "min": 1, "max": 100000,
-                    "value": ((current_config.alerts.threshold_bps / 1024 / 1024).max(1)).to_string(),
-                    "placeholder": "MiB/s"
+                    "type": "Input.Number", "id": "alert_download_threshold_mbps", "min": 1, "max": 100000,
+                    "value": ((current_config.alerts.download_threshold() / 1024 / 1024).max(1)).to_string(),
+                    "placeholder": "DL MiB/s"
                 }] },
                 { "type": "Column", "width": "stretch", "items": [{
-                    "type": "Input.Number", "id": "alert_sustain_secs", "min": 1, "max": 3600,
-                    "value": current_config.alerts.sustain_secs.to_string(),
-                    "placeholder": "Seconds"
+                    "type": "Input.Number", "id": "alert_download_sustain_secs", "min": 1, "max": 3600,
+                    "value": current_config.alerts.download_sustain().to_string(),
+                    "placeholder": "DL Seconds"
+                }] }
+            ]
+        }));
+
+        body.push(json!({
+            "type": "Input.Toggle",
+            "id": "alerts_upload_enabled",
+            "title": "Notify on sustained high upload",
+            "value": if current_config.alerts.upload_enabled && current_config.alerts.enabled { "true" } else { "false" },
+            "valueOn": "true",
+            "valueOff": "false"
+        }));
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                { "type": "Column", "width": "stretch", "items": [{
+                    "type": "Input.Number", "id": "alert_upload_threshold_mbps", "min": 1, "max": 100000,
+                    "value": ((current_config.alerts.upload_threshold() / 1024 / 1024).max(1)).to_string(),
+                    "placeholder": "UL MiB/s"
+                }] },
+                { "type": "Column", "width": "stretch", "items": [{
+                    "type": "Input.Number", "id": "alert_upload_sustain_secs", "min": 1, "max": 3600,
+                    "value": current_config.alerts.upload_sustain().to_string(),
+                    "placeholder": "UL Seconds"
                 }] }
             ]
         }));
@@ -2112,6 +2260,8 @@ mod tests {
                 },
             ],
             active_connections_count: 11,
+            generation: 1,
+            latency: Default::default(),
         }
     }
 
@@ -2383,6 +2533,7 @@ mod tests {
                 sustain_secs: 15,
                 ..BandwidthAlertConfig::default()
             },
+            latency_target: crate::backend::LatencyTargetMode::Internet,
         };
         let parsed: WidgetConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();

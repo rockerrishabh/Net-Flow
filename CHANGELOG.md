@@ -11,6 +11,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-09-25
+
+### Added
+
+- **Route-Driven Asynchronous Win32 ICMP IPv4 Latency Telemetry**:
+  - Implemented asynchronous IPv4 ICMP ping probing utilizing Win32 `IcmpCreateFile`, `CreateEventW`, `IcmpSendEcho2`, `WaitForSingleObject` (1-second timeout), and `IcmpParseReplies` on a 2-second background cadence.
+  - Implemented route-driven IPv4 default gateway discovery via `GetBestRoute2` towards public internet (`1.1.1.1`) querying the next hop Windows actually uses, with graceful `GetIpForwardTable2` fallback.
+  - Added configurable endpoint target selector (`Auto`, `Internet` [1.1.1.1], `Gateway` [default router]) in widget settings with stable semantic state handling: route availability determines probe target, while timeouts represent measurement states.
+  - Integrated unambiguous, semantic latency displays across all card headers (`18 ms`, `Timeout`, `-- ms`) alongside active connection counts, with detailed diagnostic labels in tooltips and session summaries.
+- **Decoupled Persistent Background System Tray Host**:
+  - Decoupled the notification-area host into a persistent background process (`net-flow.exe --tray`), owned directly by Windows login via `<uap5:StartupTask>` in `Package.appxmanifest`.
+  - Single-instance enforcement via named mutex `Global\NetFlow_Tray_Mutex` with fallback to `Local\NetFlow_Tray_Mutex`.
+  - Self-healing recovery: Widget COM host inspects tray mutex on startup and spawns detached `net-flow.exe --tray` if the tray is missing.
+  - Live tooltip formatted with aggregate transfer rates and round-trip latency (`Net Flow\n↓ {dl}  ↑ {ul}\nLatency: {ms} ({target})`).
+  - Context menu with "Open Widgets Board", "Reset session totals", and clean "Exit Net Flow".
+- **Tray-Authoritative Session State & Atomic Consistency**:
+  - Made the persistent Tray Host the single authoritative source of cumulative bandwidth accounting, ICMP latency telemetry, and alert state machines.
+  - Replaced independent accumulators with atomic file persistence (`session_state.json`) utilizing process-unique temporary files, flush/sync, and retry backoff.
+  - Added monotonic `generation` counter and Win32 named event `Global\NetFlow_ResetSession_Event` for instant, race-free session resets synchronized across widget and tray instances.
+- **Asymmetric, Independent Download and Upload Bandwidth Alerts**:
+  - Replaced shared sustain timers with completely independent, concurrent download and upload state machines.
+  - Added separate configurable thresholds (MiB/s), sustain durations (seconds), and cooldown windows for download and upload traffic, with backward-compatible configuration deserialization.
+  - In-card settings across Small, Medium, and Large widgets updated with independent download and upload toggle and threshold controls.
+- **Visual Polish & Sparkline Smoothing**:
+  - Refined sparkline Catmull-Rom smoothing to anchor the leading edge to zero while strictly preserving local peak magnitudes.
+  - Added bold bar tracks for the discrete Bar graph style.
+
+---
+
 ## [0.3.0] - 2026-09-24
 
 ### Added

@@ -1,40 +1,51 @@
-//! In-process notification-area (system tray) icon for the Net Flow widget host.
+//! Dedicated persistent notification-area (system tray) host for Net Flow.
 //!
-//! The tray is deliberately scoped to the lifetime of the widget COM-server
-//! process: it is added with `Shell_NotifyIconW(NIM_ADD)` when the process
-//! becomes active and removed with `NIM_DELETE` during shutdown. When no widgets
-//! remain pinned the host idles out and exits, and the tray icon disappears with
-//! it — matching the documented idle-shutdown behaviour.
-//!
-//! The public surface is intentionally tiny (`spawn` / `destroy`) so this can be
-//! relocated to a dedicated persistent host process in a future release without
-//! redesigning the widget itself.
+//! Architecture (v0.4.0):
+//! - The persistent Tray Host process owns authoritative cumulative session telemetry,
+//!   independent bandwidth alert state machines, and the Win32 ICMP latency probe loop.
+//! - Runs as a single instance via named mutex `Global\NetFlow_Tray_Mutex` (with `Local\` fallback).
+//! - Signals session resets to/from the Widget COM server via `Global\NetFlow_ResetSession_Event`.
+//! - Periodically persists authoritative snapshots to `%LOCALAPPDATA%\NetFlow\session_state.json`.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::time::{Duration, Instant};
 
-use net_flow_core::format_bandwidth;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use net_flow_core::backend::{NetworkBackend, NetworkSnapshot};
+use net_flow_core::card::load_user_config;
+use net_flow_core::{
+    BandwidthAlertConfig, BandwidthAlertEngine, format_bandwidth, sample_latency_snapshot,
+};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WAIT_OBJECT_0, WPARAM,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{
+    CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, OpenEventW, OpenMutexW, ReleaseMutex, SetEvent,
+    WaitForSingleObject,
+};
 use windows::Win32::UI::Shell::{
     NIF_GUID, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    ShellExecuteW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW, HICON,
     HWND_MESSAGE, IDI_APPLICATION, LoadIconW, MF_SEPARATOR, MF_STRING, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    TPM_BOTTOMALIGN, TPM_RIGHTALIGN, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WNDCLASSEXW,
+    PostQuitMessage, RegisterClassExW, SW_SHOWNORMAL, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_RIGHTALIGN, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSEXW,
 };
 use windows::core::{GUID, PCWSTR, w};
 
-use crate::provider::{LockExt, ProviderState, RwLockExt};
+use crate::provider::{LockExt, RwLockExt};
 
-/// Stable identity for the notification-area icon. Microsoft recommends a fixed
-/// GUID so Windows consistently associates the icon with this application.
+use windows::Win32::System::Threading::SYNCHRONIZATION_ACCESS_RIGHTS;
+
+const SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
+
+/// Stable identity for the notification-area icon.
 const TRAY_GUID: GUID = GUID::from_u128(0x7d3f9c21_5a48_4e6b_9f10_2c8b7a4d6e51);
 
 /// Custom callback message delivered to the window proc for tray icon events.
@@ -44,14 +55,14 @@ const TOOLTIP_TIMER_ID: usize = 0x4E46;
 const TOOLTIP_TIMER_MS: u32 = 1000;
 
 /// Context-menu command identifiers.
+const IDM_OPEN_WIDGETS: usize = 1000;
 const IDM_RESET_SESSION: usize = 1001;
 const IDM_EXIT: usize = 1002;
 
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
 
-// Window messages handled by the tray window proc. Defined locally to avoid
-// depending on which windows-crate feature gate happens to re-export them.
+// Window messages handled by the tray window proc.
 const WM_NULL: u32 = 0x0000;
 const WM_CREATE: u32 = 0x0001;
 const WM_DESTROY: u32 = 0x0002;
@@ -59,62 +70,280 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_COMMAND: u32 = 0x0111;
 const WM_TIMER: u32 = 0x0113;
 
-/// Per-window context stashed in `GWLP_USERDATA` so the plain-fn window proc can
-/// reach the shared provider state and the process quit flag.
+/// Guard holding the single-instance mutex for the tray process.
+pub struct TrayMutexGuard {
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl Drop for TrayMutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.handle);
+            let _ = CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Attempts to acquire the named single-instance mutex for the tray host.
+pub fn try_acquire_tray_mutex() -> Option<TrayMutexGuard> {
+    unsafe {
+        let mut handle = CreateMutexW(None, true, w!("Global\\NetFlow_Tray_Mutex")).ok();
+        if handle.is_none() || GetLastError().0 == 5 {
+            handle = CreateMutexW(None, true, w!("Local\\NetFlow_Tray_Mutex")).ok();
+        }
+        let handle = handle?;
+        if handle.is_invalid() {
+            return None;
+        }
+        if GetLastError().0 == 183 {
+            let _ = CloseHandle(handle);
+            return None;
+        }
+        Some(TrayMutexGuard { handle })
+    }
+}
+
+/// Checks whether an instance of the persistent tray host is currently running.
+pub fn is_tray_running() -> bool {
+    unsafe {
+        if let Ok(h) = OpenMutexW(SYNCHRONIZE, false, w!("Global\\NetFlow_Tray_Mutex"))
+            && !h.is_invalid()
+        {
+            let _ = CloseHandle(h);
+            return true;
+        }
+        if let Ok(h) = OpenMutexW(SYNCHRONIZE, false, w!("Local\\NetFlow_Tray_Mutex"))
+            && !h.is_invalid()
+        {
+            let _ = CloseHandle(h);
+            return true;
+        }
+        false
+    }
+}
+
+/// Spawns the persistent tray host as a detached process (self-healing recovery mechanism).
+pub fn spawn_tray_host_detached() {
+    if let Ok(exe_path) = std::env::current_exe() {
+        use std::process::Command;
+        let _ = Command::new(exe_path).arg("--tray").spawn();
+    }
+}
+
+/// Creates or opens the named auto-reset event for session reset synchronization.
+pub fn create_reset_event() -> Option<windows::Win32::Foundation::HANDLE> {
+    unsafe {
+        let mut handle =
+            CreateEventW(None, false, false, w!("Global\\NetFlow_ResetSession_Event")).ok();
+        if handle.is_none() || GetLastError().0 == 5 {
+            handle = CreateEventW(None, false, false, w!("Local\\NetFlow_ResetSession_Event")).ok();
+        }
+        handle.filter(|h| !h.is_invalid())
+    }
+}
+
+/// Signals the named session reset event across processes.
+pub fn signal_reset_session_event() {
+    unsafe {
+        if let Ok(h) = OpenEventW(
+            EVENT_MODIFY_STATE,
+            false,
+            w!("Global\\NetFlow_ResetSession_Event"),
+        ) && !h.is_invalid()
+        {
+            let _ = SetEvent(h);
+            let _ = CloseHandle(h);
+            return;
+        }
+        if let Ok(h) = OpenEventW(
+            EVENT_MODIFY_STATE,
+            false,
+            w!("Local\\NetFlow_ResetSession_Event"),
+        ) && !h.is_invalid()
+        {
+            let _ = SetEvent(h);
+            let _ = CloseHandle(h);
+        }
+    }
+}
+
+/// Authoritative state owned by the persistent Tray Host.
+pub struct TrayState {
+    pub backend: Arc<Mutex<NetworkBackend>>,
+    pub latest_snapshot: Arc<RwLock<NetworkSnapshot>>,
+    pub alert_config: Arc<Mutex<BandwidthAlertConfig>>,
+    pub ui_dirty: Arc<AtomicBool>,
+}
+
+/// Per-window context stashed in `GWLP_USERDATA` for the window proc.
 struct TrayContext {
-    state: Arc<Mutex<ProviderState>>,
+    state: Arc<TrayState>,
     quit: Arc<AtomicBool>,
 }
 
-/// Handle to the running tray icon. Dropping is a no-op; call [`TrayIcon::destroy`]
-/// to remove the icon and join the message-loop thread deterministically.
-pub struct TrayIcon {
-    /// Raw `HWND` value, kept as `isize` because window handles are not `Send`.
-    hwnd: isize,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl TrayIcon {
-    /// Creates the tray icon on a dedicated message-loop thread.
-    ///
-    /// Returns `None` if the window or notification icon could not be created,
-    /// in which case the widget continues to operate without a tray presence.
-    pub fn spawn(state: Arc<Mutex<ProviderState>>, quit: Arc<AtomicBool>) -> Option<TrayIcon> {
-        let (tx, rx) = mpsc::channel::<isize>();
-        let thread = std::thread::Builder::new()
-            .name("netflow-tray".to_string())
-            .spawn(move || run_tray(state, quit, tx))
-            .ok()?;
-        // A zero handle means window/icon creation failed on the tray thread.
-        let hwnd = rx.recv().unwrap_or(0);
-        if hwnd == 0 {
-            let _ = thread.join();
-            return None;
+/// Main entry point for the persistent Tray Host process.
+pub fn run_tray_host() -> windows_core::Result<()> {
+    // 1. Ensure single-instance execution
+    let _mutex = match try_acquire_tray_mutex() {
+        Some(m) => m,
+        None => {
+            // Already running
+            return Ok(());
         }
-        Some(TrayIcon {
-            hwnd,
-            thread: Some(thread),
+    };
+
+    let backend = Arc::new(Mutex::new(NetworkBackend::load_or_create(
+        net_flow_core::AggregateMode::PhysicalTransport,
+    )));
+    let initial_snapshot = {
+        let mut b = backend.lock_safe();
+        b.sample().unwrap_or_default()
+    };
+    let latest_snapshot = Arc::new(RwLock::new(initial_snapshot));
+    let alert_config = Arc::new(Mutex::new(net_flow_core::load_alert_config()));
+    let ui_dirty = Arc::new(AtomicBool::new(false));
+    let running = Arc::new(AtomicBool::new(true));
+
+    let state = Arc::new(TrayState {
+        backend: Arc::clone(&backend),
+        latest_snapshot: Arc::clone(&latest_snapshot),
+        alert_config: Arc::clone(&alert_config),
+        ui_dirty: Arc::clone(&ui_dirty),
+    });
+
+    // 2. Spawn dedicated telemetry, latency probe, and alert worker
+    let running_worker = Arc::clone(&running);
+    let state_worker = Arc::clone(&state);
+    let worker_thread = std::thread::Builder::new()
+        .name("netflow-tray-worker".to_string())
+        .spawn(move || {
+            run_tray_worker(running_worker, state_worker);
         })
+        .map_err(|_| windows_core::Error::empty())?;
+
+    // 3. Spawn dedicated UI message loop thread
+    let (tx, rx) = mpsc::channel::<isize>();
+    let running_tray = Arc::clone(&running);
+    let state_tray = Arc::clone(&state);
+    let tray_thread = std::thread::Builder::new()
+        .name("netflow-tray-ui".to_string())
+        .spawn(move || {
+            run_tray_ui(state_tray, running_tray, tx);
+        })
+        .map_err(|_| windows_core::Error::empty())?;
+
+    let hwnd = rx.recv().unwrap_or(0);
+    if hwnd == 0 {
+        running.store(false, Ordering::SeqCst);
+        let _ = tray_thread.join();
+        let _ = worker_thread.join();
+        return Ok(());
     }
 
-    /// Removes the notification icon, destroys the hidden window, and joins the thread.
-    pub fn destroy(mut self) {
-        unsafe {
-            let _ = PostMessageW(
-                Some(HWND(self.hwnd as *mut c_void)),
-                WM_CLOSE,
-                WPARAM(0),
-                LPARAM(0),
-            );
+    // Wait until exit requested
+    while running.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    // Clean shutdown: post close to window, join threads, persist session
+    unsafe {
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut c_void)),
+            WM_CLOSE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+    let _ = tray_thread.join();
+    let _ = worker_thread.join();
+
+    {
+        let b = backend.lock_safe();
+        b.persist_session();
+    }
+
+    Ok(())
+}
+
+/// Telemetry sampling, IPv4 ICMP latency probing, and bandwidth alert loop.
+fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
+    let reset_event = create_reset_event();
+    let mut alert_engine = BandwidthAlertEngine::default();
+    let sample_period = Duration::from_millis(net_flow_core::SAMPLING_INTERVAL_MS);
+    let persist_period = Duration::from_secs(5);
+    let latency_period = Duration::from_secs(2);
+
+    let mut next_sample = Instant::now() + sample_period;
+    let mut last_persist = Instant::now();
+    let mut last_latency = Instant::now() - latency_period;
+
+    while running.load(Ordering::SeqCst) {
+        let now = Instant::now();
+        let wait = next_sample.saturating_duration_since(now);
+        let wait_ms = (wait.as_millis() as u32).min(250);
+
+        // Check reset event if available
+        if let Some(event) = reset_event {
+            unsafe {
+                let status = WaitForSingleObject(event, wait_ms);
+                if status == WAIT_OBJECT_0 {
+                    let mut b = state.backend.lock_safe();
+                    b.reset_session();
+                    let s = b.sample().unwrap_or_default();
+                    *state.latest_snapshot.write_safe() = s;
+                    state.ui_dirty.store(true, Ordering::SeqCst);
+                }
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(wait_ms as u64));
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+
+        if !running.load(Ordering::SeqCst) {
+            break;
         }
+
+        // 1. Latency Probing every 2s
+        if last_latency.elapsed() >= latency_period {
+            let user_cfg = load_user_config();
+            let snap = sample_latency_snapshot(user_cfg.latency_target, 0, 1000);
+            {
+                let mut b = state.backend.lock_safe();
+                b.set_latency(snap);
+            }
+            last_latency = Instant::now();
+        }
+
+        // 2. Bandwidth Sampling
+        let started = Instant::now();
+        {
+            let mut b = state.backend.lock_safe();
+            if let Ok(s) = b.sample() {
+                *state.latest_snapshot.write_safe() = s;
+            }
+            if last_persist.elapsed() >= persist_period {
+                b.persist_session();
+                last_persist = Instant::now();
+            }
+        }
+
+        // 3. Alert Engine Evaluation
+        let snapshot = state.latest_snapshot.read_safe().clone();
+        let alert_prefs = state.alert_config.lock_safe().clone();
+        for event in alert_engine.evaluate(
+            &alert_prefs,
+            snapshot.rx_bps,
+            snapshot.tx_bps,
+            Instant::now(),
+        ) {
+            let _ = crate::toast::show_bandwidth_alert(event);
+        }
+
+        next_sample = started + sample_period;
     }
 }
 
-/// Entry point for the tray message-loop thread.
-fn run_tray(state: Arc<Mutex<ProviderState>>, quit: Arc<AtomicBool>, tx: mpsc::Sender<isize>) {
+/// Message loop thread for the notification-area icon.
+fn run_tray_ui(state: Arc<TrayState>, quit: Arc<AtomicBool>, tx: mpsc::Sender<isize>) {
     unsafe {
         let hinstance = HINSTANCE(GetModuleHandleW(None).unwrap_or_default().0);
         let class_name = w!("NetFlowTrayWindow");
@@ -133,8 +362,6 @@ fn run_tray(state: Arc<Mutex<ProviderState>>, quit: Arc<AtomicBool>, tx: mpsc::S
         let ctx = Box::new(TrayContext { state, quit });
         let ctx_ptr = Box::into_raw(ctx) as *const c_void;
 
-        // A message-only window (HWND_MESSAGE parent) hosts the tray icon without
-        // appearing on the taskbar or alt-tab.
         let hwnd_result = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class_name,
@@ -153,7 +380,6 @@ fn run_tray(state: Arc<Mutex<ProviderState>>, quit: Arc<AtomicBool>, tx: mpsc::S
         let hwnd = match hwnd_result {
             Ok(hwnd) => hwnd,
             Err(_) => {
-                // Reclaim the context box; WM_CREATE never ran to take ownership.
                 drop(Box::from_raw(ctx_ptr as *mut TrayContext));
                 let _ = tx.send(0);
                 return;
@@ -173,7 +399,6 @@ fn run_tray(state: Arc<Mutex<ProviderState>>, quit: Arc<AtomicBool>, tx: mpsc::S
     }
 }
 
-/// Builds a zeroed `NOTIFYICONDATAW` bound to this window and the stable GUID.
 fn base_notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -184,12 +409,6 @@ fn base_notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
     }
 }
 
-/// Loads the embedded application icon, falling back to the shell default.
-///
-/// `PCWSTR(1 as *const u16)` is the Win32 `MAKEINTRESOURCEW(1)` idiom: the numeric
-/// resource identifier winres assigns to the embedded app icon. It is an integer
-/// handle that is never dereferenced, so the dangling-pointer lint is a false
-/// positive here (Clippy's `ptr::dangling` suggestion would change the value).
 #[allow(clippy::manual_dangling_ptr)]
 unsafe fn load_icon() -> HICON {
     unsafe {
@@ -203,7 +422,6 @@ unsafe fn load_icon() -> HICON {
     }
 }
 
-/// Writes a NUL-terminated wide string into the fixed 128-char tooltip buffer.
 fn set_tip(data: &mut NOTIFYICONDATAW, text: &str) {
     let mut chars = text.encode_utf16().take(data.szTip.len() - 1);
     for slot in data.szTip.iter_mut() {
@@ -229,19 +447,18 @@ unsafe fn remove_icon(hwnd: HWND) {
     }
 }
 
-/// Refreshes the tooltip with the current aggregate download/upload rates.
 unsafe fn update_tooltip(hwnd: HWND) {
     unsafe {
         let Some(ctx) = context(hwnd) else { return };
-        let (rx_bps, tx_bps) = {
-            let state = ctx.state.lock_safe();
-            let snapshot = state.latest_snapshot.read_safe();
-            (snapshot.rx_bps, snapshot.tx_bps)
+        let (rx_bps, tx_bps, latency) = {
+            let snapshot = ctx.state.latest_snapshot.read_safe();
+            (snapshot.rx_bps, snapshot.tx_bps, snapshot.latency)
         };
         let tip = format!(
-            "Net Flow  \u{2193} {}  \u{2191} {}",
+            "Net Flow\n\u{2193} {}  \u{2191} {}\nLatency: {}",
             format_bandwidth(rx_bps),
             format_bandwidth(tx_bps),
+            latency.detailed_display_text(),
         );
         let mut data = base_notify_data(hwnd);
         data.uFlags = NIF_GUID | NIF_TIP;
@@ -250,10 +467,11 @@ unsafe fn update_tooltip(hwnd: HWND) {
     }
 }
 
-/// Shows the right-click context menu anchored at the cursor.
 unsafe fn show_menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(menu, MF_STRING, IDM_OPEN_WIDGETS, w!("Open Widgets Board"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(
             menu,
             MF_STRING,
@@ -265,7 +483,6 @@ unsafe fn show_menu(hwnd: HWND) {
 
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
-        // Required so the menu dismisses correctly when the user clicks elsewhere.
         let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(
             menu,
@@ -281,9 +498,7 @@ unsafe fn show_menu(hwnd: HWND) {
     }
 }
 
-/// Resets the cumulative session counters, mirroring the in-card Reset action.
-fn reset_session(state: &Arc<Mutex<ProviderState>>) {
-    let state = state.lock_safe();
+fn reset_session(state: &Arc<TrayState>) {
     {
         let mut backend = state.backend.lock_safe();
         backend.reset_session();
@@ -291,9 +506,7 @@ fn reset_session(state: &Arc<Mutex<ProviderState>>) {
         *state.latest_snapshot.write_safe() = snapshot;
     }
     state.ui_dirty.store(true, Ordering::SeqCst);
-    if let Some(worker) = &state.worker {
-        worker.shutdown.1.notify_all();
-    }
+    signal_reset_session_event();
 }
 
 unsafe fn context(hwnd: HWND) -> Option<&'static TrayContext> {
@@ -316,7 +529,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let event = (lparam.0 as u32) & 0xFFFF;
                 match event {
                     WM_RBUTTONUP => show_menu(hwnd),
-                    WM_LBUTTONUP => update_tooltip(hwnd),
+                    WM_LBUTTONUP => {
+                        update_tooltip(hwnd);
+                    }
                     _ => {}
                 }
                 LRESULT(0)
@@ -330,6 +545,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_COMMAND => {
                 let id = wparam.0 & 0xFFFF;
                 match id {
+                    IDM_OPEN_WIDGETS => {
+                        let _ = ShellExecuteW(
+                            None,
+                            w!("open"),
+                            w!("ms-widgets:"),
+                            None,
+                            None,
+                            SW_SHOWNORMAL,
+                        );
+                    }
                     IDM_RESET_SESSION => {
                         if let Some(ctx) = context(hwnd) {
                             reset_session(&ctx.state);

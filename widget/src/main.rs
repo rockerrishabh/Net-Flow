@@ -27,6 +27,8 @@ use crate::provider::{
 };
 use net_flow_core::card::WidgetConfig;
 
+pub use tray::is_tray_running;
+
 // CLSID: {A8E4C976-3F5D-4B2E-9C1A-7D6E8F0B2A4C}
 // Registered in appxmanifest as the out-of-process COM server for the widget
 pub const CLSID_NET_FLOW_WIDGET_PROVIDER: GUID =
@@ -51,6 +53,21 @@ unsafe extern "system" {
 }
 
 fn main() -> windows_core::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let is_com_server = args.iter().any(|arg| {
+        arg.eq_ignore_ascii_case("-RegisterProcessAsComServer")
+            || arg.eq_ignore_ascii_case("/RegisterProcessAsComServer")
+            || arg.eq_ignore_ascii_case("--com-server")
+    });
+
+    if is_com_server {
+        run_com_server()
+    } else {
+        tray::run_tray_host()
+    }
+}
+
+fn run_com_server() -> windows_core::Result<()> {
     // 1. Initialize COM MTA (Multi-Threaded Apartment) for widget IPC
     unsafe {
         let hr = CoInitializeEx(core::ptr::null(), COINIT_MULTITHREADED);
@@ -59,9 +76,14 @@ fn main() -> windows_core::Result<()> {
         }
     }
 
+    // 2. Self-healing check: Ensure persistent tray host is running
+    if !tray::is_tray_running() {
+        tray::spawn_tray_host_detached();
+    }
+
     let state = Arc::new(Mutex::new(ProviderState::new()));
 
-    // 2. Query WidgetManager to recover any widgets already pinned to the user's board
+    // 3. Query WidgetManager to recover any widgets already pinned to the user's board
     if let Ok(manager) = WidgetManager::GetDefault()
         && let Ok(infos) = manager.GetWidgetInfos()
     {
@@ -114,11 +136,11 @@ fn main() -> windows_core::Result<()> {
         };
     }
 
-    // 3. Spin up the background telemetry worker thread
+    // 4. Spin up the background telemetry worker thread
     let provider_helper = NetFlowWidgetProvider::new(Arc::clone(&state));
     provider_helper.ensure_worker();
 
-    // 4. Register the COM Class Factory with OLE so Windows can activate the widget provider
+    // 5. Register the COM Class Factory with OLE so Windows can activate the widget provider
     let factory = NetFlowClassFactory::new(Arc::clone(&state));
     let factory_unk: IUnknown = factory.into();
     let mut registration_cookie: u32 = 0;
@@ -134,17 +156,12 @@ fn main() -> windows_core::Result<()> {
         hr.ok()?;
     }
 
-    // 5. Keep the server running until signaled or until an idle timeout expires
+    // 6. Keep the server running until signaled or until an idle timeout expires
     let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = Arc::clone(&running);
     let _ = ctrlc_handler(move || {
         r.store(false, std::sync::atomic::Ordering::SeqCst);
     });
-
-    // Add the notification-area icon. It lives only while this process does, so it
-    // is torn down on idle shutdown below. Failure is non-fatal: the widget keeps
-    // running without a tray presence.
-    let tray = tray::TrayIcon::spawn(Arc::clone(&state), Arc::clone(&running));
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(500));
@@ -202,11 +219,7 @@ fn main() -> windows_core::Result<()> {
         }
     }
 
-    // 6. Stop background worker and release COM registration
-    if let Some(tray) = tray {
-        tray.destroy();
-    }
-
+    // 7. Stop background worker and release COM registration
     let worker = {
         let mut s = state.lock_safe();
         s.worker.take()

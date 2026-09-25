@@ -171,11 +171,26 @@ impl HistorySample {
 /// Persistent telemetry metrics saved across widget restarts and session resets.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
+    #[serde(default = "default_session_generation")]
+    pub generation: u64,
+    #[serde(alias = "download_bytes")]
     pub session_rx: u64,
+    #[serde(alias = "upload_bytes")]
     pub session_tx: u64,
+    #[serde(alias = "started_at")]
     pub session_start_unix: u64,
+    #[serde(default)]
     pub all_time_peak_rx: f64,
+    #[serde(default)]
     pub all_time_peak_tx: f64,
+    #[serde(default)]
+    pub updated_at_unix: u64,
+    #[serde(default)]
+    pub latency: LatencySnapshot,
+}
+
+const fn default_session_generation() -> u64 {
+    1
 }
 
 impl Default for SessionState {
@@ -185,11 +200,14 @@ impl Default for SessionState {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         Self {
+            generation: 1,
             session_rx: 0,
             session_tx: 0,
             session_start_unix: now_unix,
             all_time_peak_rx: 0.0,
             all_time_peak_tx: 0.0,
+            updated_at_unix: now_unix,
+            latency: LatencySnapshot::default(),
         }
     }
 }
@@ -216,13 +234,67 @@ pub fn load_persisted_session_state() -> SessionState {
     SessionState::default()
 }
 
+/// Atomically writes content to the target file by first writing to a process-unique temporary
+/// file in the same directory, syncing to disk, and renaming over the target path with retry backoff.
+pub fn write_atomic(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| "atomic".into());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(
+        "{}.tmp.{}.{}",
+        file_name,
+        std::process::id(),
+        nanos
+    ));
+
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(content)?;
+        file.flush()?;
+        file.sync_all()?;
+    }
+
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match std::fs::rename(&tmp_path, path) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(5 * (attempt + 1) as u64));
+                }
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&tmp_path);
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::other("Failed to rename temporary file atomically")))
+}
+
 pub fn save_persisted_session_state(state: &SessionState) {
     let path = get_session_state_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let mut updated = *state;
+    if updated.updated_at_unix == 0 {
+        updated.updated_at_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
     }
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(&path, json);
+    if let Ok(json) = serde_json::to_string_pretty(&updated) {
+        let _ = write_atomic(&path, json.as_bytes());
     }
 }
 
@@ -484,9 +556,142 @@ impl RollingRateWindow {
     }
 }
 
+/// User-configurable mode selecting the target endpoint for network latency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LatencyTargetMode {
+    /// Probe public internet (1.1.1.1) when route is available; fallback to Gateway.
+    #[default]
+    Auto,
+    /// Probe public internet resolver (1.1.1.1).
+    Internet,
+    /// Probe local network default gateway / router on LAN.
+    Gateway,
+}
+
+impl LatencyTargetMode {
+    pub fn to_str_value(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Internet => "internet",
+            Self::Gateway => "gateway",
+        }
+    }
+
+    pub fn from_str_value(s: &str) -> Self {
+        match s {
+            "internet" => Self::Internet,
+            "gateway" => Self::Gateway,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Internet => "Internet",
+            Self::Gateway => "Gateway",
+        }
+    }
+}
+
+/// Target endpoint being probed for network round-trip latency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LatencyTarget {
+    /// Local default gateway / router on the LAN.
+    #[default]
+    Gateway,
+    /// Public internet resolver probe (e.g. 1.1.1.1).
+    Internet,
+}
+
+impl LatencyTarget {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Gateway => "Gateway",
+            Self::Internet => "Internet",
+        }
+    }
+}
+
+/// Operational state of network latency telemetry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LatencyState {
+    /// Ping not yet sampled, disabled, or no adapter is connected.
+    #[default]
+    Unavailable,
+    /// Successfully received ICMP echo reply within timeout.
+    Healthy,
+    /// ICMP echo request timed out without response.
+    Timeout,
+}
+
+/// Point-in-time network round-trip latency measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatencySnapshot {
+    /// Round-trip time in milliseconds if Healthy.
+    pub latency_ms: Option<u32>,
+    /// State of the probe.
+    pub state: LatencyState,
+    /// Whether measuring LAN gateway or public internet.
+    pub target: LatencyTarget,
+    /// Monotonically increasing sequence number.
+    pub sequence: u64,
+    /// Unix timestamp in seconds when the probe was completed.
+    pub sampled_at_unix: u64,
+}
+
+impl Default for LatencySnapshot {
+    fn default() -> Self {
+        Self {
+            latency_ms: None,
+            state: LatencyState::Unavailable,
+            target: LatencyTarget::Gateway,
+            sequence: 0,
+            sampled_at_unix: 0,
+        }
+    }
+}
+
+impl LatencySnapshot {
+    pub fn is_fresh(&self, now_unix: u64, max_age_secs: u64) -> bool {
+        self.sampled_at_unix > 0 && now_unix.saturating_sub(self.sampled_at_unix) <= max_age_secs
+    }
+
+    /// User-facing short string for header status pill: "18 ms", "Timeout", "-- ms".
+    pub fn display_text(&self) -> String {
+        match self.state {
+            LatencyState::Healthy => {
+                if let Some(ms) = self.latency_ms {
+                    format!("{} ms", ms)
+                } else {
+                    "-- ms".to_string()
+                }
+            }
+            LatencyState::Timeout => "Timeout".to_string(),
+            LatencyState::Unavailable => "-- ms".to_string(),
+        }
+    }
+
+    /// Detailed display string: "18 ms · Internet", "Timeout · Gateway", "-- ms".
+    pub fn detailed_display_text(&self) -> String {
+        match self.state {
+            LatencyState::Healthy => {
+                if let Some(ms) = self.latency_ms {
+                    format!("{} ms · {}", ms, self.target.label())
+                } else {
+                    format!("-- ms · {}", self.target.label())
+                }
+            }
+            LatencyState::Timeout => format!("Timeout · {}", self.target.label()),
+            LatencyState::Unavailable => "-- ms".to_string(),
+        }
+    }
+}
+
 /// Telemetry snapshot containing current rates, totals, active apps, and chart history.
 #[derive(Debug, Clone)]
 pub struct NetworkSnapshot {
+    pub generation: u64,
     /// 1-second rolling download speed in bytes/sec.
     pub rx_bps: f64,
     /// 1-second rolling upload speed in bytes/sec.
@@ -514,6 +719,7 @@ pub struct NetworkSnapshot {
     pub primary_name: String,
     pub active_apps: Vec<crate::process::ActiveAppInfo>,
     pub active_connections_count: usize,
+    pub latency: LatencySnapshot,
 }
 
 impl NetworkSnapshot {
@@ -542,6 +748,7 @@ impl NetworkSnapshot {
 impl Default for NetworkSnapshot {
     fn default() -> Self {
         Self {
+            generation: 1,
             rx_bps: 0.0,
             tx_bps: 0.0,
             rx_bps_500ms: 0,
@@ -563,6 +770,7 @@ impl Default for NetworkSnapshot {
             primary_name: "Network".to_string(),
             active_apps: Vec::new(),
             active_connections_count: 0,
+            latency: LatencySnapshot::default(),
         }
     }
 }
@@ -598,6 +806,10 @@ pub struct NetworkBackend {
     pub accumulator: RateAccumulator,
     /// Rolling 1-second window for smooth UI headline rates.
     pub rolling_window: RollingRateWindow,
+    /// Most recently probed network latency.
+    pub latency: LatencySnapshot,
+    /// Monotonically increasing session generation counter.
+    pub generation: u64,
 }
 
 impl Default for NetworkBackend {
@@ -633,6 +845,8 @@ impl NetworkBackend {
             cached_raw_apps: (Vec::new(), 0),
             accumulator: RateAccumulator::new(),
             rolling_window: RollingRateWindow::new(1_000_000_000),
+            latency: LatencySnapshot::default(),
+            generation: 1,
         }
     }
 
@@ -664,22 +878,36 @@ impl NetworkBackend {
             cached_raw_apps: (Vec::new(), 0),
             accumulator: RateAccumulator::new(),
             rolling_window: RollingRateWindow::new(1_000_000_000),
+            latency: persisted.latency,
+            generation: persisted.generation.max(1),
         }
+    }
+
+    pub fn set_latency(&mut self, latency: LatencySnapshot) {
+        self.latency = latency;
     }
 
     /// Flush session state to disk.
     pub fn persist_session(&self) {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         save_persisted_session_state(&SessionState {
+            generation: self.generation,
             session_rx: self.session_rx,
             session_tx: self.session_tx,
             session_start_unix: self.session_start_unix,
             all_time_peak_rx: self.peak_rx,
             all_time_peak_tx: self.peak_tx,
+            updated_at_unix: now_unix,
+            latency: self.latency,
         });
     }
 
-    /// Reset session: re-anchor all baselines, clear totals and history.
+    /// Reset session: increment generation, re-anchor all baselines, clear totals and history.
     pub fn reset_session(&mut self) {
+        self.generation = self.generation.saturating_add(1);
         self.prev_counters.clear();
         self.prev_time = None;
         self.peak_rx = 0.0;
@@ -700,12 +928,57 @@ impl NetworkBackend {
         self.last_process_sample = None;
         self.cached_raw_apps = (Vec::new(), 0);
         save_persisted_session_state(&SessionState {
+            generation: self.generation,
             session_rx: 0,
             session_tx: 0,
             session_start_unix: now_unix,
             all_time_peak_rx: 0.0,
             all_time_peak_tx: 0.0,
+            updated_at_unix: now_unix,
+            latency: self.latency,
         });
+    }
+
+    /// Synchronizes in-memory session totals and latency against authoritative persisted state.
+    ///
+    /// If another process (like the persistent Tray Host) incremented the session generation,
+    /// local accumulators and history are reset immediately. Returns `true` if a generation
+    /// change was detected.
+    pub fn sync_from_persisted_session(&mut self) -> bool {
+        let persisted = load_persisted_session_state();
+        let generation_changed = persisted.generation != self.generation;
+        if generation_changed {
+            self.generation = persisted.generation;
+            self.session_rx = persisted.session_rx;
+            self.session_tx = persisted.session_tx;
+            self.session_start_unix = persisted.session_start_unix;
+            self.history.clear();
+            self.chart_peak_rx = 0;
+            self.chart_peak_tx = 0;
+            self.accumulator.reset();
+            self.rolling_window.reset();
+            self.process_tracker.reset();
+            self.last_process_sample = None;
+            self.cached_raw_apps = (Vec::new(), 0);
+        } else {
+            if persisted.session_rx > self.session_rx {
+                self.session_rx = persisted.session_rx;
+            }
+            if persisted.session_tx > self.session_tx {
+                self.session_tx = persisted.session_tx;
+            }
+            if persisted.session_start_unix != 0 {
+                self.session_start_unix = persisted.session_start_unix;
+            }
+        }
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if persisted.latency.is_fresh(now_unix, 10) {
+            self.latency = persisted.latency;
+        }
+        generation_changed
     }
 
     /// Primary sampling method: queries IP Helper APIs, computes rates, updates state.
@@ -938,6 +1211,7 @@ impl NetworkBackend {
         let session_duration_secs = now_unix.saturating_sub(self.session_start_unix);
 
         NetworkSnapshot {
+            generation: self.generation,
             rx_bps,
             tx_bps,
             rx_bps_500ms,
@@ -959,6 +1233,7 @@ impl NetworkBackend {
             primary_name,
             active_apps: Vec::new(),
             active_connections_count: 0,
+            latency: self.latency,
         }
     }
 }
@@ -1291,6 +1566,206 @@ pub fn query_interfaces() -> Result<Vec<InterfaceInfo>, String> {
     }
 
     Ok(interfaces)
+}
+
+/// Query the active default IPv4 gateway address.
+///
+/// Uses Windows `GetBestRoute2` towards public internet (`1.1.1.1`) to determine
+/// the exact next-hop gateway Windows uses on the active network route.
+/// Falls back to scanning default route entries (`0.0.0.0/0`) via `GetIpForwardTable2`.
+pub fn query_ipv4_gateway_address(interface_luid: Option<u64>) -> Option<std::net::Ipv4Addr> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetBestRoute2, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+    };
+    use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+    use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_INET};
+
+    unsafe {
+        // Destination address: 1.1.1.1 (public internet probe route)
+        let mut dest: SOCKADDR_INET = std::mem::zeroed();
+        dest.si_family = AF_INET;
+        dest.Ipv4.sin_family = AF_INET;
+        dest.Ipv4.sin_addr.S_un.S_addr = u32::from_ne_bytes([1, 1, 1, 1]);
+
+        let mut best_route: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
+        let mut best_source: SOCKADDR_INET = std::mem::zeroed();
+
+        let luid_val = interface_luid.map(|l| NET_LUID_LH { Value: l });
+        let luid_ptr = luid_val.as_ref().map(|l| l as *const _);
+
+        let status = GetBestRoute2(
+            luid_ptr,
+            0,
+            None,
+            &dest,
+            0,
+            &mut best_route,
+            &mut best_source,
+        );
+
+        if status.0 == 0 && best_route.NextHop.si_family == AF_INET {
+            let s_addr = best_route.NextHop.Ipv4.sin_addr.S_un.S_addr;
+            if s_addr != 0 {
+                return Some(std::net::Ipv4Addr::from(s_addr.to_ne_bytes()));
+            }
+        }
+
+        // Fallback: enumerate IPv4 forwarding table for default 0.0.0.0/0 route
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        if GetIpForwardTable2(AF_INET, &mut table).0 == 0 && !table.is_null() {
+            let entries = (*table).NumEntries as usize;
+            let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), entries);
+            let mut best_gateway = None;
+            let mut lowest_metric = u32::MAX;
+
+            for row in rows {
+                if let Some(target_luid) = interface_luid
+                    && row.InterfaceLuid.Value != target_luid
+                {
+                    continue;
+                }
+                if row.DestinationPrefix.PrefixLength == 0 && row.NextHop.si_family == AF_INET {
+                    let gw = row.NextHop.Ipv4.sin_addr.S_un.S_addr;
+                    if gw != 0 && row.Metric < lowest_metric {
+                        lowest_metric = row.Metric;
+                        best_gateway = Some(std::net::Ipv4Addr::from(gw.to_ne_bytes()));
+                    }
+                }
+            }
+
+            FreeMibTable(table as *const core::ffi::c_void);
+            if best_gateway.is_some() {
+                return best_gateway;
+            }
+        }
+    }
+
+    None
+}
+
+/// Probes round-trip latency to the given IPv4 target using asynchronous Win32 `IcmpSendEcho2`.
+///
+/// An event handle is supplied so `IcmpSendEcho2` operates asynchronously. The calling latency
+/// worker thread waits on the event with `WaitForSingleObject` up to `timeout_ms`.
+pub fn probe_latency_ipv4(
+    target_ip: std::net::Ipv4Addr,
+    timeout_ms: u32,
+) -> Result<u32, LatencyState> {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2,
+    };
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+    unsafe {
+        let icmp_handle = match IcmpCreateFile() {
+            Ok(h) if !h.is_invalid() => h,
+            _ => return Err(LatencyState::Unavailable),
+        };
+
+        let event = match CreateEventW(None, false, false, None) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = IcmpCloseHandle(icmp_handle);
+                return Err(LatencyState::Unavailable);
+            }
+        };
+
+        // Reply buffer needs space for ICMP_ECHO_REPLY + data payload + padding
+        let reply_buf_len = size_of::<ICMP_ECHO_REPLY>() + 64;
+        let mut reply_buf = vec![0u8; reply_buf_len];
+        let send_data = *b"NetFlow";
+        let dest_addr = u32::from_ne_bytes(target_ip.octets());
+
+        let _ = IcmpSendEcho2(
+            icmp_handle,
+            Some(event),
+            None,
+            None,
+            dest_addr,
+            send_data.as_ptr() as *const _,
+            send_data.len() as u16,
+            None,
+            reply_buf.as_mut_ptr() as *mut _,
+            reply_buf_len as u32,
+            timeout_ms,
+        );
+
+        let wait_result = WaitForSingleObject(event, timeout_ms);
+        let _ = CloseHandle(event);
+
+        if wait_result == WAIT_OBJECT_0 {
+            let parse_count =
+                IcmpParseReplies(reply_buf.as_mut_ptr() as *mut _, reply_buf_len as u32);
+            let _ = IcmpCloseHandle(icmp_handle);
+
+            if parse_count > 0 {
+                let reply = &*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY);
+                if reply.Status == 0 {
+                    Ok(reply.RoundTripTime)
+                } else {
+                    Err(LatencyState::Timeout)
+                }
+            } else {
+                Err(LatencyState::Timeout)
+            }
+        } else if wait_result == WAIT_TIMEOUT {
+            let _ = IcmpCloseHandle(icmp_handle);
+            Err(LatencyState::Timeout)
+        } else {
+            let _ = IcmpCloseHandle(icmp_handle);
+            Err(LatencyState::Unavailable)
+        }
+    }
+}
+
+/// Convenience method that resolves the active probe target according to `LatencyTargetMode`
+/// and queries the IPv4 round-trip latency, returning a complete `LatencySnapshot`.
+pub fn sample_latency_snapshot(
+    mode: LatencyTargetMode,
+    sequence: u64,
+    timeout_ms: u32,
+) -> LatencySnapshot {
+    let gateway = query_ipv4_gateway_address(None);
+    let (target, ip) = match mode {
+        LatencyTargetMode::Internet => (LatencyTarget::Internet, std::net::Ipv4Addr::new(1, 1, 1, 1)),
+        LatencyTargetMode::Gateway => {
+            if let Some(gw) = gateway {
+                (LatencyTarget::Gateway, gw)
+            } else {
+                (LatencyTarget::Gateway, std::net::Ipv4Addr::new(1, 1, 1, 1))
+            }
+        }
+        LatencyTargetMode::Auto => {
+            if gateway.is_some() {
+                (LatencyTarget::Internet, std::net::Ipv4Addr::new(1, 1, 1, 1))
+            } else {
+                (LatencyTarget::Gateway, std::net::Ipv4Addr::new(1, 1, 1, 1))
+            }
+        }
+    };
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    match probe_latency_ipv4(ip, timeout_ms) {
+        Ok(ms) => LatencySnapshot {
+            latency_ms: Some(ms),
+            state: LatencyState::Healthy,
+            target,
+            sequence,
+            sampled_at_unix: now_unix,
+        },
+        Err(state) => LatencySnapshot {
+            latency_ms: None,
+            state,
+            target,
+            sequence,
+            sampled_at_unix: now_unix,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1989,15 +2464,31 @@ mod tests {
     #[test]
     fn test_session_state_serde_roundtrip() {
         let state = SessionState {
+            generation: 1,
             session_rx: 1234567,
             session_tx: 987654,
             session_start_unix: 1700000000,
             all_time_peak_rx: 4500000.0,
             all_time_peak_tx: 1200000.0,
+            updated_at_unix: 1700000500,
+            latency: LatencySnapshot::default(),
         };
         let serialized = serde_json::to_string(&state).expect("serialize");
         let deserialized: SessionState = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(state, deserialized);
+
+        // Verify backward-compatible aliases
+        let json_with_aliases = r#"{
+            "generation": 42,
+            "download_bytes": 1000,
+            "upload_bytes": 2000,
+            "started_at": 1700000000
+        }"#;
+        let from_aliases: SessionState = serde_json::from_str(json_with_aliases).expect("deserialize aliases");
+        assert_eq!(from_aliases.generation, 42);
+        assert_eq!(from_aliases.session_rx, 1000);
+        assert_eq!(from_aliases.session_tx, 2000);
+        assert_eq!(from_aliases.session_start_unix, 1700000000);
     }
     #[test]
     fn test_incremental_chart_peak_tracking() {
@@ -2131,5 +2622,63 @@ mod tests {
         backend.reset_session();
         assert_eq!(backend.chart_peak_rx, 0);
         assert_eq!(backend.chart_peak_tx, 0);
+    }
+
+    #[test]
+    fn test_atomic_write_simulation() {
+        let dir = std::env::temp_dir().join(format!("netflow_test_atomic_{}", std::process::id()));
+        let file_path = dir.join("nested").join("test_atomic.json");
+
+        // 1. Initial write creates directories and writes content
+        let initial_payload = b"{\"generation\": 1, \"data\": \"init\"}";
+        write_atomic(&file_path, initial_payload).expect("initial write should succeed");
+        assert_eq!(std::fs::read(&file_path).unwrap(), initial_payload);
+
+        // 2. Overwrite replaces content atomically
+        let updated_payload = b"{\"generation\": 2, \"data\": \"updated\"}";
+        write_atomic(&file_path, updated_payload).expect("replacement should succeed");
+        assert_eq!(std::fs::read(&file_path).unwrap(), updated_payload);
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_session_state_generation_increments() {
+        let mut backend = NetworkBackend::new();
+        assert_eq!(backend.generation, 1);
+        backend.reset_session();
+        assert_eq!(backend.generation, 2);
+        backend.reset_session();
+        assert_eq!(backend.generation, 3);
+    }
+
+    #[test]
+    fn test_latency_snapshot_semantics_and_formatting() {
+        let healthy = LatencySnapshot {
+            latency_ms: Some(18),
+            state: LatencyState::Healthy,
+            target: LatencyTarget::Internet,
+            sequence: 1,
+            sampled_at_unix: 1700000000,
+        };
+        assert_eq!(healthy.display_text(), "18 ms");
+        assert_eq!(healthy.detailed_display_text(), "18 ms · Internet");
+        assert!(healthy.is_fresh(1700000005, 10));
+        assert!(!healthy.is_fresh(1700000020, 10));
+
+        let timeout = LatencySnapshot {
+            latency_ms: None,
+            state: LatencyState::Timeout,
+            target: LatencyTarget::Gateway,
+            sequence: 2,
+            sampled_at_unix: 1700000002,
+        };
+        assert_eq!(timeout.display_text(), "Timeout");
+        assert_eq!(timeout.detailed_display_text(), "Timeout · Gateway");
+
+        let unavailable = LatencySnapshot::default();
+        assert_eq!(unavailable.display_text(), "-- ms");
+        assert_eq!(unavailable.detailed_display_text(), "-- ms");
     }
 }

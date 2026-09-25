@@ -542,6 +542,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     let alert_prefs = new_config.alerts.clone();
                     *state.alert_config.lock_safe() = alert_prefs.clone();
                     save_alert_config(&alert_prefs);
+                    net_flow_core::card::save_user_config(&new_config);
                     state.ui_dirty.store(true, Ordering::SeqCst);
                     if let Some(worker) = &state.worker {
                         worker.shutdown.1.notify_all();
@@ -659,6 +660,7 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                         found = true;
                     }
                     if found {
+                        crate::tray::signal_reset_session_event();
                         let mut backend = state.backend.lock_safe();
                         backend.reset_session();
                         let s = backend.sample().unwrap_or_default();
@@ -1267,17 +1269,48 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         }
     };
 
+    // Latency probe endpoint target mode: auto, internet, or gateway.
+    let latency_target = parsed
+        .get("latency_target")
+        .and_then(|v| v.as_str())
+        .map(net_flow_core::backend::LatencyTargetMode::from_str_value)
+        .unwrap_or(current_config.latency_target);
+
     // Alert preferences are mirrored into the global engine when settings are saved.
     let mut alerts = current_config.alerts.clone();
-    if let Some(enabled) = parse_bool_field(parsed.get("alerts_enabled")) {
-        alerts.enabled = enabled;
+
+    // Independent download alert fields (with legacy fallback)
+    if let Some(dl_enabled) = parse_bool_field(parsed.get("alerts_download_enabled")) {
+        alerts.download_enabled = dl_enabled;
+        alerts.enabled = dl_enabled;
+    } else if let Some(legacy_enabled) = parse_bool_field(parsed.get("alerts_enabled")) {
+        alerts.download_enabled = legacy_enabled;
+        alerts.enabled = legacy_enabled;
     }
-    if let Some(mbps) = parse_number_field(parsed.get("alert_threshold_mbps")) {
-        alerts.threshold_bps = (mbps.max(1) as u64) * 1024 * 1024;
+
+    if let Some(dl_mbps) = parse_number_field(parsed.get("alert_download_threshold_mbps")) {
+        alerts.threshold_bps = (dl_mbps.max(1) as u64) * 1024 * 1024;
+    } else if let Some(legacy_mbps) = parse_number_field(parsed.get("alert_threshold_mbps")) {
+        alerts.threshold_bps = (legacy_mbps.max(1) as u64) * 1024 * 1024;
     }
-    if let Some(secs) = parse_number_field(parsed.get("alert_sustain_secs")) {
-        alerts.sustain_secs = secs.max(1) as u32;
+
+    if let Some(dl_secs) = parse_number_field(parsed.get("alert_download_sustain_secs")) {
+        alerts.sustain_secs = dl_secs.max(1) as u32;
+    } else if let Some(legacy_secs) = parse_number_field(parsed.get("alert_sustain_secs")) {
+        alerts.sustain_secs = legacy_secs.max(1) as u32;
     }
+
+    // Independent upload alert fields
+    if let Some(ul_enabled) = parse_bool_field(parsed.get("alerts_upload_enabled")) {
+        alerts.upload_enabled = ul_enabled;
+    }
+    if let Some(ul_mbps) = parse_number_field(parsed.get("alert_upload_threshold_mbps")) {
+        alerts.upload_threshold_bps = Some((ul_mbps.max(1) as u64) * 1024 * 1024);
+    }
+    if let Some(ul_secs) = parse_number_field(parsed.get("alert_upload_sustain_secs")) {
+        alerts.upload_sustain_secs = Some(ul_secs.max(1) as u32);
+    }
+
     let alerts = alerts.normalized();
 
     WidgetConfig {
@@ -1289,6 +1322,7 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         graph_style,
         selected_adapter_luid,
         alerts,
+        latency_target,
     }
 }
 
@@ -1359,6 +1393,7 @@ fn worker_loop(
     let mut last_data_published_at = Instant::now();
     let mut last_generation_at = Instant::now();
     let mut last_persist = Instant::now();
+    let mut last_latency_probe = Instant::now() - Duration::from_secs(10);
     let mut alert_engine = BandwidthAlertEngine::default();
 
     loop {
@@ -1377,11 +1412,23 @@ fn worker_loop(
         _last_sampled_at = started;
         {
             let mut b = backend.lock_safe();
+            let gen_changed = b.sync_from_persisted_session();
+            if gen_changed {
+                ui_dirty.store(true, Ordering::SeqCst);
+            }
+
+            if !crate::is_tray_running() && last_latency_probe.elapsed() >= Duration::from_secs(2) {
+                let user_cfg = net_flow_core::load_user_config();
+                let snap = net_flow_core::sample_latency_snapshot(user_cfg.latency_target, 0, 1000);
+                b.set_latency(snap);
+                last_latency_probe = Instant::now();
+            }
+
             if let Ok(s) = b.sample() {
                 let mut snap_write = snapshot_ref.write_safe();
                 *snap_write = s;
             }
-            if last_persist.elapsed() >= persist_period {
+            if !crate::is_tray_running() && last_persist.elapsed() >= persist_period {
                 b.persist_session();
                 last_persist = Instant::now();
             }
@@ -1526,12 +1573,33 @@ mod tests {
         assert_eq!(unchanged.speed_unit, current.speed_unit);
         assert_eq!(unchanged.chart_window, current.chart_window);
 
-        // Valid update
-        let json_data = r#"{"speed_unit":"mb","chart_window":"60","apps_expanded":"true"}"#;
+        // Valid update with latency target and independent alerts
+        let json_data = r#"{
+            "speed_unit":"mb",
+            "chart_window":"60",
+            "apps_expanded":"true",
+            "latency_target":"internet",
+            "alerts_download_enabled":"true",
+            "alert_download_threshold_mbps":"25",
+            "alert_download_sustain_secs":"5",
+            "alerts_upload_enabled":"true",
+            "alert_upload_threshold_mbps":"10",
+            "alert_upload_sustain_secs":"7"
+        }"#;
         let updated = parse_settings_form(json_data, &current);
         assert_eq!(updated.speed_unit, SpeedUnit::Megabytes);
         assert_eq!(updated.chart_window, 60);
         assert!(updated.apps_expanded);
+        assert_eq!(
+            updated.latency_target,
+            net_flow_core::backend::LatencyTargetMode::Internet
+        );
+        assert!(updated.alerts.download_enabled);
+        assert_eq!(updated.alerts.download_threshold(), 25 * 1024 * 1024);
+        assert_eq!(updated.alerts.download_sustain(), 5);
+        assert!(updated.alerts.upload_enabled);
+        assert_eq!(updated.alerts.upload_threshold(), 10 * 1024 * 1024);
+        assert_eq!(updated.alerts.upload_sustain(), 7);
 
         // Invalid JSON retains current config
         let bad_json = "not a json string";

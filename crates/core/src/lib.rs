@@ -36,13 +36,15 @@ pub use alerts::{
 };
 pub use backend::{
     AggregateMode, HISTORY_CAPACITY, HistorySample, InterfaceCategory, InterfaceInfo,
-    InterfaceLuid, InterfaceSample, NetworkBackend, NetworkSnapshot, classify_interface,
-    compute_delta, query_interfaces,
+    InterfaceLuid, InterfaceSample, LatencySnapshot, LatencyState, LatencyTarget,
+    LatencyTargetMode, NetworkBackend, NetworkSnapshot, classify_interface, compute_delta,
+    probe_latency_ipv4, query_interfaces, query_ipv4_gateway_address, sample_latency_snapshot,
 };
 pub use card::{
     BURST_THRESHOLD_BPS, MODERATE_THRESHOLD_BPS, WidgetConfig, build_adaptive_card,
     build_adaptive_card_data, build_adaptive_card_data_string, build_adaptive_card_template,
     build_settings_card, build_settings_card_for_size, compute_adaptive_ui_interval,
+    get_user_config_path, load_user_config, save_user_config,
 };
 pub use chart::{
     GraphStyle, Palette, ResolvedTheme, ThemeMode, Track, detect_windows_light_theme,

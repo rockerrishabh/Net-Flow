@@ -206,7 +206,8 @@ pub enum GraphStyle {
     Area,
     /// Clean, minimalist spline stroke with glowing pulse dot and no area fill.
     Line,
-    /// Discrete vertical bandwidth bars per sample with rounded heads from baseline.
+    /// Continuous spline curve with bolder stroke and reduced-opacity gradient fill.
+    /// Visually distinct from Area with a thicker, more industrial aesthetic.
     Bar,
 }
 
@@ -685,7 +686,8 @@ fn draw_line_track(
     }
 }
 
-/// Renders discrete vertical bandwidth bars per sample without spline geometry.
+/// Renders a continuous spline curve with bolder stroke and reduced-opacity gradient fill.
+/// Visually distinct from Area style: thicker stroke, 60% fill opacity, industrial aesthetic.
 #[allow(clippy::too_many_arguments)]
 fn draw_bar_track(
     canvas: &mut Canvas,
@@ -695,41 +697,111 @@ fn draw_bar_track(
     span: f64,
     direction: f64,
     color: Rgba,
+    stroke: f64,
     idle_offset: f64,
-    supersample: u32,
 ) {
     let width = canvas.width;
-    let n = values.len();
-    if width == 0 || n == 0 || span <= 0.0 {
+    if width == 0 || values.len() < 2 || span <= 0.0 {
         return;
     }
+    let last_index = (values.len() - 1) as f64;
 
+    let x_factor = if width > 1 {
+        last_index / (width - 1) as f64
+    } else {
+        0.0
+    };
     let reachable = (span - idle_offset).max(0.0);
     let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-    let col_w = width as f64 / n as f64;
-    let gap = (supersample as f64 * 0.75).clamp(1.0, col_w * 0.35);
-    let bar_w = (col_w - gap).max(1.0);
 
-    for (i, &v) in values.iter().enumerate() {
+    // 60% of Area's fill alpha values for a bolder, more industrial look.
+    let fill_alpha_near: f32 = FILL_ALPHA_NEAR * 0.60;
+    let fill_alpha_far: f32 = FILL_ALPHA_FAR * 0.60;
+    // Thicker stroke for visual distinction from Area style.
+    let bold_stroke = stroke * 1.4;
+
+    for x in 0..width {
+        let t = x as f64 * x_factor;
+        let v = catmull_at(values, t);
         let norm = (v * inv_scale).clamp(0.0, 1.0);
-        let bar_h = idle_offset + norm * reachable;
-        let y = baseline_y + direction * bar_h;
+        let y = baseline_y + direction * (idle_offset + norm * reachable);
 
+        // Gradient area fill with reduced opacity.
         let (top, bottom) = if direction < 0.0 {
             (y, baseline_y)
         } else {
             (baseline_y, y)
         };
+        let reach = (y - baseline_y).abs().max(1e-6);
+        let inv_reach = 1.0 / reach;
+        let first = top.floor().max(0.0) as i64;
+        let last_row = (bottom.ceil() as i64 - 1).min(canvas.height as i64 - 1);
 
-        let x_start = (i as f64 * col_w).round() as u32;
-        let x_end = ((i as f64 * col_w + bar_w).round() as u32).min(width);
+        if first <= last_row && first >= 0 {
+            if first == last_row {
+                let coverage =
+                    (bottom.min((first + 1) as f64) - top.max(first as f64)).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    let nearness = (((first as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = fill_alpha_far
+                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
+                    canvas.blend(x, first as u32, color, (alpha / 255.0) * coverage as f32);
+                }
+            } else {
+                let first_cov = ((first + 1) as f64 - top).clamp(0.0, 1.0);
+                if first_cov > 0.0 {
+                    let nearness = (((first as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = fill_alpha_far
+                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
+                    canvas.blend(x, first as u32, color, (alpha / 255.0) * first_cov as f32);
+                }
 
-        let is_last = i == n - 1;
-        let base_alpha = if is_last { 0.95 } else { 0.82 };
+                for py in (first + 1)..last_row {
+                    let nearness = (((py as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = fill_alpha_far
+                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
+                    canvas.blend(x, py as u32, color, alpha / 255.0);
+                }
 
-        for x in x_start..x_end {
-            canvas.fill_span(x, top, bottom, color, base_alpha);
+                let last_cov = (bottom - last_row as f64).clamp(0.0, 1.0);
+                if last_cov > 0.0 {
+                    let nearness =
+                        (((last_row as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
+                    let alpha = fill_alpha_far
+                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
+                    canvas.blend(x, last_row as u32, color, (alpha / 255.0) * last_cov as f32);
+                }
+            }
         }
+
+        // Bold stroke centred on the curve.
+        let half = bold_stroke / 2.0;
+        canvas.fill_span(x, y - half, y + half, color, 1.0);
+    }
+
+    // Pulse indicator dot at leading edge.
+    if width > 0 {
+        let last_val = values.last().copied().unwrap_or(0.0);
+        let norm = if scale > 0.0 {
+            (last_val / scale).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let reachable = (span - idle_offset).max(0.0);
+        let dot_center_x = (width - 1) as f64;
+        let dot_center_y = baseline_y + direction * (idle_offset + norm * reachable);
+
+        let dot_radius = bold_stroke * 0.95;
+        let glow_radius = bold_stroke * 2.6;
+
+        draw_pulse_dot(
+            canvas,
+            dot_center_x,
+            dot_center_y,
+            dot_radius,
+            glow_radius,
+            color,
+        );
     }
 }
 
@@ -746,7 +818,7 @@ fn draw_track(
     stroke: f64,
     idle_offset: f64,
     style: GraphStyle,
-    supersample: u32,
+    _supersample: u32,
 ) {
     match style {
         GraphStyle::Area => {
@@ -784,8 +856,8 @@ fn draw_track(
                 span,
                 direction,
                 color,
+                stroke,
                 idle_offset,
-                supersample,
             );
         }
     }
@@ -1102,7 +1174,12 @@ pub fn png_to_data_uri(png_bytes: &[u8]) -> String {
     )
 }
 
-/// Smooths discrete sample jitter using a Gaussian filter while preserving the true peak value.
+/// Smooths discrete sample jitter using a Gaussian filter with local peak preservation.
+///
+/// Instead of the flawed global rescaling approach (which inflated all values uniformly
+/// to restore the maximum), this algorithm detects local peaks in the raw data and
+/// blends smoothed values back towards the raw values at those positions. This ensures
+/// true peaks are preserved without distorting neighboring samples.
 pub fn apply_fluid_wave_smoothing(raw_values: &[f64]) -> Vec<f64> {
     if raw_values.len() <= 2 {
         return raw_values.to_vec();
@@ -1133,13 +1210,38 @@ pub fn apply_fluid_wave_smoothing(raw_values: &[f64]) -> Vec<f64> {
         };
     }
 
-    // Restore the original peak so smoothing never understates a spike.
-    let original_max = raw_values.iter().cloned().fold(0.0f64, f64::max);
-    let smoothed_max = smoothed.iter().cloned().fold(0.0f64, f64::max);
-    if original_max > 0.0 && smoothed_max > 0.0 {
-        let scale = original_max / smoothed_max;
-        for v in &mut smoothed {
-            *v *= scale;
+    // Local peak preservation: detect peaks in the raw data and blend the smoothed
+    // value back towards the raw value at peak positions + immediate neighbors.
+    // A local peak is any sample >= both its neighbors (or at boundaries, >= the one neighbor).
+    for i in 0..n {
+        let raw = raw_values[i];
+        if raw <= 0.0 {
+            continue;
+        }
+
+        let left = if i > 0 { raw_values[i - 1] } else { 0.0 };
+        let right = if i + 1 < n { raw_values[i + 1] } else { 0.0 };
+
+        let is_peak = raw >= left && raw >= right && (raw > left || raw > right);
+        if is_peak {
+            // Fully restore the peak sample to its raw value.
+            smoothed[i] = raw;
+
+            // Partially restore immediate neighbors (50% blend towards raw) to
+            // prevent abrupt transitions into the smoothed curve.
+            if i > 0 && raw_values[i - 1] > 0.0 {
+                smoothed[i - 1] = smoothed[i - 1] * 0.5 + raw_values[i - 1] * 0.5;
+            }
+            if i + 1 < n && raw_values[i + 1] > 0.0 {
+                smoothed[i + 1] = smoothed[i + 1] * 0.5 + raw_values[i + 1] * 0.5;
+            }
+        }
+    }
+
+    // Clamp: smoothing must never produce negative values.
+    for v in &mut smoothed {
+        if *v < 0.0 {
+            *v = 0.0;
         }
     }
 

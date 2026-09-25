@@ -9,7 +9,7 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -33,19 +33,21 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 ## ✨ Highlights
 
 - **🪟 Native Windows 11 Widgets Board Integration**: First-class widget integration (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 support across **Small**, **Medium**, and **Large** card dimensions.
-- **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline and upload traffic below on a shared scale with glowing pulse nodes.
+- **⚡ Live Network Round-Trip Latency**: Real-time ICMP ping measurement using asynchronous Win32 `IcmpSendEcho2`, probing your active IPv4 default gateway or public internet (`1.1.1.1`) with semantic state detection (`18 ms`, `Timeout`, `-- ms`).
+- **🛡️ Persistent Background System Tray Host**: Decoupled notification-area host (`net-flow.exe --tray`) started automatically at login via Windows `<uap5:StartupTask>`, maintaining continuous telemetry and alert monitoring even when widgets are unpinned.
+- **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline and upload traffic below on a shared scale with glowing pulse nodes and peak-preserving Catmull-Rom smoothing.
 - **🌓 System Theme-Aware Palettes**: Automatic Windows Dark/Light mode tracking via `AppsUseLightTheme` registry integration, rendering vibrant dark palettes or high-contrast light palettes with in-card overrides.
 - **📊 3 Graph Rendering Styles**: Choose between smooth **Area** (Catmull-Rom spline fills), sleek **Line** (minimalist strokes), or discrete **Bar** (quantized histogram columns).
-- **🚀 Instant Auto-Start on Boot**: Native packaged Win32 `<uap5:StartupTask>` launches the widget seamlessly upon Windows login, with idle grace-period termination if unpinned.
+- **🚀 Instant Auto-Start on Boot**: Native packaged Win32 `<uap5:StartupTask>` launches the persistent host upon Windows login with zero configuration.
 - **🌊 50 KB/s Scale Floor & Headroom**: A vertical scale floor keeps sub-kilobyte background network noise proportional, while 18% vertical headroom cushions traffic spikes from card boundaries.
 - **⚡ Ultra-Low Resource Usage**: Uses native Windows `IP Helper` (`GetIfTable2`) APIs and asynchronous Rust for near-zero CPU (< 0.1%) and negligible RAM footprint (< 15 MB).
 - **🛜 Smart Active Adapter Detection**: Auto-detects the primary active network adapter with contextual badges (Wi-Fi with friendly SSID, Ethernet, Cellular, VPN).
 - **🔀 Multiple Adapter Support**: Tracks every active interface simultaneously, with an in-card adapter selector that drives headline metrics and a per-adapter breakdown on the Large card.
 - **📱 Per-App Bandwidth Attribution**: Tracks active applications consuming network bandwidth with compact rate formatting (`↓ 11.1 ↑ 9.1 KB/s (37)`) and generous 22-character name budgets.
-- **📊 Session Usage Tracking**: Monitors cumulative upload/download data transferred and active session duration with an inline **Reset** button.
-- **🔔 Bandwidth Usage Alerts**: Native Windows toast notifications fire only after traffic stays above a configurable threshold (MiB/s) for a sustained window, with a cooldown that prevents repeat spam.
-- **🖥️ System Tray Icon**: A notification-area icon with a live download/upload tooltip and a right-click menu (reset session, exit), present whenever the widget host is running.
-- **⚙️ In-Card Customization**: Configurable speed units, timeframe windows, theme modes, and graph styles directly inside the widget card.
+- **📊 Authoritative Session Usage Tracking**: Monitors cumulative upload/download data transferred and active session duration with atomic disk persistence and race-free multi-process synchronization.
+- **🔔 Asymmetric Bandwidth Usage Alerts**: Independent download and upload state machines fire Windows toasts only when sustained above independent thresholds, with rate-limiting cooldown timers.
+- **🖥️ System Tray Icon**: A rich notification-area icon with live transfer rate and latency tooltips, widgets board launcher, and session reset.
+- **⚙️ In-Card Customization**: Configurable speed units, timeframe windows, theme modes, graph styles, latency targets, and alert thresholds directly inside the widget card.
 
 ---
 
@@ -185,7 +187,7 @@ net-flow/
 
 ## 🧪 Testing & Verification
 
-Run all 98 workspace unit tests:
+Run all 102 workspace unit tests:
 
 ```powershell
 cargo test --workspace
@@ -209,7 +211,7 @@ cargo build --release --workspace
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 98 unit tests, and verifies MSIX layout packaging.
+1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 102 unit tests, and verifies MSIX layout packaging.
 2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.1`) or manual workflow dispatch. Builds the optimized binary, packages both public sideload MSIX and Microsoft Store MSIX, generates SHA256 checksums, extracts sanitized release notes from `CHANGELOG.md`, publishes the **GitHub Release**, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** via Partner Center.
 
 ---
