@@ -239,22 +239,12 @@ jobs:
           name: store-build-assets
           path: target/store_input
 
-      - name: Locate Build Assets
-        if: steps.check_creds.outputs.CONFIGURED == 'true'
-        id: locate_assets
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem "target/store_input" -Recurse -Filter "net-flow.exe" | Select-Object -First 1
-          if (-not $exe) { throw "net-flow.exe not found in downloaded build assets (target/store_input)!" }
-          Write-Host "Found net-flow.exe at: $($exe.FullName)"
-          echo "EXE_PATH=$($exe.FullName)" >> $env:GITHUB_OUTPUT
-
       - name: Prepare Store Manifest
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         uses: ./.github/actions/prepare-manifest
         with:
           layout-dir: target/msix_store
-          exe-path: ${{ steps.locate_assets.outputs.EXE_PATH }}
+          exe-path: target/store_input/release/net-flow.exe
           version: ${{ needs.release.outputs.version }}
           package-identity-name: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
           publisher-id: ${{ secrets.STORE_PUBLISHER_ID }}
