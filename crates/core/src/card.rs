@@ -1915,7 +1915,7 @@ pub fn build_settings_card_for_size(
             "id": "alert_download_threshold_mbps",
             "min": 1,
             "max": 100000,
-            "value": ((current_config.alerts.download_threshold() / 1024 / 1024).max(1)).to_string(),
+            "value": (current_config.alerts.download_threshold() / 1024 / 1024).max(1),
             "placeholder": "DL Threshold (MiB/s)"
         }));
         body.push(json!({
@@ -1923,7 +1923,7 @@ pub fn build_settings_card_for_size(
             "id": "alert_download_sustain_secs",
             "min": 1,
             "max": 3600,
-            "value": current_config.alerts.download_sustain().to_string(),
+            "value": current_config.alerts.download_sustain(),
             "placeholder": "DL Sustain seconds"
         }));
 
@@ -1948,7 +1948,7 @@ pub fn build_settings_card_for_size(
             "id": "alert_upload_threshold_mbps",
             "min": 1,
             "max": 100000,
-            "value": ((current_config.alerts.upload_threshold() / 1024 / 1024).max(1)).to_string(),
+            "value": (current_config.alerts.upload_threshold() / 1024 / 1024).max(1),
             "placeholder": "UL Threshold (MiB/s)"
         }));
         body.push(json!({
@@ -1956,7 +1956,7 @@ pub fn build_settings_card_for_size(
             "id": "alert_upload_sustain_secs",
             "min": 1,
             "max": 3600,
-            "value": current_config.alerts.upload_sustain().to_string(),
+            "value": current_config.alerts.upload_sustain(),
             "placeholder": "UL Sustain seconds"
         }));
     } else {
@@ -2114,12 +2114,12 @@ pub fn build_settings_card_for_size(
             "columns": [
                 { "type": "Column", "width": "stretch", "items": [{
                     "type": "Input.Number", "id": "alert_download_threshold_mbps", "min": 1, "max": 100000,
-                    "value": ((current_config.alerts.download_threshold() / 1024 / 1024).max(1)).to_string(),
+                    "value": (current_config.alerts.download_threshold() / 1024 / 1024).max(1),
                     "placeholder": "DL MiB/s"
                 }] },
                 { "type": "Column", "width": "stretch", "items": [{
                     "type": "Input.Number", "id": "alert_download_sustain_secs", "min": 1, "max": 3600,
-                    "value": current_config.alerts.download_sustain().to_string(),
+                    "value": current_config.alerts.download_sustain(),
                     "placeholder": "DL Seconds"
                 }] }
             ]
@@ -2139,37 +2139,18 @@ pub fn build_settings_card_for_size(
             "columns": [
                 { "type": "Column", "width": "stretch", "items": [{
                     "type": "Input.Number", "id": "alert_upload_threshold_mbps", "min": 1, "max": 100000,
-                    "value": ((current_config.alerts.upload_threshold() / 1024 / 1024).max(1)).to_string(),
+                    "value": (current_config.alerts.upload_threshold() / 1024 / 1024).max(1),
                     "placeholder": "UL MiB/s"
                 }] },
                 { "type": "Column", "width": "stretch", "items": [{
                     "type": "Input.Number", "id": "alert_upload_sustain_secs", "min": 1, "max": 3600,
-                    "value": current_config.alerts.upload_sustain().to_string(),
+                    "value": current_config.alerts.upload_sustain(),
                     "placeholder": "UL Seconds"
                 }] }
             ]
         }));
 
-        // Row 4: Active apps section
-        body.push(json!({
-            "type": "TextBlock",
-            "text": "Active apps",
-            "weight": "Bolder",
-            "size": "Small",
-            "spacing": "Medium",
-            "wrap": false
-        }));
-        body.push(json!({
-            "type": "Input.Toggle",
-            "id": "apps_expanded",
-            "spacing": "Small",
-            "title": "Expand apps",
-            "value": if current_config.apps_expanded { "true" } else { "false" },
-            "valueOn": "true",
-            "valueOff": "false"
-        }));
-
-        // Row 4: Compact left-aligned Reset session button
+        // Row 5: Compact left-aligned Reset session button
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Medium",
@@ -2478,7 +2459,7 @@ mod tests {
         for verb in ["save_settings", "reset_session", "cancel_settings"] {
             assert!(json_str.contains(verb));
         }
-        assert!(json_str.contains("\"id\":\"apps_expanded\""));
+        assert!(!json_str.contains("apps_expanded"));
     }
 
     #[test]
@@ -2510,11 +2491,49 @@ mod tests {
         );
         assert!(med_json.contains("speed_unit"));
         assert!(med_json.contains("chart_window"));
-        assert!(med_json.contains("apps_expanded"));
+        assert!(!med_json.contains("apps_expanded"));
         assert!(med_json.contains("save_settings"));
         assert!(med_json.contains("cancel_settings"));
         assert!(med_json.contains("reset_session"));
         assert!(med_json.contains("\"title\":\"Reset session\""));
+
+        let large_json = build_settings_card_for_size(
+            &WidgetConfig::default(),
+            "Large",
+            0,
+            &NetworkSnapshot::default(),
+        );
+        assert!(large_json.contains("speed_unit"));
+        assert!(large_json.contains("chart_window"));
+        assert!(!large_json.contains("apps_expanded"));
+
+        // Verify that Input.Number elements have numeric values, not string values
+        for json_str in [&small_json, &med_json, &large_json] {
+            let parsed: Value = serde_json::from_str(json_str).expect("Valid JSON");
+            assert_eq!(parsed["type"], "AdaptiveCard");
+            let mut queue = vec![parsed];
+            while let Some(node) = queue.pop() {
+                if let Some(t) = node.get("type").and_then(|v| v.as_str())
+                    && t == "Input.Number"
+                {
+                    let val = node.get("value").expect("Input.Number has value");
+                    assert!(
+                        val.is_number(),
+                        "Input.Number value must be a number, but got: {:?}",
+                        val
+                    );
+                }
+                if let Some(arr) = node.as_array() {
+                    for item in arr {
+                        queue.push(item.clone());
+                    }
+                } else if let Some(obj) = node.as_object() {
+                    for (_k, v) in obj {
+                        queue.push(v.clone());
+                    }
+                }
+            }
+        }
     }
 
     #[test]

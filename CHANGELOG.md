@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] - 2026-09-25
+
+### Changed
+
+- **Clean In-Card Settings Flyout**:
+  - Removed redundant "Active apps" toggle section from the settings card to optimize vertical layout and prevent content clipping in Windows Widget flyouts.
+  - Active apps drawer expansion remains directly accessible and interactive via the dedicated chevron button on the main widget card.
+
+### Fixed
+
+- **Adaptive Card Input Schema Compliance**:
+  - Corrected `Input.Number` default values to emit pure numeric primitives instead of serialized strings, adhering strictly to Adaptive Cards v1.6 specification.
+
+---
+
 ## [0.4.0] - 2026-09-25
 
 ### Added

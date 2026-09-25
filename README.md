@@ -9,7 +9,7 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)

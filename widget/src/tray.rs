@@ -1,6 +1,5 @@
 //! Dedicated persistent notification-area (system tray) host for Net Flow.
 //!
-//! Architecture (v0.4.0):
 //! - The persistent Tray Host process owns authoritative cumulative session telemetry,
 //!   independent bandwidth alert state machines, and the Win32 ICMP latency probe loop.
 //! - Runs as a single instance via named mutex `Global\NetFlow_Tray_Mutex` (with `Local\` fallback).
