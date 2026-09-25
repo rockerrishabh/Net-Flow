@@ -2644,8 +2644,13 @@ mod tests {
         );
     }
 
+    /// Validates that the major.minor version of Windows App SDK used in CI workflows
+    /// aligns with the `<PackageDependency Name="Microsoft.WindowsAppRuntime.X.Y">` declared
+    /// in `Package.appxmanifest`. Note that `MinVersion` in the manifest specifies the minimum
+    /// runtime MSIX framework build required (e.g. 7000.435.154.0 for 1.7.0 baseline) rather
+    /// than enforcing an exact patch-level lock against the build-time NuGet SDK.
     #[test]
-    fn wasdk_version_aligns_with_manifest_dependency() {
+    fn wasdk_major_minor_aligns_with_manifest_dependency() {
         let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../widget/Package.appxmanifest");
         let manifest_content =
@@ -2685,7 +2690,7 @@ mod tests {
 
         assert!(
             manifest_content.contains(&expected_dep),
-            "Package.appxmanifest dependency must align with CI WASDK_VERSION (expected {}, manifest {:?})",
+            "Package.appxmanifest dependency must align major.minor with CI WASDK_VERSION (expected {}, manifest {:?})",
             expected_dep,
             manifest_path
         );
