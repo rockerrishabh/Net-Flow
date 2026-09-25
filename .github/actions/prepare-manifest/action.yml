@@ -58,7 +58,19 @@ runs:
         if (Test-Path $env:LAYOUT_DIR) { Remove-Item $env:LAYOUT_DIR -Recurse -Force }
         New-Item -ItemType Directory -Force -Path $env:LAYOUT_DIR | Out-Null
 
-        Copy-Item $env:EXE_PATH $env:LAYOUT_DIR -Force
+        $resolvedExe = $env:EXE_PATH
+        if (-not (Test-Path $resolvedExe)) {
+          # Fallback: search recursively if path was nested or relative to subfolder
+          $leaf = Split-Path $resolvedExe -Leaf
+          $candidate = Get-ChildItem . -Recurse -Filter $leaf -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($candidate) {
+            Write-Host "Resolved binary via recursive search: $($candidate.FullName)"
+            $resolvedExe = $candidate.FullName
+          }
+        }
+        if (-not (Test-Path $resolvedExe)) { throw "Compiled binary not found at $env:EXE_PATH" }
+
+        Copy-Item $resolvedExe $env:LAYOUT_DIR -Force
 
         # Inject version and identity into manifest
         $manifestContent = Get-Content $env:MANIFEST_SOURCE -Raw
