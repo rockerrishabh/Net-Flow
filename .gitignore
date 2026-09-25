@@ -26,7 +26,6 @@ scripts/NetFlow.msix
 *.user
 *.userosscache
 *.sln.docstates
-.qoder/
 
 # OS & Logs
 *.log
