@@ -101,7 +101,7 @@ Net Flow is engineered from the ground up for zero distraction, extreme reliabil
 
 | Metric / Component         | Implementation                                                              | Impact                                                      |
 | :------------------------- | :-------------------------------------------------------------------------- | :---------------------------------------------------------- |
-| **Release Binary Size**    | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`)  | **1.24 MB** standalone executable                           |
+| **Release Binary Size**    | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`)  | **Compact standalone executable** (LTO stripped)            |
 | **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing                    | **< 0.1% CPU** during active monitoring                     |
 | **Idle CPU Overhead**      | Precomputed `OnceLock` idle chart cache bypassing rasterizer                | **0.024% of 1 core** (55x speedup; 120 µs idle bypass)      |
 | **Memory Footprint**       | Bounded ring buffers (240 samples) & in-memory rasterization                | **< 15 MB** working set                                     |
@@ -199,7 +199,7 @@ Run Clippy with strict zero-warnings enforcement:
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-Build the optimized release binary (1.24 MB):
+Build the optimized release binary:
 
 ```powershell
 cargo build --release --workspace
@@ -211,7 +211,7 @@ cargo build --release --workspace
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 102 unit tests, and verifies MSIX layout packaging.
+1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 103 unit tests, and verifies MSIX layout packaging.
 2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.1`) or manual workflow dispatch. Builds the optimized binary, packages both public sideload MSIX and Microsoft Store MSIX, generates SHA256 checksums, extracts sanitized release notes from `CHANGELOG.md`, publishes the **GitHub Release**, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** via Partner Center.
 
 ---
