@@ -1684,7 +1684,7 @@ pub fn build_settings_card_for_size(
     current_config: &WidgetConfig,
     size: &str,
     _session_duration_secs: u64,
-    snapshot: &NetworkSnapshot,
+    _snapshot: &NetworkSnapshot,
 ) -> String {
     let (cancel_w, save_w, save_spacing) = if size == "Small" {
         (48, 42, "Small")
@@ -1751,18 +1751,6 @@ pub fn build_settings_card_for_size(
 
     let mut body = vec![header];
 
-    let mut adapter_choices = vec![json!({ "title": "All active adapters", "value": "auto" })];
-    for iface in snapshot.per_interface.iter().take(16) {
-        adapter_choices.push(json!({
-            "title": format!("{} ({})", truncate_name(&iface.name, 28), iface.medium.label()),
-            "value": iface.luid.to_string()
-        }));
-    }
-    let adapter_value = current_config
-        .selected_adapter_luid
-        .map(|luid| luid.to_string())
-        .unwrap_or_else(|| "auto".to_string());
-
     if size == "Small" {
         // Small widget (~160px): 2 balanced rows of 2-column compact grids
         // Row 1: Units and History
@@ -1824,15 +1812,6 @@ pub fn build_settings_card_for_size(
                     ]
                 }
             ]
-        }));
-
-        body.push(json!({
-            "type": "Input.ChoiceSet",
-            "id": "adapter_luid",
-            "style": "compact",
-            "spacing": "Small",
-            "value": adapter_value,
-            "choices": adapter_choices
         }));
 
         // Row 2: Graph style and Latency target
@@ -2079,16 +2058,6 @@ pub fn build_settings_card_for_size(
                     ]
                 }
             ]
-        }));
-
-        // Row 3: Adapter selection
-        body.push(json!({
-            "type": "Input.ChoiceSet",
-            "id": "adapter_luid",
-            "style": "compact",
-            "spacing": "Medium",
-            "value": adapter_value,
-            "choices": adapter_choices
         }));
 
         // Row 4: Bandwidth alerts (independent Download & Upload)

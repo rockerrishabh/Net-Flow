@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.4.2] - 2026-09-25
+
+### Changed
+
+- **Streamlined Settings Flyout**:
+  - Removed the redundant "All active adapters" dropdown from in-card settings across all widget sizes. Net Flow now seamlessly and automatically monitors your active network interfaces without requiring manual adapter configuration.
 
 ---
 
