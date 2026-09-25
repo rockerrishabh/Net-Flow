@@ -137,7 +137,19 @@ jobs:
               $cleanedLines = @()
               foreach ($line in $lines) {
                 $trimmed = $line.Trim()
-                if ($trimmed -match '^###\s+' -or $trimmed -match '^[-*_]{3,}$' -or [string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                if ($trimmed -match '^[-*_]{3,}$' -or [string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                if ($trimmed -match '^###\s+(.*)$') {
+                  $secName = $matches[1].Trim()
+                  if ($cleanedLines.Count -gt 0) { $cleanedLines += "" }
+                  if ($secName -match '(?i)add|feat|change') {
+                    $cleanedLines += "[New & Improvements]"
+                  } elseif ($secName -match '(?i)fix') {
+                    $cleanedLines += "[Fixes & Stability]"
+                  } else {
+                    $cleanedLines += "[$secName]"
+                  }
+                  continue
+                }
                 $clean = $trimmed -replace '`', ''
                 if ($clean -match '^-\s+\*\*([^\*]+)\*\*:\s*(.*)$') {
                   $cleanedLines += if ($matches[2].Trim()) { "• $($matches[1].Trim()): $($matches[2].Trim())" } else { "• $($matches[1].Trim()):" }
@@ -160,6 +172,13 @@ jobs:
               [System.IO.File]::WriteAllText($notesPath, "# Net Flow v$semver`n", [System.Text.Encoding]::UTF8)
               [System.IO.File]::WriteAllText("target/STORE_RELEASE_NOTES.txt", "What's New in v${semver}:`n`n• Performance and reliability improvements for Net Flow on Windows 11.", [System.Text.Encoding]::UTF8)
             }
+          }
+
+          # Prepare Store Product Description from STORE_DESCRIPTION.md if present
+          if (Test-Path "STORE_DESCRIPTION.md") {
+            $descContent = (Get-Content "STORE_DESCRIPTION.md" -Raw).Trim()
+            [System.IO.File]::WriteAllText("target/STORE_DESCRIPTION.txt", $descContent, [System.Text.Encoding]::UTF8)
+            Write-Host "Generated target/STORE_DESCRIPTION.txt ($($descContent.Length) chars)"
           }
 
       - name: Generate Checksums
@@ -199,7 +218,8 @@ jobs:
             target/release/net-flow.exe
             target/layout/resources.pri
             target/STORE_RELEASE_NOTES.txt
-          if-no-files-found: error
+            target/STORE_DESCRIPTION.txt
+          if-no-files-found: warn
 
   publish-to-store:
     name: Submit to Microsoft Store
@@ -281,6 +301,20 @@ jobs:
             --clientId "$env:PARTNER_CENTER_CLIENT_ID" `
             --clientSecret "$env:PARTNER_CENTER_CLIENT_SECRET"
 
+          # Read Store description from build assets
+          $descCandidate = Get-ChildItem "target/store_input" -Recurse -Filter "STORE_DESCRIPTION.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $descFile = if ($descCandidate) {
+            $descCandidate.FullName
+          } elseif (Test-Path "STORE_DESCRIPTION.md") {
+            "STORE_DESCRIPTION.md"
+          } else {
+            ""
+          }
+          $storeDescription = if ($descFile -and (Test-Path $descFile)) { (Get-Content $descFile -Raw).Trim() } else { "" }
+          if ($storeDescription) {
+            Write-Host "Loaded $( $storeDescription.Length ) characters of Store description."
+          }
+
           # Read Store release notes from build assets
           $notesCandidate = Get-ChildItem "target/store_input" -Recurse -Filter "STORE_RELEASE_NOTES.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
           $notesFile = if ($notesCandidate) {
@@ -296,8 +330,8 @@ jobs:
           Write-Host "Uploading package as draft submission (noCommit) for Product ID $env:STORE_PRODUCT_ID..."
           msstore publish -v "target/NetFlow_Store.msix" --appId "$env:STORE_PRODUCT_ID" --noCommit
 
-          # Update submission metadata with What's New release notes
-          if ($storeNotes) {
+          # Update submission metadata with What's New release notes and Description
+          if ($storeNotes -or $storeDescription) {
             Write-Host "Fetching current submission metadata from Partner Center..."
             try {
               $subJsonRaw = msstore submission get "$env:STORE_PRODUCT_ID"
@@ -317,23 +351,35 @@ jobs:
                 foreach ($lang in $listingKeys) {
                   $listing = $subObj.listings.$lang
                   if ($listing.baseListing) {
-                    $listing.baseListing.releaseNotes = $storeNotes
-                    Write-Host "Updated releaseNotes for listing locale: $lang"
-                  } elseif ($listing.releaseNotes -ne $null) {
-                    $listing.releaseNotes = $storeNotes
-                    Write-Host "Updated releaseNotes for listing: $lang"
+                    if ($storeNotes) {
+                      $listing.baseListing.releaseNotes = $storeNotes
+                      Write-Host "Updated releaseNotes for listing locale: $lang"
+                    }
+                    if ($storeDescription) {
+                      $listing.baseListing.description = $storeDescription
+                      Write-Host "Updated description for listing locale: $lang"
+                    }
+                  } elseif ($listing.releaseNotes -ne $null -or $listing.description -ne $null) {
+                    if ($storeNotes -and $listing.releaseNotes -ne $null) {
+                      $listing.releaseNotes = $storeNotes
+                      Write-Host "Updated releaseNotes for listing: $lang"
+                    }
+                    if ($storeDescription -and $listing.description -ne $null) {
+                      $listing.description = $storeDescription
+                      Write-Host "Updated description for listing: $lang"
+                    }
                   }
                 }
 
                 $updatedPayload = $subObj | ConvertTo-Json -Depth 100 -Compress
-                Write-Host "Updating submission metadata with What's New notes..."
+                Write-Host "Updating submission metadata with Store description & What's New notes..."
                 msstore submission updateMetadata "$env:STORE_PRODUCT_ID" $updatedPayload
                 Write-Host "Submission metadata successfully updated!"
               } else {
-                Write-Warning "No listings property found in submission JSON. Skipping release notes update."
+                Write-Warning "No listings property found in submission JSON. Skipping metadata update."
               }
             } catch {
-              Write-Warning "Failed to update Store submission release notes metadata: $_"
+              Write-Warning "Failed to update Store submission metadata: $_"
               Write-Warning "Proceeding to commit package submission..."
             }
           }
