@@ -2645,6 +2645,64 @@ mod tests {
     }
 
     #[test]
+    fn wasdk_version_aligns_with_manifest_dependency() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../widget/Package.appxmanifest");
+        let manifest_content =
+            std::fs::read_to_string(&manifest_path).expect("Package.appxmanifest must be readable");
+
+        let ci_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml");
+        let ci_content =
+            std::fs::read_to_string(&ci_path).expect(".github/workflows/ci.yml must be readable");
+
+        // Extract WASDK_VERSION from CI: e.g. WASDK_VERSION: "1.7.250310001"
+        let wasdk_ver = ci_content
+            .lines()
+            .find_map(|l| {
+                let trimmed = l.trim();
+                if trimmed.starts_with("WASDK_VERSION:") {
+                    Some(
+                        trimmed
+                            .trim_start_matches("WASDK_VERSION:")
+                            .trim()
+                            .trim_matches('"'),
+                    )
+                } else {
+                    None
+                }
+            })
+            .expect("WASDK_VERSION must be defined in ci.yml");
+
+        // Extract major.minor: e.g. "1.7" from "1.7.250310001"
+        let parts: Vec<&str> = wasdk_ver.split('.').collect();
+        assert!(
+            parts.len() >= 2,
+            "WASDK_VERSION must be semver formatted: {}",
+            wasdk_ver
+        );
+        let expected_dep = format!("Microsoft.WindowsAppRuntime.{}.{}", parts[0], parts[1]);
+
+        assert!(
+            manifest_content.contains(&expected_dep),
+            "Package.appxmanifest dependency must align with CI WASDK_VERSION (expected {}, manifest {:?})",
+            expected_dep,
+            manifest_path
+        );
+
+        // Also ensure release.yml has the exact same WASDK_VERSION
+        let release_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github/workflows/release.yml");
+        let release_content = std::fs::read_to_string(&release_path)
+            .expect(".github/workflows/release.yml must be readable");
+        assert!(
+            release_content.contains(&format!("WASDK_VERSION: \"{}\"", wasdk_ver)),
+            "release.yml WASDK_VERSION must match ci.yml WASDK_VERSION ({})",
+            wasdk_ver
+        );
+    }
+
+    #[test]
     fn test_template_contains_expected_bindings() {
         for size in &["Small", "Medium", "Large"] {
             let tpl_str = build_adaptive_card_template(size);
