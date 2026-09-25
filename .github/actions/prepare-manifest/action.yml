@@ -1,0 +1,90 @@
+name: Prepare AppX Manifest
+description: Inject version, identity, and publisher info into the AppxManifest and generate the resources PRI file.
+
+inputs:
+  layout-dir:
+    description: Target directory for the prepared layout
+    required: true
+  manifest-source:
+    description: Path to the source Package.appxmanifest
+    required: false
+    default: widget/Package.appxmanifest
+  version:
+    description: Four-part version string (e.g. 0.4.0.0) to inject into the manifest
+    required: false
+    default: ""
+  package-identity-name:
+    description: Package identity name for the Store
+    required: false
+    default: ""
+  publisher-id:
+    description: Publisher identity (CN=...) for the Store
+    required: false
+    default: ""
+  publisher-display-name:
+    description: Publisher display name for the Store
+    required: false
+    default: ""
+  exe-path:
+    description: Path to the compiled net-flow.exe binary
+    required: true
+  assets-dir:
+    description: Path to the widget Assets directory
+    required: false
+    default: widget/Assets
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare Layout & Manifest
+      shell: pwsh
+      env:
+        LAYOUT_DIR: ${{ inputs.layout-dir }}
+        MANIFEST_SOURCE: ${{ inputs.manifest-source }}
+        TARGET_VERSION: ${{ inputs.version }}
+        STORE_PACKAGE_IDENTITY_NAME: ${{ inputs.package-identity-name }}
+        STORE_PUBLISHER_ID: ${{ inputs.publisher-id }}
+        STORE_PUBLISHER_DISPLAY_NAME: ${{ inputs.publisher-display-name }}
+        EXE_PATH: ${{ inputs.exe-path }}
+        ASSETS_DIR: ${{ inputs.assets-dir }}
+      run: |
+        $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+        $makepri = Join-Path $sdkBin "makepri.exe"
+        if (-not (Test-Path $makepri)) {
+          $makepri = (Get-Command makepri.exe -ErrorAction SilentlyContinue).Source
+        }
+        if (-not $makepri) { throw "makepri.exe not found!" }
+
+        if (Test-Path $env:LAYOUT_DIR) { Remove-Item $env:LAYOUT_DIR -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $env:LAYOUT_DIR | Out-Null
+
+        Copy-Item $env:EXE_PATH $env:LAYOUT_DIR -Force
+
+        # Inject version and identity into manifest
+        $manifestContent = Get-Content $env:MANIFEST_SOURCE -Raw
+        if ($env:TARGET_VERSION) {
+          $manifestContent = $manifestContent -creplace '(?<=<Identity\b[^>]*?\sVersion=")[0-9\.]+', $env:TARGET_VERSION
+        }
+        if ($env:STORE_PACKAGE_IDENTITY_NAME) {
+          $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sName=")[^"]+', $env:STORE_PACKAGE_IDENTITY_NAME
+        }
+        if ($env:STORE_PUBLISHER_ID) {
+          $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sPublisher=")[^"]+', $env:STORE_PUBLISHER_ID
+        }
+        if ($env:STORE_PUBLISHER_DISPLAY_NAME) {
+          $manifestContent = $manifestContent -replace '(?<=<PublisherDisplayName>)[^<]+', $env:STORE_PUBLISHER_DISPLAY_NAME
+        }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText("$env:LAYOUT_DIR/AppxManifest.xml", $manifestContent, $utf8NoBom)
+
+        if (Test-Path $env:ASSETS_DIR) {
+          Copy-Item $env:ASSETS_DIR "$env:LAYOUT_DIR/Assets" -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path "$env:LAYOUT_DIR/Public" | Out-Null
+
+        # Index resources with makepri
+        $priconfig = "$env:LAYOUT_DIR/priconfig.xml"
+        & $makepri createconfig /cf $priconfig /dq "en-US" /pv "10.0.0" /o | Out-Null
+        & $makepri new /pr $env:LAYOUT_DIR /cf $priconfig /of "$env:LAYOUT_DIR/resources.pri" /o | Out-Null
+        Remove-Item $priconfig -Force -ErrorAction SilentlyContinue
+        Write-Host "Prepared layout at $env:LAYOUT_DIR with manifest and resources.pri."

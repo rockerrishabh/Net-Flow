@@ -1,0 +1,45 @@
+name: Setup Windows App SDK WinMD
+description: Download and cache the Microsoft.Windows.Widgets WinMD from the Windows App SDK NuGet package.
+
+inputs:
+  wasdk-version:
+    description: Windows App SDK NuGet package version
+    required: true
+  winmd-dir:
+    description: Directory to store the WinMD file
+    required: false
+    default: widget/winmd
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Windows App SDK WinMD
+      uses: actions/cache@v6
+      with:
+        path: ${{ inputs.winmd-dir }}/
+        key: ${{ runner.os }}-wasdk-winmd-${{ inputs.wasdk-version }}
+
+    - name: Download Windows App SDK WinMD
+      shell: pwsh
+      env:
+        WASDK_VERSION: ${{ inputs.wasdk-version }}
+        WINMD_DIR: ${{ inputs.winmd-dir }}
+      run: |
+        if (-not (Test-Path "$env:WINMD_DIR/Microsoft.Windows.Widgets.winmd")) {
+          Write-Host "Downloading Microsoft.WindowsAppSDK $env:WASDK_VERSION..."
+          $tempNupkg = "$env:TEMP/wasdk.zip"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/$env:WASDK_VERSION/microsoft.windowsappsdk.$env:WASDK_VERSION.nupkg"
+          curl.exe -s -L $url -o $tempNupkg
+          $tempExtract = "$env:TEMP/wasdk_extracted"
+          New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
+          tar -xf $tempNupkg -C $tempExtract
+          $foundWinmd = Get-ChildItem $tempExtract -Recurse -Filter "Microsoft.Windows.Widgets.winmd" | Select-Object -First 1
+          if (-not $foundWinmd) { throw "WinMD not found in NuGet package!" }
+          New-Item -ItemType Directory -Force -Path $env:WINMD_DIR | Out-Null
+          Copy-Item $foundWinmd.FullName $env:WINMD_DIR -Force
+          Remove-Item $tempNupkg -Force -ErrorAction SilentlyContinue
+          Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Extracted WinMD to $env:WINMD_DIR"
+        } else {
+          Write-Host "WinMD already present."
+        }

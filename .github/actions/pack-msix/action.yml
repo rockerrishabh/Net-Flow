@@ -1,0 +1,30 @@
+name: Pack MSIX
+description: Pack a prepared layout directory into an MSIX package using makeappx.exe.
+
+inputs:
+  layout-dir:
+    description: Path to the layout directory to pack
+    required: true
+  output-path:
+    description: Output path for the .msix file
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Pack MSIX Package
+      shell: pwsh
+      env:
+        LAYOUT_DIR: ${{ inputs.layout-dir }}
+        OUTPUT_PATH: ${{ inputs.output-path }}
+      run: |
+        $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+        $makeappx = Join-Path $sdkBin "makeappx.exe"
+        if (-not (Test-Path $makeappx)) {
+          $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
+        }
+        if (-not $makeappx) { throw "makeappx.exe not found!" }
+
+        if (Test-Path $env:OUTPUT_PATH) { Remove-Item $env:OUTPUT_PATH -Force }
+        & $makeappx pack /d $env:LAYOUT_DIR /p $env:OUTPUT_PATH /o
+        Write-Host "Packed $env:OUTPUT_PATH successfully."

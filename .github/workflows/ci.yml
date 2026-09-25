@@ -3,20 +3,20 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   WASDK_VERSION: "1.7.250310001"
-  STORE_PACKAGE_IDENTITY_NAME: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
-  STORE_PUBLISHER_ID: ${{ secrets.STORE_PUBLISHER_ID }}
-  STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
 
 jobs:
-  test-and-build:
-    name: Test & Build
+  check:
+    name: Lint, Test & Build
     runs-on: windows-latest
 
     steps:
@@ -26,87 +26,19 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Cache Windows App SDK WinMD
-        uses: actions/cache@v6
+      - name: Setup Windows App SDK WinMD
+        uses: ./.github/actions/setup-winmd
         with:
-          path: widget/winmd/
-          key: ${{ runner.os }}-wasdk-winmd-${{ env.WASDK_VERSION }}
+          wasdk-version: ${{ env.WASDK_VERSION }}
 
-      - name: Download Windows App SDK WinMD
-        shell: pwsh
-        run: |
-          $winmdDir = "widget/winmd"
-          if (-not (Test-Path "$winmdDir/Microsoft.Windows.Widgets.winmd")) {
-            Write-Host "Downloading Microsoft.WindowsAppSDK $env:WASDK_VERSION..."
-            $tempNupkg = "$env:TEMP/wasdk.zip"
-            $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk/$env:WASDK_VERSION/microsoft.windowsappsdk.$env:WASDK_VERSION.nupkg"
-            curl.exe -s -L $url -o $tempNupkg
-            $tempExtract = "$env:TEMP/wasdk_extracted"
-            New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
-            tar -xf $tempNupkg -C $tempExtract
-            $foundWinmd = Get-ChildItem $tempExtract -Recurse -Filter "Microsoft.Windows.Widgets.winmd" | Select-Object -First 1
-            if (-not $foundWinmd) { throw "WinMD not found in NuGet package!" }
-            New-Item -ItemType Directory -Force -Path $winmdDir | Out-Null
-            Copy-Item $foundWinmd.FullName $winmdDir -Force
-            Remove-Item $tempNupkg -Force -ErrorAction SilentlyContinue
-            Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "Extracted WinMD to $winmdDir"
-          } else {
-            Write-Host "WinMD already present."
-          }
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Tests
         run: cargo test --workspace --verbose
 
-      - name: Build Release Binary
+      - name: Build Release Check
         run: cargo build --release --workspace
-
-      - name: Package MSIX
-        shell: pwsh
-        run: |
-          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
-          $makeappx = Join-Path $sdkBin "makeappx.exe"
-          if (-not (Test-Path $makeappx)) {
-            $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
-          }
-          if (-not $makeappx) { throw "makeappx.exe not found!" }
-
-          $layoutDir = "target/msix"
-          if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force }
-          New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
-
-          Copy-Item "target/release/net-flow.exe" $layoutDir -Force
-
-          # Dynamically inject secrets into manifest if configured, else keep valid repo defaults
-          $manifestContent = Get-Content "widget/Package.appxmanifest" -Raw
-          if ($env:STORE_PACKAGE_IDENTITY_NAME) {
-            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sName=")[^"]+', $env:STORE_PACKAGE_IDENTITY_NAME
-          }
-          if ($env:STORE_PUBLISHER_ID) {
-            $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sPublisher=")[^"]+', $env:STORE_PUBLISHER_ID
-          }
-          if ($env:STORE_PUBLISHER_DISPLAY_NAME) {
-            $manifestContent = $manifestContent -replace '(?<=<PublisherDisplayName>)[^<]+', $env:STORE_PUBLISHER_DISPLAY_NAME
-          }
-          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          [System.IO.File]::WriteAllText("$layoutDir/AppxManifest.xml", $manifestContent, $utf8NoBom)
-
-          if (Test-Path "widget/Assets") {
-            Copy-Item "widget/Assets" "$layoutDir/Assets" -Recurse -Force
-          }
-          New-Item -ItemType Directory -Force -Path "$layoutDir/Public" | Out-Null
-
-          # Index resources with makepri
-          $makepri = Join-Path $sdkBin "makepri.exe"
-          if (-not (Test-Path $makepri)) {
-            $makepri = (Get-Command makepri.exe -ErrorAction SilentlyContinue).Source
-          }
-          if ($makepri) {
-            $priconfig = "$layoutDir/priconfig.xml"
-            & $makepri createconfig /cf $priconfig /dq "en-US" /pv "10.0.0" /o | Out-Null
-            & $makepri new /pr $layoutDir /cf $priconfig /of "$layoutDir/resources.pri" /o | Out-Null
-            Remove-Item $priconfig -Force -ErrorAction SilentlyContinue
-          }
-
-          & $makeappx pack /d $layoutDir /p "target/NetFlow.msix" /o
-          Write-Host "Packaged target/NetFlow.msix successfully."
