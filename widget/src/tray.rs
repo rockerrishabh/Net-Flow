@@ -57,6 +57,8 @@ const TOOLTIP_TIMER_MS: u32 = 1000;
 const IDM_OPEN_WIDGETS: usize = 1000;
 const IDM_RESET_SESSION: usize = 1001;
 const IDM_EXIT: usize = 1002;
+const IDM_STARTUP_TOGGLE: usize = 1003;
+const IDM_LATENCY_TOGGLE: usize = 1004;
 
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_RBUTTONUP: u32 = 0x0205;
@@ -466,10 +468,73 @@ unsafe fn update_tooltip(hwnd: HWND) {
     }
 }
 
+fn get_startup_task_sync() -> Option<windows::ApplicationModel::StartupTask> {
+    let op = windows::ApplicationModel::StartupTask::GetAsync(&windows::core::HSTRING::from(
+        "NetFlowStartup",
+    ))
+    .ok()?;
+    for _ in 0..20 {
+        if let Ok(res) = op.GetResults() {
+            return Some(res);
+        }
+        if op.Status().is_ok_and(|s| s.0 != 0) {
+            return op.GetResults().ok();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    None
+}
+
+fn query_startup_state_str() -> &'static str {
+    match get_startup_task_sync().and_then(|t| t.State().ok()) {
+        Some(windows::ApplicationModel::StartupTaskState::Enabled) => "Enabled",
+        Some(_) => "Disabled",
+        None => "Unknown",
+    }
+}
+
+fn toggle_startup_task() {
+    std::thread::spawn(|| {
+        let Some(task) = get_startup_task_sync() else {
+            return;
+        };
+        let Ok(state) = task.State() else { return };
+        if state == windows::ApplicationModel::StartupTaskState::Enabled {
+            let _ = task.Disable();
+        } else if let Ok(enable_op) = task.RequestEnableAsync() {
+            for _ in 0..20 {
+                if enable_op.GetResults().is_ok() || enable_op.Status().is_ok_and(|s| s.0 != 0) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    });
+}
+
 unsafe fn show_menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
+
+        let startup_state_str = query_startup_state_str();
+        let config = net_flow_core::card::load_user_config();
+        let latency_target_label = config.latency_target.label();
+
+        let startup_label = format!("Run at startup: {}", startup_state_str);
+        let latency_label = format!("Latency target: {}", latency_target_label);
+        let sl: Vec<u16> = startup_label
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let ll: Vec<u16> = latency_label
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
         let _ = AppendMenuW(menu, MF_STRING, IDM_OPEN_WIDGETS, w!("Open Widgets Board"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, IDM_STARTUP_TOGGLE, PCWSTR(sl.as_ptr()));
+        let _ = AppendMenuW(menu, MF_STRING, IDM_LATENCY_TOGGLE, PCWSTR(ll.as_ptr()));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(
             menu,
@@ -557,6 +622,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     IDM_RESET_SESSION => {
                         if let Some(ctx) = context(hwnd) {
                             reset_session(&ctx.state);
+                        }
+                    }
+                    IDM_STARTUP_TOGGLE => {
+                        toggle_startup_task();
+                    }
+                    IDM_LATENCY_TOGGLE => {
+                        let mut config = net_flow_core::card::load_user_config();
+                        use net_flow_core::backend::LatencyTargetMode;
+                        config.latency_target = match config.latency_target {
+                            LatencyTargetMode::Auto => LatencyTargetMode::Internet,
+                            LatencyTargetMode::Internet => LatencyTargetMode::Gateway,
+                            LatencyTargetMode::Gateway => LatencyTargetMode::Auto,
+                        };
+                        net_flow_core::card::save_user_config(&config);
+                        if let Some(ctx) = context(hwnd) {
+                            ctx.state.ui_dirty.store(true, Ordering::SeqCst);
                         }
                     }
                     IDM_EXIT => {

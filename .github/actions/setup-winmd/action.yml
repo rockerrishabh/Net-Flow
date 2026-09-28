@@ -33,8 +33,22 @@ runs:
           $tempExtract = "$env:TEMP/wasdk_extracted"
           New-Item -ItemType Directory -Force -Path $tempExtract | Out-Null
           tar -xf $tempNupkg -C $tempExtract
+
+          # WASDK 2.0+ splits packages. Check if the winmd is inside this package
           $foundWinmd = Get-ChildItem $tempExtract -Recurse -Filter "Microsoft.Windows.Widgets.winmd" | Select-Object -First 1
-          if (-not $foundWinmd) { throw "WinMD not found in NuGet package!" }
+          if (-not $foundWinmd) {
+              Write-Host "WinMD not found in main package, fetching from Widgets package..."
+              [xml]$nuspec = Get-Content "$tempExtract/Microsoft.WindowsAppSDK.nuspec"
+              $widgetsDep = $nuspec.package.metadata.dependencies.dependency | Where-Object { $_.id -eq "Microsoft.WindowsAppSDK.Widgets" }
+              if (-not $widgetsDep) { throw "Microsoft.WindowsAppSDK.Widgets dependency not found!" }
+              $widgetsVer = $widgetsDep.version
+              Write-Host "Widgets package version is $widgetsVer"
+              $url2 = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.widgets/$widgetsVer/microsoft.windowsappsdk.widgets.$widgetsVer.nupkg"
+              curl.exe -s -L $url2 -o $tempNupkg
+              tar -xf $tempNupkg -C $tempExtract
+              $foundWinmd = Get-ChildItem $tempExtract -Recurse -Filter "Microsoft.Windows.Widgets.winmd" | Select-Object -First 1
+              if (-not $foundWinmd) { throw "WinMD not found in Widgets package!" }
+          }
           New-Item -ItemType Directory -Force -Path $env:WINMD_DIR | Out-Null
           Copy-Item $foundWinmd.FullName $env:WINMD_DIR -Force
           Remove-Item $tempNupkg -Force -ErrorAction SilentlyContinue

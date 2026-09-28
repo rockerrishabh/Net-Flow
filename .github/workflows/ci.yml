@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  WASDK_VERSION: "1.7.250310001"
+  WASDK_VERSION: "2.5.1"
 
 jobs:
   check:

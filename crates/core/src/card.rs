@@ -47,7 +47,7 @@ pub struct WidgetConfig {
     /// Theme preference: Auto, Dark, or Light.
     #[serde(default)]
     pub theme: ThemeMode,
-    /// Presentation style of the sparkline chart: Area, Line, or Bar.
+    /// Presentation style of the sparkline chart: Area or Bar.
     #[serde(default)]
     pub graph_style: GraphStyle,
     /// Optional LUID of the adapter shown in headline metrics. None means aggregate traffic.
@@ -328,6 +328,7 @@ fn icon_button_box(url: &str, px: u32, verb: &str, tooltip: &str) -> Value {
 
 /// A tappable text button control rendered inside an explicit hit-target container
 /// with centered content to provide a clean, tactile Fluent hover pill/effect.
+#[allow(dead_code)]
 fn text_button_box(
     text: &str,
     width_px: Option<u32>,
@@ -556,8 +557,7 @@ fn header_row(snapshot: &NetworkSnapshot) -> Value {
                         "wrap": false
                     }
                 ]
-            },
-            icon_button_column_spaced(icons::SETTINGS, 16, "open_settings", "Customize widget", "Small")
+            }
         ]
     })
 }
@@ -702,9 +702,12 @@ fn chart_element(
     let graph_style = config.graph_style;
 
     // O(1) idle bypass: if both incremental peaks across the entire history buffer are 0,
-    // we are guaranteed that every sample in any chart window is 0 bps. Directly fetch
-    // the precomputed idle chart from the immutable OnceLock cache.
-    let uri = if snapshot.peak_rx_bps == 0.0 && snapshot.peak_tx_bps == 0.0 {
+    // and there is no latency to draw, we are guaranteed that every sample in any chart
+    // window is empty. Directly fetch the precomputed idle chart from the immutable OnceLock cache.
+    let uri = if snapshot.peak_rx_bps == 0.0
+        && snapshot.peak_tx_bps == 0.0
+        && snapshot.latency.latency_ms.is_none()
+    {
         render_idle_unified_chart_data_uri(
             chart_size,
             config.chart_window,
@@ -1090,8 +1093,7 @@ pub fn build_adaptive_card_template(size: &str) -> String {
                         "wrap": false
                     }
                 ]
-            },
-            icon_button_column_spaced(icons::SETTINGS, 16, "open_settings", "Customize widget", "Small")
+            }
         ]
     }));
 
@@ -1209,18 +1211,18 @@ pub fn build_adaptive_card_template(size: &str) -> String {
     }));
 
     // Large cards have enough space for a compact live breakdown of every
-    // connected adapter. Slots are fixed to preserve flicker-free data updates.
+    // connected adapter when multiple interfaces are active.
     if size == "Large" {
-        body.push(json!({
+        let mut adapter_items = vec![json!({
             "type": "TextBlock",
             "text": "Active adapters",
             "size": "Small",
             "weight": "Bolder",
             "spacing": "Medium",
             "wrap": false
-        }));
+        })];
         for slot in 0..4 {
-            body.push(json!({
+            adapter_items.push(json!({
                 "type": "ColumnSet",
                 "$when": format!("${{adapter{}_visible == true}}", slot),
                 "spacing": "Small",
@@ -1249,6 +1251,11 @@ pub fn build_adaptive_card_template(size: &str) -> String {
                 ]
             }));
         }
+        body.push(json!({
+            "type": "Container",
+            "$when": "${hasMultipleAdapters == true}",
+            "items": adapter_items
+        }));
     }
 
     // 4. Active Apps Section (Medium and Large only)
@@ -1435,7 +1442,10 @@ pub fn build_adaptive_card_data(
 
     let resolved_theme = config.theme.resolve();
     let graph_style = config.graph_style;
-    let chart_url = if snapshot.peak_rx_bps == 0.0 && snapshot.peak_tx_bps == 0.0 {
+    let chart_url = if snapshot.peak_rx_bps == 0.0
+        && snapshot.peak_tx_bps == 0.0
+        && snapshot.latency.latency_ms.is_none()
+    {
         render_idle_unified_chart_data_uri(
             layout.chart_size,
             config.chart_window,
@@ -1587,7 +1597,20 @@ pub fn build_adaptive_card_data(
         "primaryName".to_string(),
         json!(truncate_name(display_name, 22)),
     );
-    let latency_text = snapshot.latency.display_text();
+    let latency_text = if size != "Small" {
+        if let (Some(ms), Some(jitter)) = (snapshot.latency.latency_ms, snapshot.latency.jitter_ms)
+        {
+            if jitter > 0 {
+                format!("{} ms (±{} ms)", ms, jitter)
+            } else {
+                format!("{} ms", ms)
+            }
+        } else {
+            snapshot.latency.display_text()
+        }
+    } else {
+        snapshot.latency.display_text()
+    };
     data_map.insert(
         "activeConnsText".to_string(),
         json!(format!("{} • {} conns", latency_text, active_count)),
@@ -1640,6 +1663,12 @@ pub fn build_adaptive_card_data(
         json!(format_bytes(snapshot.session_tx)),
     );
 
+    let has_multiple_adapters = snapshot.per_interface.len() > 1;
+    data_map.insert(
+        "hasMultipleAdapters".to_string(),
+        json!(has_multiple_adapters),
+    );
+
     // Fixed slots keep the Large-card adapter section data-only during telemetry updates.
     for (slot, iface) in snapshot.per_interface.iter().take(4).enumerate() {
         data_map.insert(format!("adapter{}_visible", slot), json!(true));
@@ -1686,12 +1715,6 @@ pub fn build_settings_card_for_size(
     _session_duration_secs: u64,
     _snapshot: &NetworkSnapshot,
 ) -> String {
-    let (cancel_w, save_w, save_spacing) = if size == "Small" {
-        (48, 42, "Small")
-    } else {
-        (56, 48, "Medium")
-    };
-
     let header = json!({
         "type": "ColumnSet",
         "spacing": "None",
@@ -1708,42 +1731,6 @@ pub fn build_settings_card_for_size(
                         "size": if size == "Small" { "Default" } else { "Medium" },
                         "wrap": false
                     }
-                ]
-            },
-            {
-                "type": "Column",
-                "width": format!("{}px", cancel_w),
-                "roundedCorners": true,
-                "verticalContentAlignment": "Center",
-                "spacing": "Small",
-                "items": [
-                    text_button_box(
-                        "Cancel",
-                        Some(cancel_w),
-                        "cancel_settings",
-                        "Cancel",
-                        None,
-                        false,
-                        Some("none"),
-                    )
-                ]
-            },
-            {
-                "type": "Column",
-                "width": format!("{}px", save_w),
-                "roundedCorners": true,
-                "verticalContentAlignment": "Center",
-                "spacing": save_spacing,
-                "items": [
-                    text_button_box(
-                        "Save",
-                        Some(save_w),
-                        "save_settings",
-                        "Save",
-                        Some("Accent"),
-                        true,
-                        None,
-                    )
                 ]
             }
         ]
@@ -1838,7 +1825,6 @@ pub fn build_settings_card_for_size(
                             "value": current_config.graph_style.to_str_value(),
                             "choices": [
                                 { "title": "Area", "value": "area" },
-                                { "title": "Line", "value": "line" },
                                 { "title": "Bar", "value": "bar" }
                             ]
                         }
@@ -2025,7 +2011,6 @@ pub fn build_settings_card_for_size(
                             "value": current_config.graph_style.to_str_value(),
                             "choices": [
                                 { "title": "Area (Waveform)", "value": "area" },
-                                { "title": "Line (Minimal)", "value": "line" },
                                 { "title": "Bar (Columns)", "value": "bar" }
                             ]
                         }
@@ -2145,6 +2130,24 @@ pub fn build_settings_card_for_size(
             ]
         }));
     }
+
+    body.push(json!({
+        "type": "ActionSet",
+        "actions": [
+            {
+                "type": "Action.Execute",
+                "verb": "save_settings",
+                "title": "Save",
+                "style": "positive"
+            },
+            {
+                "type": "Action.Execute",
+                "verb": "cancel_settings",
+                "title": "Cancel",
+                "associatedInputs": "none"
+            }
+        ]
+    }));
 
     let card = json!({
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
@@ -2284,23 +2287,16 @@ mod tests {
         assert!(json_str.contains(icons::MEDIUM_WIFI));
         assert!(json_str.contains("Wi-Fi"));
         assert!(json_str.contains("11 conns"));
-        assert!(json_str.contains(icons::SETTINGS));
-        assert!(json_str.contains("open_settings"));
     }
 
     #[test]
-    fn settings_button_is_present_on_all_card_sizes() {
+    fn settings_button_removed_from_live_widgets() {
         let snap = snapshot_fixture();
         for size in ["Small", "Medium", "Large"] {
             let json_str = build_adaptive_card(&snap, size, &WidgetConfig::default());
             assert!(
-                json_str.contains("open_settings"),
-                "Size {} missing open_settings verb",
-                size
-            );
-            assert!(
-                json_str.contains(icons::SETTINGS),
-                "Size {} missing settings icon",
+                !json_str.contains("open_settings"),
+                "Size {} should not contain open_settings verb",
                 size
             );
         }
@@ -2647,7 +2643,7 @@ mod tests {
     /// Validates that the major.minor version of Windows App SDK used in CI workflows
     /// aligns with the `<PackageDependency Name="Microsoft.WindowsAppRuntime.X.Y">` declared
     /// in `Package.appxmanifest`. Note that `MinVersion` in the manifest specifies the minimum
-    /// runtime MSIX framework build required (e.g. 7000.435.154.0 for 1.7.0 baseline) rather
+    /// runtime MSIX framework build required (e.g. 2005.1.0.0 for 2.5.1 baseline) rather
     /// than enforcing an exact patch-level lock against the build-time NuGet SDK.
     #[test]
     fn wasdk_major_minor_aligns_with_manifest_dependency() {
@@ -2679,18 +2675,22 @@ mod tests {
             })
             .expect("WASDK_VERSION must be defined in ci.yml");
 
-        // Extract major.minor: e.g. "1.7" from "1.7.250310001"
+        // Extract major: in WASDK 2.x, package is "Microsoft.WindowsAppRuntime.2", whereas in 1.x it was "Microsoft.WindowsAppRuntime.1.7"
         let parts: Vec<&str> = wasdk_ver.split('.').collect();
         assert!(
             parts.len() >= 2,
             "WASDK_VERSION must be semver formatted: {}",
             wasdk_ver
         );
-        let expected_dep = format!("Microsoft.WindowsAppRuntime.{}.{}", parts[0], parts[1]);
+        let expected_dep = if parts[0] == "1" {
+            format!("Microsoft.WindowsAppRuntime.{}.{}", parts[0], parts[1])
+        } else {
+            format!("Microsoft.WindowsAppRuntime.{}", parts[0])
+        };
 
         assert!(
             manifest_content.contains(&expected_dep),
-            "Package.appxmanifest dependency must align major.minor with CI WASDK_VERSION (expected {}, manifest {:?})",
+            "Package.appxmanifest dependency must align with CI WASDK_VERSION (expected {}, manifest {:?})",
             expected_dep,
             manifest_path
         );
@@ -2820,7 +2820,7 @@ mod tests {
     #[test]
     fn test_icon_and_text_button_dimensions_and_rounded_corners() {
         let icon_col =
-            icon_button_column_spaced(icons::SETTINGS, 16, "open_settings", "Settings", "Small");
+            icon_button_column_spaced(icons::CHEVRON_LEFT, 16, "test_verb", "Test", "Small");
         assert_eq!(icon_col["type"], "Column");
         assert_eq!(icon_col["width"], "28px");
         assert_eq!(icon_col["roundedCorners"], true);
@@ -2839,34 +2839,6 @@ mod tests {
         );
         assert_eq!(icon_when_col["width"], "28px");
         assert_eq!(icon_when_col["roundedCorners"], true);
-
-        // Verify Settings card header has explicit column widths and rounded corners
-        let settings_medium = build_settings_card_for_size(
-            &WidgetConfig::default(),
-            "Medium",
-            0,
-            &NetworkSnapshot::default(),
-        );
-        let parsed_med: Value = serde_json::from_str(&settings_medium).unwrap();
-        let header_cols = &parsed_med["body"][0]["columns"];
-        let cancel_col = &header_cols[1];
-        let save_col = &header_cols[2];
-        assert_eq!(cancel_col["width"], "56px");
-        assert_eq!(cancel_col["roundedCorners"], true);
-        assert_eq!(save_col["width"], "48px");
-        assert_eq!(save_col["roundedCorners"], true);
-        assert_eq!(save_col["spacing"], "Medium");
-
-        let settings_small = build_settings_card_for_size(
-            &WidgetConfig::default(),
-            "Small",
-            0,
-            &NetworkSnapshot::default(),
-        );
-        let parsed_small: Value = serde_json::from_str(&settings_small).unwrap();
-        let small_header_cols = &parsed_small["body"][0]["columns"];
-        assert_eq!(small_header_cols[1]["width"], "48px");
-        assert_eq!(small_header_cols[2]["width"], "42px");
     }
 
     #[test]

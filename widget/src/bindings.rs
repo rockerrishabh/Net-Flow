@@ -375,7 +375,11 @@ pub mod Microsoft {
                         windows_core::IInspectable,
                         IFeedManager
                     );
-                    windows_core::imp::required_hierarchy!(FeedManager, IFeedManager2);
+                    windows_core::imp::required_hierarchy!(
+                        FeedManager,
+                        IFeedManager2,
+                        IFeedManager3
+                    );
                     impl FeedManager {
                         pub fn GetEnabledFeedProviders(
                             &self,
@@ -441,6 +445,23 @@ pub mod Microsoft {
                                     core::mem::transmute_copy(feedproviderdefinitionid),
                                     core::mem::transmute_copy(feeddefinitionid),
                                     announcement.param().abi(),
+                                )
+                                .ok()
+                            }
+                        }
+                        pub fn TryRemoveAnnouncementById(
+                            &self,
+                            feedproviderdefinitionid: &windows_core::HSTRING,
+                            feeddefinitionid: &windows_core::HSTRING,
+                            announcementid: &windows_core::HSTRING,
+                        ) -> windows_core::Result<()> {
+                            let this = &windows_core::Interface::cast::<IFeedManager3>(self)?;
+                            unsafe {
+                                (windows_core::Interface::vtable(this).TryRemoveAnnouncementById)(
+                                    windows_core::Interface::as_raw(this),
+                                    core::mem::transmute_copy(feedproviderdefinitionid),
+                                    core::mem::transmute_copy(feeddefinitionid),
+                                    core::mem::transmute_copy(announcementid),
                                 )
                                 .ok()
                             }
@@ -1980,6 +2001,107 @@ pub mod Microsoft {
                             *mut core::ffi::c_void,
                         )
                             -> windows_core::HRESULT,
+                    }
+                    windows_core::imp::define_interface!(
+                        IFeedManager3,
+                        IFeedManager3_Vtbl,
+                        0xa6af915b_0cdc_46f1_a4d6_10d8c644984a
+                    );
+                    impl windows_core::RuntimeType for IFeedManager3 {
+                        const SIGNATURE: windows_core::imp::ConstBuffer =
+                            windows_core::imp::ConstBuffer::for_interface::<Self>();
+                        const NAME: windows_core::imp::ConstBuffer =
+                            windows_core::imp::ConstBuffer::from_slice(
+                                b"Microsoft.Windows.Widgets.Feeds.Providers.IFeedManager3",
+                            );
+                    }
+                    windows_core::imp::interface_hierarchy!(
+                        IFeedManager3,
+                        windows_core::IUnknown,
+                        windows_core::IInspectable
+                    );
+                    impl IFeedManager3 {
+                        pub fn TryRemoveAnnouncementById(
+                            &self,
+                            feedproviderdefinitionid: &windows_core::HSTRING,
+                            feeddefinitionid: &windows_core::HSTRING,
+                            announcementid: &windows_core::HSTRING,
+                        ) -> windows_core::Result<()> {
+                            unsafe {
+                                (windows_core::Interface::vtable(self).TryRemoveAnnouncementById)(
+                                    windows_core::Interface::as_raw(self),
+                                    core::mem::transmute_copy(feedproviderdefinitionid),
+                                    core::mem::transmute_copy(feeddefinitionid),
+                                    core::mem::transmute_copy(announcementid),
+                                )
+                                .ok()
+                            }
+                        }
+                    }
+                    impl windows_core::RuntimeName for IFeedManager3 {
+                        const NAME: &'static str =
+                            "Microsoft.Windows.Widgets.Feeds.Providers.IFeedManager3";
+                    }
+                    pub trait IFeedManager3_Impl: windows_core::IUnknownImpl {
+                        fn TryRemoveAnnouncementById(
+                            &self,
+                            feedProviderDefinitionId: &windows_core::HSTRING,
+                            feedDefinitionId: &windows_core::HSTRING,
+                            announcementId: &windows_core::HSTRING,
+                        ) -> windows_core::Result<()>;
+                    }
+                    impl IFeedManager3_Vtbl {
+                        pub const fn new<Identity: IFeedManager3_Impl, const OFFSET: isize>() -> Self
+                        {
+                            unsafe extern "system" fn TryRemoveAnnouncementById<
+                                Identity: IFeedManager3_Impl,
+                                const OFFSET: isize,
+                            >(
+                                this: *mut core::ffi::c_void,
+                                feedproviderdefinitionid: *mut core::ffi::c_void,
+                                feeddefinitionid: *mut core::ffi::c_void,
+                                announcementid: *mut core::ffi::c_void,
+                            ) -> windows_core::HRESULT {
+                                unsafe {
+                                    let this: &Identity = &*((this as *const *const ())
+                                        .offset(OFFSET)
+                                        as *const Identity);
+                                    IFeedManager3_Impl::TryRemoveAnnouncementById(
+                                        this,
+                                        core::mem::transmute(&feedproviderdefinitionid),
+                                        core::mem::transmute(&feeddefinitionid),
+                                        core::mem::transmute(&announcementid),
+                                    )
+                                    .into()
+                                }
+                            }
+                            Self {
+                                base__: windows_core::IInspectable_Vtbl::new::<
+                                    Identity,
+                                    IFeedManager3,
+                                    OFFSET,
+                                >(),
+                                TryRemoveAnnouncementById: TryRemoveAnnouncementById::<
+                                    Identity,
+                                    OFFSET,
+                                >,
+                            }
+                        }
+                        pub fn matches(iid: &windows_core::GUID) -> bool {
+                            iid == &<IFeedManager3 as windows_core::Interface>::IID
+                        }
+                    }
+                    #[repr(C)]
+                    pub struct IFeedManager3_Vtbl {
+                        pub base__: windows_core::IInspectable_Vtbl,
+                        pub TryRemoveAnnouncementById:
+                            unsafe extern "system" fn(
+                                *mut core::ffi::c_void,
+                                *mut core::ffi::c_void,
+                                *mut core::ffi::c_void,
+                                *mut core::ffi::c_void,
+                            )
+                                -> windows_core::HRESULT,
                     }
                     windows_core::imp::define_interface!(
                         IFeedManagerStatics,
@@ -4725,6 +4847,68 @@ pub mod Microsoft {
                         -> windows_core::HRESULT,
                 }
                 windows_core::imp::define_interface!(
+                    IWidgetInfo3,
+                    IWidgetInfo3_Vtbl,
+                    0x965538cd_289d_54ab_916e_9315ebf97ea4
+                );
+                impl windows_core::RuntimeType for IWidgetInfo3 {
+                    const SIGNATURE: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::for_interface::<Self>();
+                    const NAME: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::from_slice(
+                            b"Microsoft.Windows.Widgets.Providers.IWidgetInfo3",
+                        );
+                }
+                impl windows_core::RuntimeName for IWidgetInfo3 {
+                    const NAME: &'static str = "Microsoft.Windows.Widgets.Providers.IWidgetInfo3";
+                }
+                pub trait IWidgetInfo3_Impl: windows_core::IUnknownImpl {
+                    fn Rank(&self) -> windows_core::Result<i32>;
+                }
+                impl IWidgetInfo3_Vtbl {
+                    pub const fn new<Identity: IWidgetInfo3_Impl, const OFFSET: isize>() -> Self {
+                        unsafe extern "system" fn Rank<
+                            Identity: IWidgetInfo3_Impl,
+                            const OFFSET: isize,
+                        >(
+                            this: *mut core::ffi::c_void,
+                            result__: *mut i32,
+                        ) -> windows_core::HRESULT {
+                            unsafe {
+                                let this: &Identity = &*((this as *const *const ()).offset(OFFSET)
+                                    as *const Identity);
+                                match IWidgetInfo3_Impl::Rank(this) {
+                                    Ok(ok__) => {
+                                        result__.write(ok__);
+                                        windows_core::HRESULT(0)
+                                    }
+                                    Err(err) => err.into(),
+                                }
+                            }
+                        }
+                        Self {
+                            base__: windows_core::IInspectable_Vtbl::new::<
+                                Identity,
+                                IWidgetInfo3,
+                                OFFSET,
+                            >(),
+                            Rank: Rank::<Identity, OFFSET>,
+                        }
+                    }
+                    pub fn matches(iid: &windows_core::GUID) -> bool {
+                        iid == &<IWidgetInfo3 as windows_core::Interface>::IID
+                    }
+                }
+                #[repr(C)]
+                pub struct IWidgetInfo3_Vtbl {
+                    pub base__: windows_core::IInspectable_Vtbl,
+                    pub Rank: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut i32,
+                    )
+                        -> windows_core::HRESULT,
+                }
+                windows_core::imp::define_interface!(
                     IWidgetManager,
                     IWidgetManager_Vtbl,
                     0x71cb10c0_671e_48e3_b995_207940397123
@@ -6427,6 +6611,100 @@ pub mod Microsoft {
                         -> windows_core::HRESULT,
                 }
                 windows_core::imp::define_interface!(
+                    IWidgetUpdateRequestOptions3,
+                    IWidgetUpdateRequestOptions3_Vtbl,
+                    0xa78e2a8b_a26c_596a_ade3_db8f4c72fe02
+                );
+                impl windows_core::RuntimeType for IWidgetUpdateRequestOptions3 {
+                    const SIGNATURE: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::for_interface::<Self>();
+                    const NAME: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::from_slice(
+                            b"Microsoft.Windows.Widgets.Providers.IWidgetUpdateRequestOptions3",
+                        );
+                }
+                impl windows_core::RuntimeName for IWidgetUpdateRequestOptions3 {
+                    const NAME: &'static str =
+                        "Microsoft.Windows.Widgets.Providers.IWidgetUpdateRequestOptions3";
+                }
+                pub trait IWidgetUpdateRequestOptions3_Impl: windows_core::IUnknownImpl {
+                    fn Rank(&self) -> windows_core::Result<windows_reference::IReference<i32>>;
+                    fn SetRank(
+                        &self,
+                        value: windows_core::Ref<windows_reference::IReference<i32>>,
+                    ) -> windows_core::Result<()>;
+                }
+                impl IWidgetUpdateRequestOptions3_Vtbl {
+                    pub const fn new<
+                        Identity: IWidgetUpdateRequestOptions3_Impl,
+                        const OFFSET: isize,
+                    >() -> Self {
+                        unsafe extern "system" fn Rank<
+                            Identity: IWidgetUpdateRequestOptions3_Impl,
+                            const OFFSET: isize,
+                        >(
+                            this: *mut core::ffi::c_void,
+                            result__: *mut *mut core::ffi::c_void,
+                        ) -> windows_core::HRESULT {
+                            unsafe {
+                                let this: &Identity = &*((this as *const *const ()).offset(OFFSET)
+                                    as *const Identity);
+                                match IWidgetUpdateRequestOptions3_Impl::Rank(this) {
+                                    Ok(ok__) => {
+                                        result__.write(core::mem::transmute_copy(&ok__));
+                                        core::mem::forget(ok__);
+                                        windows_core::HRESULT(0)
+                                    }
+                                    Err(err) => err.into(),
+                                }
+                            }
+                        }
+                        unsafe extern "system" fn SetRank<
+                            Identity: IWidgetUpdateRequestOptions3_Impl,
+                            const OFFSET: isize,
+                        >(
+                            this: *mut core::ffi::c_void,
+                            value: *mut core::ffi::c_void,
+                        ) -> windows_core::HRESULT {
+                            unsafe {
+                                let this: &Identity = &*((this as *const *const ()).offset(OFFSET)
+                                    as *const Identity);
+                                IWidgetUpdateRequestOptions3_Impl::SetRank(
+                                    this,
+                                    core::mem::transmute_copy(&value),
+                                )
+                                .into()
+                            }
+                        }
+                        Self {
+                            base__: windows_core::IInspectable_Vtbl::new::<
+                                Identity,
+                                IWidgetUpdateRequestOptions3,
+                                OFFSET,
+                            >(),
+                            Rank: Rank::<Identity, OFFSET>,
+                            SetRank: SetRank::<Identity, OFFSET>,
+                        }
+                    }
+                    pub fn matches(iid: &windows_core::GUID) -> bool {
+                        iid == &<IWidgetUpdateRequestOptions3 as windows_core::Interface>::IID
+                    }
+                }
+                #[repr(C)]
+                pub struct IWidgetUpdateRequestOptions3_Vtbl {
+                    pub base__: windows_core::IInspectable_Vtbl,
+                    pub Rank: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut *mut core::ffi::c_void,
+                    )
+                        -> windows_core::HRESULT,
+                    pub SetRank: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut core::ffi::c_void,
+                    )
+                        -> windows_core::HRESULT,
+                }
+                windows_core::imp::define_interface!(
                     IWidgetUpdateRequestOptionsFactory,
                     IWidgetUpdateRequestOptionsFactory_Vtbl,
                     0xe0e00af8_1d10_57a8_9419_3f568e854daa
@@ -6942,6 +7220,17 @@ pub mod Microsoft {
                         unsafe {
                             let mut result__ = core::mem::zeroed();
                             (windows_core::Interface::vtable(this).IsPlaceholderContent)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| result__)
+                        }
+                    }
+                    pub fn Rank(&self) -> windows_core::Result<i32> {
+                        let this = &windows_core::Interface::cast::<IWidgetInfo3>(self)?;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).Rank)(
                                 windows_core::Interface::as_raw(this),
                                 &mut result__,
                             )
@@ -7464,6 +7753,32 @@ pub mod Microsoft {
                             value.map(<windows_reference::IReference<bool> as From<_>>::from);
                         unsafe {
                             (windows_core::Interface::vtable(this).SetIsPlaceholderContent)(
+                                windows_core::Interface::as_raw(this),
+                                windows_core::Param::param(value__.as_ref()).abi(),
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn Rank(&self) -> windows_core::Result<i32> {
+                        let this =
+                            &windows_core::Interface::cast::<IWidgetUpdateRequestOptions3>(self)?;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).Rank)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .and_then(|| windows_core::imp::Type::from_abi(result__))
+                            .and_then(|r__: windows_reference::IReference<i32>| r__.Value())
+                        }
+                    }
+                    pub fn SetRank(&self, value: Option<i32>) -> windows_core::Result<()> {
+                        let this =
+                            &windows_core::Interface::cast::<IWidgetUpdateRequestOptions3>(self)?;
+                        let value__ =
+                            value.map(<windows_reference::IReference<i32> as From<_>>::from);
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetRank)(
                                 windows_core::Interface::as_raw(this),
                                 windows_core::Param::param(value__.as_ref()).abi(),
                             )

@@ -180,6 +180,7 @@ pub struct Palette {
     pub download: Rgba,
     pub upload: Rgba,
     pub axis: Rgba,
+    pub latency: Rgba,
 }
 
 impl Palette {
@@ -189,11 +190,13 @@ impl Palette {
                 download: DOWNLOAD_COLOR,
                 upload: UPLOAD_COLOR,
                 axis: AXIS_COLOR,
+                latency: Rgba(180, 80, 255, 255), // Bright purple
             },
             ResolvedTheme::Light => Self {
                 download: Rgba(0, 140, 180, 255), // #008CB4 deep cyan with >4.5:1 contrast on white
                 upload: Rgba(215, 95, 0, 255), // #D75F00 deep amber with >4.5:1 contrast on white
                 axis: Rgba(110, 125, 145, 90), // refined medium-dark axis line
+                latency: Rgba(120, 0, 180, 255), // Dark purple
             },
         }
     }
@@ -206,8 +209,6 @@ pub enum GraphStyle {
     /// Mirrored Catmull-Rom spline with gradient area fill fading to baseline.
     #[default]
     Area,
-    /// Clean, minimalist spline stroke with glowing pulse dot and no area fill.
-    Line,
     /// Continuous spline curve with bolder stroke and reduced-opacity gradient fill.
     /// Visually distinct from Area with a thicker, more industrial aesthetic.
     Bar,
@@ -217,14 +218,12 @@ impl GraphStyle {
     pub fn to_str_value(self) -> &'static str {
         match self {
             Self::Area => "area",
-            Self::Line => "line",
             Self::Bar => "bar",
         }
     }
 
     pub fn from_str_value(val: &str) -> Self {
         match val {
-            "line" => Self::Line,
             "bar" => Self::Bar,
             _ => Self::Area,
         }
@@ -315,7 +314,7 @@ impl ChartDimensions {
             },
             ChartSize::Large => ChartDimensions {
                 width: 800,
-                height: 150,
+                height: 200,
                 sample_count,
                 supersample: 2,
             },
@@ -480,8 +479,7 @@ fn windowed(values: &[f64], sample_count: usize) -> Vec<f64> {
     out
 }
 
-/// Evaluates a Catmull-Rom spline at fractional position `t` for smooth column interpolation.
-fn catmull_at(values: &[f64], t: f64) -> f64 {
+fn interpolate_at(values: &[f64], t: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
@@ -490,21 +488,15 @@ fn catmull_at(values: &[f64], t: f64) -> f64 {
     }
     let max_i = values.len() - 1;
     let i = t.floor().max(0.0) as usize;
-    let i = i.min(max_i.saturating_sub(1));
-    let f = (t - i as f64).clamp(0.0, 1.0);
+    if i >= max_i {
+        return values[max_i];
+    }
+    let f = t - i as f64;
 
-    let p0 = values[i.saturating_sub(1)];
-    let p1 = values[i];
-    let p2 = values[(i + 1).min(max_i)];
-    let p3 = values[(i + 2).min(max_i)];
+    let p0 = values[i];
+    let p1 = values[i + 1];
 
-    let f2 = f * f;
-    let f3 = f2 * f;
-    let v = 0.5
-        * ((2.0 * p1)
-            + (-p0 + p2) * f
-            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f2
-            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f3);
+    let v = p0 + (p1 - p0) * f;
     v.max(0.0)
 }
 
@@ -537,7 +529,7 @@ fn draw_area_track(
 
     for x in 0..width {
         let t = x as f64 * x_factor;
-        let v = catmull_at(values, t);
+        let v = interpolate_at(values, t);
         let norm = (v * inv_scale).clamp(0.0, 1.0);
         let y = baseline_y + direction * (idle_offset + norm * reachable);
 
@@ -594,9 +586,16 @@ fn draw_area_track(
             }
         }
 
-        // Stroke, centred on the curve.
+        // Stroke, spanning from previous y to current y to ensure continuity.
+        let prev_t = (x.saturating_sub(1)) as f64 * x_factor;
+        let prev_v = interpolate_at(values, prev_t);
+        let prev_norm = (prev_v * inv_scale).clamp(0.0, 1.0);
+        let prev_y = baseline_y + direction * (idle_offset + prev_norm * reachable);
+
         let half = stroke / 2.0;
-        canvas.fill_span(x, y - half, y + half, color, 1.0);
+        let min_y = y.min(prev_y) - half;
+        let max_y = y.max(prev_y) + half;
+        canvas.fill_span(x, min_y, max_y, color, 1.0);
     }
 
     // Live pulse indicator dot at the leading edge (current sample)
@@ -625,71 +624,7 @@ fn draw_area_track(
     }
 }
 
-/// Renders a single direction track with Catmull-Rom spline stroke and pulse dot (minimalist, no area fill).
-#[allow(clippy::too_many_arguments)]
-fn draw_line_track(
-    canvas: &mut Canvas,
-    values: &[f64],
-    scale: f64,
-    baseline_y: f64,
-    span: f64,
-    direction: f64,
-    color: Rgba,
-    stroke: f64,
-    idle_offset: f64,
-) {
-    let width = canvas.width;
-    if width == 0 || values.len() < 2 || span <= 0.0 {
-        return;
-    }
-    let last_index = (values.len() - 1) as f64;
-
-    let x_factor = if width > 1 {
-        last_index / (width - 1) as f64
-    } else {
-        0.0
-    };
-    let reachable = (span - idle_offset).max(0.0);
-    let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-
-    let half = stroke / 2.0;
-    for x in 0..width {
-        let t = x as f64 * x_factor;
-        let v = catmull_at(values, t);
-        let norm = (v * inv_scale).clamp(0.0, 1.0);
-        let y = baseline_y + direction * (idle_offset + norm * reachable);
-
-        // Stroke only (no gradient area fill)
-        canvas.fill_span(x, y - half, y + half, color, 1.0);
-    }
-
-    if width > 0 {
-        let last_val = values.last().copied().unwrap_or(0.0);
-        let norm = if scale > 0.0 {
-            (last_val / scale).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let reachable = (span - idle_offset).max(0.0);
-        let dot_center_x = (width - 1) as f64;
-        let dot_center_y = baseline_y + direction * (idle_offset + norm * reachable);
-
-        let dot_radius = stroke * 0.95;
-        let glow_radius = stroke * 2.6;
-
-        draw_pulse_dot(
-            canvas,
-            dot_center_x,
-            dot_center_y,
-            dot_radius,
-            glow_radius,
-            color,
-        );
-    }
-}
-
-/// Renders a continuous spline curve with bolder stroke and reduced-opacity gradient fill.
-/// Visually distinct from Area style: thicker stroke, 60% fill opacity, industrial aesthetic.
+/// Renders a discrete bar chart.
 #[allow(clippy::too_many_arguments)]
 fn draw_bar_track(
     canvas: &mut Canvas,
@@ -699,111 +634,45 @@ fn draw_bar_track(
     span: f64,
     direction: f64,
     color: Rgba,
-    stroke: f64,
+    _stroke: f64,
     idle_offset: f64,
 ) {
     let width = canvas.width;
-    if width == 0 || values.len() < 2 || span <= 0.0 {
+    let n = values.len();
+    if width == 0 || n == 0 || span <= 0.0 {
         return;
     }
-    let last_index = (values.len() - 1) as f64;
 
-    let x_factor = if width > 1 {
-        last_index / (width - 1) as f64
-    } else {
-        0.0
-    };
     let reachable = (span - idle_offset).max(0.0);
     let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
 
-    // 60% of Area's fill alpha values for a bolder, more industrial look.
-    let fill_alpha_near: f32 = FILL_ALPHA_NEAR * 0.60;
-    let fill_alpha_far: f32 = FILL_ALPHA_FAR * 0.60;
-    // Thicker stroke for visual distinction from Area style.
-    let bold_stroke = stroke * 1.4;
+    let bar_width_f = width as f64 / n as f64;
+    // Gap is relative to bar width, but clamped.
+    let gap = (bar_width_f * 0.15).clamp(1.0, 3.0).min(bar_width_f * 0.5);
+    let actual_bar_width = (bar_width_f - gap).max(1.0);
 
-    for x in 0..width {
-        let t = x as f64 * x_factor;
-        let v = catmull_at(values, t);
+    for (i, &v) in values.iter().enumerate() {
         let norm = (v * inv_scale).clamp(0.0, 1.0);
-        let y = baseline_y + direction * (idle_offset + norm * reachable);
+        let h = idle_offset + norm * reachable;
 
-        // Gradient area fill with reduced opacity.
+        let x_start = (i as f64 * bar_width_f).round() as u32;
+        let x_end = ((i as f64 * bar_width_f) + actual_bar_width).round() as u32;
+        let x_end = x_end.min(width - 1);
+
         let (top, bottom) = if direction < 0.0 {
-            (y, baseline_y)
+            (baseline_y - h, baseline_y)
         } else {
-            (baseline_y, y)
+            (baseline_y, baseline_y + h)
         };
-        let reach = (y - baseline_y).abs().max(1e-6);
-        let inv_reach = 1.0 / reach;
-        let first = top.floor().max(0.0) as i64;
-        let last_row = (bottom.ceil() as i64 - 1).min(canvas.height as i64 - 1);
 
-        if first <= last_row && first >= 0 {
-            if first == last_row {
-                let coverage =
-                    (bottom.min((first + 1) as f64) - top.max(first as f64)).clamp(0.0, 1.0);
-                if coverage > 0.0 {
-                    let nearness = (((first as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
-                    let alpha = fill_alpha_far
-                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
-                    canvas.blend(x, first as u32, color, (alpha / 255.0) * coverage as f32);
-                }
-            } else {
-                let first_cov = ((first + 1) as f64 - top).clamp(0.0, 1.0);
-                if first_cov > 0.0 {
-                    let nearness = (((first as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
-                    let alpha = fill_alpha_far
-                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
-                    canvas.blend(x, first as u32, color, (alpha / 255.0) * first_cov as f32);
-                }
+        let y_start = top.floor().max(0.0) as u32;
+        let y_end = bottom.ceil().min((canvas.height - 1) as f64) as u32;
 
-                for py in (first + 1)..last_row {
-                    let nearness = (((py as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
-                    let alpha = fill_alpha_far
-                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
-                    canvas.blend(x, py as u32, color, alpha / 255.0);
-                }
-
-                let last_cov = (bottom - last_row as f64).clamp(0.0, 1.0);
-                if last_cov > 0.0 {
-                    let nearness =
-                        (((last_row as f64 + 0.5) - baseline_y).abs() * inv_reach).min(1.0);
-                    let alpha = fill_alpha_far
-                        + (fill_alpha_near - fill_alpha_far) * (nearness * nearness) as f32;
-                    canvas.blend(x, last_row as u32, color, (alpha / 255.0) * last_cov as f32);
-                }
+        for px in x_start..=x_end {
+            for py in y_start..=y_end {
+                canvas.blend(px, py, color, 0.85); // 85% opacity for bars
             }
         }
-
-        // Bold stroke centred on the curve.
-        let half = bold_stroke / 2.0;
-        canvas.fill_span(x, y - half, y + half, color, 1.0);
-    }
-
-    // Pulse indicator dot at leading edge.
-    if width > 0 {
-        let last_val = values.last().copied().unwrap_or(0.0);
-        let norm = if scale > 0.0 {
-            (last_val / scale).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let reachable = (span - idle_offset).max(0.0);
-        let dot_center_x = (width - 1) as f64;
-        let dot_center_y = baseline_y + direction * (idle_offset + norm * reachable);
-
-        let dot_radius = bold_stroke * 0.95;
-        let glow_radius = bold_stroke * 2.6;
-
-        draw_pulse_dot(
-            canvas,
-            dot_center_x,
-            dot_center_y,
-            dot_radius,
-            glow_radius,
-            color,
-        );
     }
 }
 
@@ -825,19 +694,6 @@ fn draw_track(
     match style {
         GraphStyle::Area => {
             draw_area_track(
-                canvas,
-                values,
-                scale,
-                baseline_y,
-                span,
-                direction,
-                color,
-                stroke,
-                idle_offset,
-            );
-        }
-        GraphStyle::Line => {
-            draw_line_track(
                 canvas,
                 values,
                 scale,
@@ -934,7 +790,6 @@ pub fn render_unified_dual_chart_png_ss(
 
     let rx_all: Vec<f64> = history.iter().map(|s| s.rx_bps as f64).collect();
     let tx_all: Vec<f64> = history.iter().map(|s| s.tx_bps as f64).collect();
-
     let rx = apply_fluid_wave_smoothing(&windowed(&rx_all, sample_count));
     let tx = apply_fluid_wave_smoothing(&windowed(&tx_all, sample_count));
 
@@ -1048,7 +903,7 @@ fn get_idle_chart_cache() -> &'static std::collections::HashMap<IdleChartCacheKe
         for size in [ChartSize::Small, ChartSize::Medium, ChartSize::Large] {
             for window in [15, 30, 60] {
                 for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
-                    for style in [GraphStyle::Area, GraphStyle::Line, GraphStyle::Bar] {
+                    for style in [GraphStyle::Area, GraphStyle::Bar] {
                         let dims = ChartDimensions::for_chart_size(size, window);
                         let key = IdleChartCacheKey {
                             size,
@@ -1125,7 +980,7 @@ pub fn render_unified_chart_data_uri(
     let is_idle = history.is_empty()
         || history[history.len() - window_samples..]
             .iter()
-            .all(|s| s.rx_bps == 0 && s.tx_bps == 0);
+            .all(|s| s.rx_bps == 0 && s.tx_bps == 0 && s.latency_ms.is_none());
 
     if is_idle {
         return render_idle_unified_chart_data_uri(size, chart_window, theme, style);
@@ -1275,7 +1130,7 @@ pub fn smooth_flowing_curve(points: &[(f64, f64)], subdivisions: usize) -> Vec<(
             let t = i as f64 + step as f64 / subdivisions as f64;
             let x =
                 points[i].0 + (points[i + 1].0 - points[i].0) * (step as f64 / subdivisions as f64);
-            out.push((x, catmull_at(&values, t)));
+            out.push((x, interpolate_at(&values, t)));
         }
     }
     if let Some(&last) = points.last() {
@@ -1644,7 +1499,7 @@ mod tests {
     fn test_graph_styles_render() {
         let hist = history(60);
         for theme in [ResolvedTheme::Dark, ResolvedTheme::Light] {
-            for style in [GraphStyle::Area, GraphStyle::Line, GraphStyle::Bar] {
+            for style in [GraphStyle::Area, GraphStyle::Bar] {
                 let uri = render_unified_chart_data_uri(&hist, "Medium", 30, theme, style);
                 assert!(
                     uri.starts_with("data:image/png;base64,"),

@@ -676,53 +676,6 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     self.push_current_data_only(&target_id);
                 }
             }
-            "open_settings" => {
-                log_widget(&format!("Handling open_settings for id={widget_id}"));
-                let mut target_id = widget_id.clone();
-                let mut found = false;
-                {
-                    let mut state = self.state.lock_safe();
-                    for (id, w) in state.widgets.iter_mut() {
-                        if matches_widget_id(id, &widget_id) {
-                            w.in_customization = true;
-                            w.template_kind = TemplateKind::Settings;
-                            w.draft_state = Some(w.custom_state.clone());
-                            w.customization_requested_at = None;
-                            target_id = id.clone();
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        if state.widgets.len() == 1 {
-                            if let Some((id, w)) = state.widgets.iter_mut().next() {
-                                log_widget(&format!(
-                                    "open_settings fallback: id={widget_id} not found, applying to unique widget {id}"
-                                ));
-                                w.in_customization = true;
-                                w.template_kind = TemplateKind::Settings;
-                                w.draft_state = Some(w.custom_state.clone());
-                                w.customization_requested_at = None;
-                                target_id = id.clone();
-                            }
-                        } else {
-                            log_widget(&format!(
-                                "open_settings warning: id={widget_id} not found among {} registered widgets; ignoring",
-                                state.widgets.len()
-                            ));
-                            return Ok(());
-                        }
-                    }
-                    state.ui_dirty.store(true, Ordering::SeqCst);
-                    if let Some(worker) = &state.worker {
-                        worker.shutdown.1.notify_all();
-                    }
-                }
-                self.push_current_card(&target_id);
-                if target_id != widget_id {
-                    self.push_current_card(&widget_id);
-                }
-            }
             "cancel_settings" | "cancel" | "exit" | "exitCustomization" | "dismiss" => {
                 log_widget(&format!("Handling cancel_settings for id={widget_id}"));
                 let mut target_id = widget_id.clone();

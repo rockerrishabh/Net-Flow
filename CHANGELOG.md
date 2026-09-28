@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.5.0] - 2026-09-28
+
+### Added
+
+- **Windows App SDK 2.x Modern Runtime**:
+  - Migrated package framework dependencies from legacy 1.7 baseline to modern `Microsoft.WindowsAppRuntime.2` (`MinVersion="2.0.0.0"`).
+  - Upgraded CI & release pipelines to Windows App SDK 2.5.1 with automated multi-nupkg WinMD dependency extraction for `Microsoft.WindowsAppSDK.Widgets`.
+- **Ping Jitter & Real-Time Latency Waveforms**:
+  - Real-time round-trip latency variance (jitter in ms) tracked continuously by the background ICMP telemetry engine.
+  - Dedicated subtle purple latency sparkline overlaid on Medium and Large widget cards, keeping Small cards clean and minimal.
+  - Diagnostic latency metrics formatted with jitter spread (e.g. `18 ms (±2 ms) · Internet`).
+- **Expanded System Tray Host Controls**:
+  - Display and toggle Windows login startup status directly from the tray context menu (`Run at startup: Enabled / Disabled`) via non-blocking WinRT `StartupTask` API calls.
+  - Quick-cycle latency target mode (`Auto` → `Internet` → `Gateway`) directly from the notification tray without opening settings.
+
+### Changed
+
+- **Native Windows 11 Widget Customization UX**:
+  - Removed duplicate in-card gear icon from live widget headers in favor of Windows 11 Widget Board's native "Customize widget" flyout.
+  - Standardized settings card actions with positive/cancel `ActionSet` buttons.
+  - Focused graph presentation styles on high-contrast `Area (Waveform)` and `Bar (Columns)`.
+
+---
+
 ## [0.4.2] - 2026-09-25
 
 ### Changed

@@ -132,6 +132,12 @@ pub struct HistorySample {
     pub rx_bps: u64,
     /// Average upload speed in B/s over this interval.
     pub tx_bps: u64,
+    /// Round-trip latency in milliseconds.
+    #[serde(default)]
+    pub latency_ms: Option<u32>,
+    /// Jitter (latency variance from previous probe) in milliseconds.
+    #[serde(default)]
+    pub jitter_ms: Option<u32>,
 }
 
 impl HistorySample {
@@ -152,6 +158,8 @@ impl HistorySample {
             duration_ns,
             rx_bps,
             tx_bps,
+            latency_ms: None,
+            jitter_ms: None,
         }
     }
 
@@ -164,6 +172,8 @@ impl HistorySample {
             duration_ns,
             rx_bps,
             tx_bps,
+            latency_ms: None,
+            jitter_ms: None,
         }
     }
 }
@@ -638,6 +648,8 @@ pub struct LatencySnapshot {
     pub sequence: u64,
     /// Unix timestamp in seconds when the probe was completed.
     pub sampled_at_unix: u64,
+    /// Jitter (latency variance from previous probe) in milliseconds.
+    pub jitter_ms: Option<u32>,
 }
 
 impl Default for LatencySnapshot {
@@ -648,6 +660,7 @@ impl Default for LatencySnapshot {
             target: LatencyTarget::Gateway,
             sequence: 0,
             sampled_at_unix: 0,
+            jitter_ms: None,
         }
     }
 }
@@ -677,7 +690,11 @@ impl LatencySnapshot {
         match self.state {
             LatencyState::Healthy => {
                 if let Some(ms) = self.latency_ms {
-                    format!("{} ms · {}", ms, self.target.label())
+                    if let Some(jitter) = self.jitter_ms {
+                        format!("{} ms (±{} ms) · {}", ms, jitter, self.target.label())
+                    } else {
+                        format!("{} ms · {}", ms, self.target.label())
+                    }
                 } else {
                     format!("-- ms · {}", self.target.label())
                 }
@@ -883,7 +900,10 @@ impl NetworkBackend {
         }
     }
 
-    pub fn set_latency(&mut self, latency: LatencySnapshot) {
+    pub fn set_latency(&mut self, mut latency: LatencySnapshot) {
+        if let (Some(curr), Some(prev)) = (latency.latency_ms, self.latency.latency_ms) {
+            latency.jitter_ms = Some(curr.abs_diff(prev));
+        }
         self.latency = latency;
     }
 
@@ -1166,10 +1186,13 @@ impl NetworkBackend {
             self.rolling_window
                 .record_sample(now, self.session_rx, self.session_tx);
         } else if elapsed_ns > 0 {
-            let emitted =
+            let mut emitted =
                 self.accumulator
                     .push_sample(elapsed_ns, total_delta_in, total_delta_out, slot_ns);
-            for bucket in emitted {
+            for bucket in &mut emitted {
+                bucket.latency_ms = self.latency.latency_ms;
+                bucket.jitter_ms = self.latency.jitter_ms;
+
                 if (bucket.rx_bps as f64) > self.peak_rx {
                     self.peak_rx = bucket.rx_bps as f64;
                 }
@@ -1188,7 +1211,7 @@ impl NetworkBackend {
                             self.history.iter().map(|s| s.tx_bps).max().unwrap_or(0);
                     }
                 }
-                self.history.push_back(bucket);
+                self.history.push_back(*bucket);
                 self.chart_peak_rx = self.chart_peak_rx.max(bucket.rx_bps);
                 self.chart_peak_tx = self.chart_peak_tx.max(bucket.tx_bps);
             }
@@ -1759,6 +1782,7 @@ pub fn sample_latency_snapshot(
             target,
             sequence,
             sampled_at_unix: now_unix,
+            jitter_ms: None,
         },
         Err(state) => LatencySnapshot {
             latency_ms: None,
@@ -1766,6 +1790,7 @@ pub fn sample_latency_snapshot(
             target,
             sequence,
             sampled_at_unix: now_unix,
+            jitter_ms: None,
         },
     }
 }
@@ -2664,18 +2689,33 @@ mod tests {
             target: LatencyTarget::Internet,
             sequence: 1,
             sampled_at_unix: 1700000000,
+            jitter_ms: None,
         };
         assert_eq!(healthy.display_text(), "18 ms");
         assert_eq!(healthy.detailed_display_text(), "18 ms · Internet");
         assert!(healthy.is_fresh(1700000005, 10));
         assert!(!healthy.is_fresh(1700000020, 10));
 
+        let with_jitter = LatencySnapshot {
+            latency_ms: Some(18),
+            state: LatencyState::Healthy,
+            target: LatencyTarget::Internet,
+            sequence: 2,
+            sampled_at_unix: 1700000001,
+            jitter_ms: Some(2),
+        };
+        assert_eq!(
+            with_jitter.detailed_display_text(),
+            "18 ms (±2 ms) · Internet"
+        );
+
         let timeout = LatencySnapshot {
             latency_ms: None,
             state: LatencyState::Timeout,
             target: LatencyTarget::Gateway,
-            sequence: 2,
+            sequence: 3,
             sampled_at_unix: 1700000002,
+            jitter_ms: None,
         };
         assert_eq!(timeout.display_text(), "Timeout");
         assert_eq!(timeout.detailed_display_text(), "Timeout · Gateway");
