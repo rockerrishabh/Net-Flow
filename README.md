@@ -215,6 +215,20 @@ Net Flow includes automated GitHub Actions workflows:
 
 ---
 
+## 🗺️ Roadmap to v1.0.0
+
+Net Flow follows a focused, four-stage incremental path towards production-ready General Availability (v1.0.0):
+
+| Milestone | Theme | Key Capabilities | Status |
+| :--- | :--- | :--- | :---: |
+| **v0.5.0** | **Modern Runtime & Polish** | Windows App SDK 2.x, ICMP jitter variance, and expanded tray host controls | ✅ Released |
+| **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | 🚧 Planned |
+| **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | 📅 Planned |
+| **v0.8.0** | **Tray Flyout & ARM64** | Native Win32 click-from-tray companion flyout (<5 MB RAM) and native Windows on ARM64 (`aarch64-pc-windows-msvc`) | 📅 Planned |
+| **v1.0.0** | **General Availability (GA)** | Multi-arch Store MSIX bundle, one-click CSV/JSON diagnostic export, multi-language localization (i18n), and 72h stress hardening | 🌟 Planned |
+
+---
+
 ## 👤 Author & Maintainer
 
 Net Flow is an independent open-source project created and actively maintained by:
