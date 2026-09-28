@@ -123,7 +123,7 @@ jobs:
           $notesPath = "target/RELEASE_NOTES.md"
 
           if (Test-Path $changelogPath) {
-            $rawContent = Get-Content $changelogPath -Raw
+            $rawContent = Get-Content $changelogPath -Raw -Encoding utf8
             $escaped = [regex]::Escape($semver)
             $pattern = "(?s)## \[$escaped\][^\r\n]*\r?\n(.*?)(?=\r?\n## \[|\Z)"
             if ($rawContent -match $pattern) {
@@ -134,31 +134,52 @@ jobs:
 
               # Format clean plain-text release notes for Microsoft Partner Center listing
               $lines = $extracted -split "\r?\n"
-              $cleanedLines = @()
+              $categories = [ordered]@{}
+              $currentCat = "[New Features]"
               foreach ($line in $lines) {
                 $trimmed = $line.Trim()
                 if ($trimmed -match '^[-*_]{3,}$' -or [string]::IsNullOrWhiteSpace($trimmed)) { continue }
                 if ($trimmed -match '^###\s+(.*)$') {
                   $secName = $matches[1].Trim()
-                  if ($cleanedLines.Count -gt 0) { $cleanedLines += "" }
-                  if ($secName -match '(?i)add|feat|change') {
-                    $cleanedLines += "[New & Improvements]"
-                  } elseif ($secName -match '(?i)fix') {
-                    $cleanedLines += "[Fixes & Stability]"
+                  if ($secName -match '(?i)add|feat') {
+                    $currentCat = "[New Features]"
+                  } elseif ($secName -match '(?i)change|improve') {
+                    $currentCat = "[Improvements]"
+                  } elseif ($secName -match '(?i)fix|secu') {
+                    $currentCat = "[Fixes & Stability]"
+                  } elseif ($secName -match '(?i)deprecat|remov') {
+                    $currentCat = "[Changes & Deprecations]"
                   } else {
-                    $cleanedLines += "[$secName]"
+                    $currentCat = "[$secName]"
+                  }
+                  if (-not $categories.Contains($currentCat)) {
+                    $categories[$currentCat] = @()
                   }
                   continue
                 }
+                if (-not $categories.Contains($currentCat)) {
+                  $categories[$currentCat] = @()
+                }
                 $clean = $trimmed -replace '`', ''
                 if ($clean -match '^-\s+\*\*([^\*]+)\*\*:\s*(.*)$') {
-                  $cleanedLines += if ($matches[2].Trim()) { "• $($matches[1].Trim()): $($matches[2].Trim())" } else { "• $($matches[1].Trim()):" }
+                  $item = if ($matches[2].Trim()) { "• $($matches[1].Trim()): $($matches[2].Trim())" } else { "• $($matches[1].Trim()):" }
+                  $categories[$currentCat] += $item
                 } elseif ($clean -match '^-\s+\*\*([^\*]+)\*\*$') {
-                  $cleanedLines += "• $($matches[1].Trim())"
+                  $categories[$currentCat] += "• $($matches[1].Trim())"
                 } elseif ($clean -match '^-\s+(.*)$') {
-                  $cleanedLines += "  - $($matches[1].Trim())"
+                  $categories[$currentCat] += "  - $($matches[1].Trim())"
                 } else {
-                  $cleanedLines += ($clean -replace '\*\*', '')
+                  $categories[$currentCat] += ($clean -replace '\*\*', '')
+                }
+              }
+
+              $cleanedLines = @()
+              foreach ($cat in $categories.Keys) {
+                $items = $categories[$cat]
+                if ($items.Count -gt 0) {
+                  if ($cleanedLines.Count -gt 0) { $cleanedLines += "" }
+                  $cleanedLines += $cat
+                  $cleanedLines += $items
                 }
               }
               $storeNotes = "What's New in v${semver}:`n`n" + ($cleanedLines -join "`n")
