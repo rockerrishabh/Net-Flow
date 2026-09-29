@@ -1960,7 +1960,7 @@ pub fn build_settings_card(current_config: &WidgetConfig) -> String {
 /// while Medium and Large widgets provide full speed unit and chart window controls.
 pub fn build_settings_card_for_size(
     current_config: &WidgetConfig,
-    size: &str,
+    _size: &str,
     _session_duration_secs: u64,
     _snapshot: &NetworkSnapshot,
 ) -> String {
@@ -1977,7 +1977,7 @@ pub fn build_settings_card_for_size(
                         "type": "TextBlock",
                         "text": "Net Flow Settings",
                         "weight": "Bolder",
-                        "size": if size == "Small" { "Default" } else { "Medium" },
+                        "size": "Medium",
                         "wrap": false
                     }
                 ]
@@ -1987,484 +1987,392 @@ pub fn build_settings_card_for_size(
 
     let mut body = vec![header];
 
-    if size == "Small" {
-        // Small widget (~160px): 2 balanced rows of 2-column compact grids
-        // Row 1: Units and History
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Units",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "speed_unit",
-                            "style": "compact",
-                            "spacing": "None",
-                            "value": current_config.speed_unit.to_str_value(),
-                            "choices": [
-                                { "title": "Auto", "value": "auto" },
-                                { "title": "B/s", "value": "b" },
-                                { "title": "KB/s", "value": "kb" },
-                                { "title": "MB/s", "value": "mb" },
-                                { "title": "GB/s", "value": "gb" }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "spacing": "Small",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "History",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "chart_window",
-                            "style": "compact",
-                            "spacing": "None",
-                            "value": current_config.chart_window.to_string(),
-                            "choices": [
-                                { "title": "15s", "value": "15" },
-                                { "title": "30s", "value": "30" },
-                                { "title": "60s", "value": "60" }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }));
-
-        // Row 2: Graph style and Latency target
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Graph style",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "graph_style",
-                            "style": "compact",
-                            "spacing": "None",
-                            "value": current_config.graph_style.to_str_value(),
-                            "choices": [
-                                { "title": "Area", "value": "area" },
-                                { "title": "Bar", "value": "bar" }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "spacing": "Small",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Latency target",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "latency_target",
-                            "style": "compact",
-                            "spacing": "None",
-                            "value": current_config.latency_target.to_str_value(),
-                            "choices": [
-                                { "title": "Auto", "value": "auto" },
-                                { "title": "Internet", "value": "internet" },
-                                { "title": "Gateway", "value": "gateway" }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }));
-
-        body.push(json!({
-            "type": "TextBlock",
-            "text": "Download alert",
-            "weight": "Bolder",
-            "size": "Small",
-            "spacing": "Medium",
-            "wrap": false
-        }));
-        body.push(json!({
-            "type": "Input.Toggle",
-            "id": "alerts_download_enabled",
-            "title": "Notify on high download",
-            "value": if current_config.alerts.download_enabled && current_config.alerts.enabled { "true" } else { "false" },
-            "valueOn": "true",
-            "valueOff": "false"
-        }));
-        body.push(json!({
-            "type": "Input.Number",
-            "id": "alert_download_threshold_mbps",
-            "min": 1,
-            "max": 100000,
-            "value": (current_config.alerts.download_threshold() / 1024 / 1024).max(1),
-            "placeholder": "DL Threshold (MiB/s)"
-        }));
-        body.push(json!({
-            "type": "Input.Number",
-            "id": "alert_download_sustain_secs",
-            "min": 1,
-            "max": 3600,
-            "value": current_config.alerts.download_sustain(),
-            "placeholder": "DL Sustain seconds"
-        }));
-
-        body.push(json!({
-            "type": "TextBlock",
-            "text": "Upload alert",
-            "weight": "Bolder",
-            "size": "Small",
-            "spacing": "Medium",
-            "wrap": false
-        }));
-        body.push(json!({
-            "type": "Input.Toggle",
-            "id": "alerts_upload_enabled",
-            "title": "Notify on high upload",
-            "value": if current_config.alerts.upload_enabled && current_config.alerts.enabled { "true" } else { "false" },
-            "valueOn": "true",
-            "valueOff": "false"
-        }));
-        body.push(json!({
-            "type": "Input.Number",
-            "id": "alert_upload_threshold_mbps",
-            "min": 1,
-            "max": 100000,
-            "value": (current_config.alerts.upload_threshold() / 1024 / 1024).max(1),
-            "placeholder": "UL Threshold (MiB/s)"
-        }));
-        body.push(json!({
-            "type": "Input.Number",
-            "id": "alert_upload_sustain_secs",
-            "min": 1,
-            "max": 3600,
-            "value": current_config.alerts.upload_sustain(),
-            "placeholder": "UL Sustain seconds"
-        }));
-    } else {
-        // Medium & Large (~340px): balanced rows for clear organization
-        // Row 1: 2-column layout for Speed units and History window
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Speed units",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "speed_unit",
-                            "style": "compact",
-                            "spacing": "Small",
-                            "value": current_config.speed_unit.to_str_value(),
-                            "choices": [
-                                { "title": "Auto", "value": "auto" },
-                                { "title": "B/s", "value": "b" },
-                                { "title": "KB/s", "value": "kb" },
-                                { "title": "MB/s", "value": "mb" },
-                                { "title": "GB/s", "value": "gb" }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "spacing": "Medium",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "History window",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "chart_window",
-                            "style": "compact",
-                            "spacing": "Small",
-                            "value": current_config.chart_window.to_string(),
-                            "choices": [
-                                { "title": "15 seconds", "value": "15" },
-                                { "title": "30 seconds", "value": "30" },
-                                { "title": "60 seconds", "value": "60" }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }));
-
-        // Row 2: Graph style and Latency target
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Graph style",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "graph_style",
-                            "style": "compact",
-                            "spacing": "Small",
-                            "value": current_config.graph_style.to_str_value(),
-                            "choices": [
-                                { "title": "Area (Waveform)", "value": "area" },
-                                { "title": "Bar (Columns)", "value": "bar" }
-                            ]
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "spacing": "Medium",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Latency target",
-                            "weight": "Bolder",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.ChoiceSet",
-                            "id": "latency_target",
-                            "style": "compact",
-                            "spacing": "Small",
-                            "value": current_config.latency_target.to_str_value(),
-                            "choices": [
-                                { "title": "Auto (Internet/LAN)", "value": "auto" },
-                                { "title": "Internet (1.1.1.1)", "value": "internet" },
-                                { "title": "Gateway (Router)", "value": "gateway" }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }));
-
-        // Row 4: Bandwidth alerts (independent Download & Upload)
-        body.push(json!({
-            "type": "TextBlock",
-            "text": "Bandwidth alerts",
-            "weight": "Bolder",
-            "size": "Small",
-            "spacing": "Medium",
-            "wrap": false
-        }));
-        body.push(json!({
-            "type": "Input.Toggle",
-            "id": "alerts_download_enabled",
-            "title": "Notify on sustained high download",
-            "value": if current_config.alerts.download_enabled && current_config.alerts.enabled { "true" } else { "false" },
-            "valueOn": "true",
-            "valueOff": "false"
-        }));
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                { "type": "Column", "width": "stretch", "items": [{
-                    "type": "Input.Number", "id": "alert_download_threshold_mbps", "min": 1, "max": 100000,
-                    "value": (current_config.alerts.download_threshold() / 1024 / 1024).max(1),
-                    "placeholder": "DL MiB/s"
-                }] },
-                { "type": "Column", "width": "stretch", "items": [{
-                    "type": "Input.Number", "id": "alert_download_sustain_secs", "min": 1, "max": 3600,
-                    "value": current_config.alerts.download_sustain(),
-                    "placeholder": "DL Seconds"
-                }] }
-            ]
-        }));
-
-        body.push(json!({
-            "type": "Input.Toggle",
-            "id": "alerts_upload_enabled",
-            "title": "Notify on sustained high upload",
-            "value": if current_config.alerts.upload_enabled && current_config.alerts.enabled { "true" } else { "false" },
-            "valueOn": "true",
-            "valueOff": "false"
-        }));
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                { "type": "Column", "width": "stretch", "items": [{
-                    "type": "Input.Number", "id": "alert_upload_threshold_mbps", "min": 1, "max": 100000,
-                    "value": (current_config.alerts.upload_threshold() / 1024 / 1024).max(1),
-                    "placeholder": "UL MiB/s"
-                }] },
-                { "type": "Column", "width": "stretch", "items": [{
-                    "type": "Input.Number", "id": "alert_upload_sustain_secs", "min": 1, "max": 3600,
-                    "value": current_config.alerts.upload_sustain(),
-                    "placeholder": "UL Seconds"
-                }] }
-            ]
-        }));
-
-        // Row 5: Monthly Data Budget and Quotas
-        body.push(json!({
-            "type": "TextBlock",
-            "text": "Data budget & monthly quota",
-            "weight": "Bolder",
-            "size": "Small",
-            "spacing": "Medium",
-            "wrap": false
-        }));
-        body.push(json!({
-            "type": "Input.Toggle",
-            "id": "budget_enabled",
-            "title": "Enable monthly data quota",
-            "value": if current_config.budget.enabled { "true" } else { "false" },
-            "valueOn": "true",
-            "valueOff": "false"
-        }));
-        let cap_gb = current_config
-            .budget
-            .monthly_cap_bytes
-            .map(|b| (b / (1024 * 1024 * 1024)).max(1))
-            .unwrap_or(500);
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Small",
-            "columns": [
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Monthly cap (GB)",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.Number",
-                            "id": "budget_cap_gb",
-                            "min": 1,
-                            "max": 100000,
-                            "value": cap_gb,
-                            "placeholder": "Cap in GB (e.g. 500)"
-                        }
-                    ]
-                },
-                {
-                    "type": "Column",
-                    "width": "stretch",
-                    "items": [
-                        {
-                            "type": "TextBlock",
-                            "text": "Renewal day (1-31)",
-                            "size": "Small",
-                            "wrap": false
-                        },
-                        {
-                            "type": "Input.Number",
-                            "id": "budget_renewal_day",
-                            "min": 1,
-                            "max": 31,
-                            "value": current_config.budget.renewal_day,
-                            "placeholder": "Renewal day"
-                        }
-                    ]
-                }
-            ]
-        }));
-        body.push(json!({
-            "type": "Input.ChoiceSet",
-            "id": "budget_scope",
-            "style": "compact",
-            "spacing": "Small",
-            "value": match current_config.budget.scope {
-                crate::budget::BudgetScope::Combined => "combined",
-                crate::budget::BudgetScope::DownloadOnly => "download_only",
+    // Row 1: Speed units & History window (2 columns)
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Speed units",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": false
+                    },
+                    {
+                        "type": "Input.ChoiceSet",
+                        "id": "speed_unit",
+                        "style": "compact",
+                        "spacing": "Small",
+                        "value": current_config.speed_unit.to_str_value(),
+                        "choices": [
+                            { "title": "Auto", "value": "auto" },
+                            { "title": "B/s", "value": "b" },
+                            { "title": "KB/s", "value": "kb" },
+                            { "title": "MB/s", "value": "mb" },
+                            { "title": "GB/s", "value": "gb" }
+                        ]
+                    }
+                ]
             },
-            "choices": [
-                { "title": "Scope: Download + Upload", "value": "combined" },
-                { "title": "Scope: Download only", "value": "download_only" }
-            ]
-        }));
+            {
+                "type": "Column",
+                "width": "stretch",
+                "spacing": "Medium",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "History window",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": false
+                    },
+                    {
+                        "type": "Input.ChoiceSet",
+                        "id": "chart_window",
+                        "style": "compact",
+                        "spacing": "Small",
+                        "value": current_config.chart_window.to_string(),
+                        "choices": [
+                            { "title": "15 seconds", "value": "15" },
+                            { "title": "30 seconds", "value": "30" },
+                            { "title": "60 seconds", "value": "60" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }));
 
-        // Row 6: Compact left-aligned Reset session button
-        body.push(json!({
-            "type": "ColumnSet",
-            "spacing": "Medium",
-            "columns": [
-                {
-                    "type": "Column",
-                    "width": "auto",
-                    "items": [
-                        {
-                            "type": "ActionSet",
-                            "spacing": "None",
-                            "actions": [
-                                {
-                                    "type": "Action.Execute",
-                                    "title": "Reset session",
-                                    "verb": "reset_session",
-                                    "associatedInputs": "none"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }));
-    }
+    // Row 2: Graph style and Latency target (2 columns)
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Graph style",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": false
+                    },
+                    {
+                        "type": "Input.ChoiceSet",
+                        "id": "graph_style",
+                        "style": "compact",
+                        "spacing": "Small",
+                        "value": current_config.graph_style.to_str_value(),
+                        "choices": [
+                            { "title": "Area (Waveform)", "value": "area" },
+                            { "title": "Bar (Columns)", "value": "bar" }
+                        ]
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "spacing": "Medium",
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Latency target",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": false
+                    },
+                    {
+                        "type": "Input.ChoiceSet",
+                        "id": "latency_target",
+                        "style": "compact",
+                        "spacing": "Small",
+                        "value": current_config.latency_target.to_str_value(),
+                        "choices": [
+                            { "title": "Auto (Internet/LAN)", "value": "auto" },
+                            { "title": "Internet (1.1.1.1)", "value": "internet" },
+                            { "title": "Gateway (Router)", "value": "gateway" }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }));
+
+    // Section 3: Bandwidth alerts (3-column inline layout)
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": 2,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Bandwidth alerts",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "MiB/s",
+                        "size": "Small",
+                        "color": "Subtle",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Sustain (s)",
+                        "size": "Small",
+                        "color": "Subtle",
+                        "wrap": false
+                    }
+                ]
+            }
+        ]
+    }));
+
+    // Download alert row
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": 2,
+                "items": [
+                    {
+                        "type": "Input.Toggle",
+                        "id": "alerts_download_enabled",
+                        "title": "Download alert",
+                        "value": if current_config.alerts.download_enabled && current_config.alerts.enabled { "true" } else { "false" },
+                        "valueOn": "true",
+                        "valueOff": "false"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "Input.Number",
+                        "id": "alert_download_threshold_mbps",
+                        "min": 1,
+                        "max": 100000,
+                        "value": (current_config.alerts.download_threshold() / 1024 / 1024).max(1),
+                        "placeholder": "MiB/s"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "Input.Number",
+                        "id": "alert_download_sustain_secs",
+                        "min": 1,
+                        "max": 3600,
+                        "value": current_config.alerts.download_sustain(),
+                        "placeholder": "Secs"
+                    }
+                ]
+            }
+        ]
+    }));
+
+    // Upload alert row
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": 2,
+                "items": [
+                    {
+                        "type": "Input.Toggle",
+                        "id": "alerts_upload_enabled",
+                        "title": "Upload alert",
+                        "value": if current_config.alerts.upload_enabled && current_config.alerts.enabled { "true" } else { "false" },
+                        "valueOn": "true",
+                        "valueOff": "false"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "Input.Number",
+                        "id": "alert_upload_threshold_mbps",
+                        "min": 1,
+                        "max": 100000,
+                        "value": (current_config.alerts.upload_threshold() / 1024 / 1024).max(1),
+                        "placeholder": "MiB/s"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "Input.Number",
+                        "id": "alert_upload_sustain_secs",
+                        "min": 1,
+                        "max": 3600,
+                        "value": current_config.alerts.upload_sustain(),
+                        "placeholder": "Secs"
+                    }
+                ]
+            }
+        ]
+    }));
+
+    // Section 4: Data budget & monthly quota (3-column inline layout)
+    let cap_gb = current_config
+        .budget
+        .monthly_cap_bytes
+        .map(|b| (b / (1024 * 1024 * 1024)).max(1))
+        .unwrap_or(500);
+
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": 2,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Data budget & quota",
+                        "weight": "Bolder",
+                        "size": "Small",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Cap (GB)",
+                        "size": "Small",
+                        "color": "Subtle",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Reset day",
+                        "size": "Small",
+                        "color": "Subtle",
+                        "wrap": false
+                    }
+                ]
+            }
+        ]
+    }));
+
+    body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": 2,
+                "items": [
+                    {
+                        "type": "Input.Toggle",
+                        "id": "budget_enabled",
+                        "title": "Enable quota",
+                        "value": if current_config.budget.enabled { "true" } else { "false" },
+                        "valueOn": "true",
+                        "valueOff": "false"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "Input.Number",
+                        "id": "budget_cap_gb",
+                        "min": 1,
+                        "max": 100000,
+                        "value": cap_gb,
+                        "placeholder": "GB"
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "Input.Number",
+                        "id": "budget_renewal_day",
+                        "min": 1,
+                        "max": 31,
+                        "value": current_config.budget.renewal_day,
+                        "placeholder": "1-31"
+                    }
+                ]
+            }
+        ]
+    }));
+
+    body.push(json!({
+        "type": "Input.ChoiceSet",
+        "id": "budget_scope",
+        "style": "compact",
+        "spacing": "Small",
+        "value": match current_config.budget.scope {
+            crate::budget::BudgetScope::Combined => "combined",
+            crate::budget::BudgetScope::DownloadOnly => "download_only",
+        },
+        "choices": [
+            { "title": "Scope: Download + Upload", "value": "combined" },
+            { "title": "Scope: Download only", "value": "download_only" }
+        ]
+    }));
 
     body.push(json!({
         "type": "ActionSet",
+        "spacing": "Medium",
         "actions": [
             {
                 "type": "Action.Execute",
@@ -2755,10 +2663,11 @@ mod tests {
         let json_str = build_settings_card(&WidgetConfig::default());
         let parsed: Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(parsed["version"], "1.6");
-        for verb in ["save_settings", "reset_session", "cancel_settings"] {
+        for verb in ["save_settings", "cancel_settings"] {
             assert!(json_str.contains(verb));
         }
         assert!(!json_str.contains("apps_expanded"));
+        assert!(!json_str.contains("reset_session"));
     }
 
     #[test]
@@ -2773,11 +2682,11 @@ mod tests {
         assert!(small_json.contains("chart_window"));
         assert!(
             !small_json.contains("apps_expanded"),
-            "Small settings card must omit apps_expanded to stay minimal"
+            "Settings card must omit apps_expanded to stay minimal"
         );
         assert!(
             !small_json.contains("reset_session"),
-            "Small settings card must omit reset_session to avoid clipping"
+            "Settings card must omit duplicate reset_session to avoid vertical clipping"
         );
         assert!(small_json.contains("save_settings"));
         assert!(small_json.contains("cancel_settings"));
@@ -2793,8 +2702,7 @@ mod tests {
         assert!(!med_json.contains("apps_expanded"));
         assert!(med_json.contains("save_settings"));
         assert!(med_json.contains("cancel_settings"));
-        assert!(med_json.contains("reset_session"));
-        assert!(med_json.contains("\"title\":\"Reset session\""));
+        assert!(!med_json.contains("reset_session"));
 
         let large_json = build_settings_card_for_size(
             &WidgetConfig::default(),
@@ -2805,6 +2713,9 @@ mod tests {
         assert!(large_json.contains("speed_unit"));
         assert!(large_json.contains("chart_window"));
         assert!(!large_json.contains("apps_expanded"));
+        assert!(large_json.contains("save_settings"));
+        assert!(large_json.contains("cancel_settings"));
+        assert!(!large_json.contains("reset_session"));
 
         // Verify that Input.Number elements have numeric values, not string values
         for json_str in [&small_json, &med_json, &large_json] {
