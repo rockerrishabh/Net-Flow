@@ -1266,6 +1266,25 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
 
     let alerts = alerts.normalized();
 
+    // Data budget preferences
+    let mut budget = current_config.budget.clone();
+    if let Some(b_enabled) = parse_bool_field(parsed.get("budget_enabled")) {
+        budget.enabled = b_enabled;
+    }
+    if let Some(b_cap_gb) = parse_number_field(parsed.get("budget_cap_gb")) {
+        budget.monthly_cap_bytes = Some((b_cap_gb.max(1) as u64) * 1024 * 1024 * 1024);
+    }
+    if let Some(b_renewal) = parse_number_field(parsed.get("budget_renewal_day")) {
+        budget.renewal_day = (b_renewal as u8).clamp(1, 31);
+    }
+    if let Some(b_scope_str) = parsed.get("budget_scope").and_then(|v| v.as_str()) {
+        budget.scope = match b_scope_str {
+            "download_only" => net_flow_core::budget::BudgetScope::DownloadOnly,
+            _ => net_flow_core::budget::BudgetScope::Combined,
+        };
+    }
+    let budget = budget.normalized();
+
     WidgetConfig {
         speed_unit,
         chart_window,
@@ -1276,6 +1295,7 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         selected_adapter_luid,
         alerts,
         latency_target,
+        budget,
     }
 }
 

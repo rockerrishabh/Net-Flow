@@ -61,6 +61,9 @@ pub struct WidgetConfig {
     /// Preferred network latency probe endpoint mode: Auto, Internet, or Gateway.
     #[serde(default)]
     pub latency_target: crate::backend::LatencyTargetMode,
+    /// Data budget and monthly quota preferences persisted in config.json.
+    #[serde(default)]
+    pub budget: crate::budget::DataBudgetConfig,
 }
 
 impl Default for WidgetConfig {
@@ -75,6 +78,7 @@ impl Default for WidgetConfig {
             selected_adapter_luid: None,
             alerts: BandwidthAlertConfig::default(),
             latency_target: crate::backend::LatencyTargetMode::Auto,
+            budget: crate::budget::DataBudgetConfig::default(),
         }
     }
 }
@@ -1327,6 +1331,76 @@ pub fn build_adaptive_card_template(size: &str) -> String {
                 }
             ]
         }));
+
+        body.push(json!({
+            "type": "Container",
+            "$when": "${hasDataBudget == true}",
+            "spacing": "Medium",
+            "items": [
+                {
+                    "type": "ColumnSet",
+                    "spacing": "None",
+                    "columns": [
+                        {
+                            "type": "Column",
+                            "width": "stretch",
+                            "verticalContentAlignment": "Center",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "Monthly data budget",
+                                    "size": "Small",
+                                    "weight": "Bolder",
+                                    "wrap": false
+                                }
+                            ]
+                        },
+                        {
+                            "type": "Column",
+                            "width": "auto",
+                            "verticalContentAlignment": "Center",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "${budgetText}",
+                                    "size": "Small",
+                                    "isSubtle": true,
+                                    "horizontalAlignment": "Right",
+                                    "wrap": false
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "type": "Container",
+                    "minHeight": "6px",
+                    "maxHeight": "6px",
+                    "roundedCorners": true,
+                    "spacing": "Small",
+                    "items": [
+                        {
+                            "type": "ColumnSet",
+                            "spacing": "None",
+                            "columns": [
+                                {
+                                    "type": "Column",
+                                    "width": "${budgetUsedWidth}*",
+                                    "style": "${budgetBarColor}",
+                                    "items": []
+                                },
+                                {
+                                    "type": "Column",
+                                    "width": "${budgetRemainingWidth}*",
+                                    "style": "Default",
+                                    "items": []
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
     }
 
     // Large cards have enough space for a compact live breakdown of every
@@ -1453,6 +1527,24 @@ pub fn build_adaptive_card_template(size: &str) -> String {
                     "type": "Container",
                     "spacing": "None",
                     "items": app_slots
+                }
+            ]
+        }));
+    }
+
+    // Medium cards display a compact data budget summary badge
+    if size == "Medium" {
+        body.push(json!({
+            "type": "Container",
+            "$when": "${hasDataBudget == true}",
+            "spacing": "Small",
+            "items": [
+                {
+                    "type": "TextBlock",
+                    "text": "${budgetMediumText}",
+                    "size": "Small",
+                    "isSubtle": true,
+                    "wrap": false
                 }
             ]
         }));
@@ -1741,6 +1833,42 @@ pub fn build_adaptive_card_data(
     data_map.insert("hasPhysicalLink".to_string(), json!(has_physical_link));
     data_map.insert("physicalLinkText".to_string(), json!(physical_link_text));
     data_map.insert("physicalLinkIcon".to_string(), json!(physical_link_icon));
+
+    let (
+        has_data_budget,
+        budget_used_w,
+        budget_rem_w,
+        budget_bar_color,
+        budget_text,
+        budget_medium_text,
+    ) = if config.budget.enabled
+        && let Some(budget) = &snapshot.budget
+    {
+        let (used, rem) = crate::budget::budget_progress_width(budget.usage_pct);
+        let color = crate::budget::budget_bar_style(budget.usage_pct);
+        let headline = crate::budget::format_budget_headline(
+            budget.consumed_bytes,
+            budget.cap_bytes,
+            budget.usage_pct,
+            budget.days_remaining,
+        );
+        let medium = crate::budget::format_budget_medium(
+            budget.consumed_bytes,
+            budget.cap_bytes,
+            budget.usage_pct,
+            budget.days_remaining,
+        );
+        (true, used, rem, color, headline, medium)
+    } else {
+        (false, 0, 100, "Accent", String::new(), String::new())
+    };
+
+    data_map.insert("hasDataBudget".to_string(), json!(has_data_budget));
+    data_map.insert("budgetUsedWidth".to_string(), json!(budget_used_w));
+    data_map.insert("budgetRemainingWidth".to_string(), json!(budget_rem_w));
+    data_map.insert("budgetBarColor".to_string(), json!(budget_bar_color));
+    data_map.insert("budgetText".to_string(), json!(budget_text));
+    data_map.insert("budgetMediumText".to_string(), json!(budget_medium_text));
     data_map.insert(
         "downloadRate".to_string(),
         json!(fmt_bw(display_rx_bps, config.speed_unit)),
@@ -2225,7 +2353,90 @@ pub fn build_settings_card_for_size(
             ]
         }));
 
-        // Row 5: Compact left-aligned Reset session button
+        // Row 5: Monthly Data Budget and Quotas
+        body.push(json!({
+            "type": "TextBlock",
+            "text": "Data budget & monthly quota",
+            "weight": "Bolder",
+            "size": "Small",
+            "spacing": "Medium",
+            "wrap": false
+        }));
+        body.push(json!({
+            "type": "Input.Toggle",
+            "id": "budget_enabled",
+            "title": "Enable monthly data quota",
+            "value": if current_config.budget.enabled { "true" } else { "false" },
+            "valueOn": "true",
+            "valueOff": "false"
+        }));
+        let cap_gb = current_config
+            .budget
+            .monthly_cap_bytes
+            .map(|b| (b / (1024 * 1024 * 1024)).max(1))
+            .unwrap_or(500);
+        body.push(json!({
+            "type": "ColumnSet",
+            "spacing": "Small",
+            "columns": [
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Monthly cap (GB)",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.Number",
+                            "id": "budget_cap_gb",
+                            "min": 1,
+                            "max": 100000,
+                            "value": cap_gb,
+                            "placeholder": "Cap in GB (e.g. 500)"
+                        }
+                    ]
+                },
+                {
+                    "type": "Column",
+                    "width": "stretch",
+                    "items": [
+                        {
+                            "type": "TextBlock",
+                            "text": "Renewal day (1-31)",
+                            "size": "Small",
+                            "wrap": false
+                        },
+                        {
+                            "type": "Input.Number",
+                            "id": "budget_renewal_day",
+                            "min": 1,
+                            "max": 31,
+                            "value": current_config.budget.renewal_day,
+                            "placeholder": "Renewal day"
+                        }
+                    ]
+                }
+            ]
+        }));
+        body.push(json!({
+            "type": "Input.ChoiceSet",
+            "id": "budget_scope",
+            "style": "compact",
+            "spacing": "Small",
+            "value": match current_config.budget.scope {
+                crate::budget::BudgetScope::Combined => "combined",
+                crate::budget::BudgetScope::DownloadOnly => "download_only",
+            },
+            "choices": [
+                { "title": "Scope: Download + Upload", "value": "combined" },
+                { "title": "Scope: Download only", "value": "download_only" }
+            ]
+        }));
+
+        // Row 6: Compact left-aligned Reset session button
         body.push(json!({
             "type": "ColumnSet",
             "spacing": "Medium",
@@ -2337,6 +2548,7 @@ mod tests {
             generation: 1,
             latency: Default::default(),
             physical_link: None,
+            budget: None,
         }
     }
 
@@ -2640,6 +2852,7 @@ mod tests {
                 ..BandwidthAlertConfig::default()
             },
             latency_target: crate::backend::LatencyTargetMode::Internet,
+            budget: crate::budget::DataBudgetConfig::default(),
         };
         let parsed: WidgetConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -3058,5 +3271,91 @@ mod tests {
         assert!(tpl.contains("${hasPhysicalLink == true}"));
         assert!(tpl.contains("${physicalLinkText}"));
         assert!(tpl.contains("${physicalLinkIcon}"));
+    }
+
+    #[test]
+    fn test_large_and_medium_card_templates_contain_budget_containers() {
+        let large_tpl = build_adaptive_card_template("Large");
+        assert!(large_tpl.contains("${hasDataBudget == true}"));
+        assert!(large_tpl.contains("${budgetUsedWidth}*"));
+        assert!(large_tpl.contains("${budgetRemainingWidth}*"));
+        assert!(large_tpl.contains("${budgetBarColor}"));
+        assert!(large_tpl.contains("${budgetText}"));
+
+        let medium_tpl = build_adaptive_card_template("Medium");
+        assert!(medium_tpl.contains("${hasDataBudget == true}"));
+        assert!(medium_tpl.contains("${budgetMediumText}"));
+
+        let small_tpl = build_adaptive_card_template("Small");
+        assert!(!small_tpl.contains("${hasDataBudget == true}"));
+    }
+
+    #[test]
+    fn test_card_data_budget_bindings() {
+        let mut snap = snapshot_fixture();
+        let mut cfg = WidgetConfig::default();
+
+        // Disabled by default
+        let data_disabled = build_adaptive_card_data(&snap, &cfg, "Large");
+        assert_eq!(data_disabled["hasDataBudget"], json!(false));
+        assert_eq!(data_disabled["budgetUsedWidth"], json!(0));
+        assert_eq!(data_disabled["budgetRemainingWidth"], json!(100));
+
+        // Enabled with active budget snapshot
+        cfg.budget.enabled = true;
+        cfg.budget.monthly_cap_bytes = Some(500 * 1024 * 1024 * 1024); // 500 GB
+        snap.budget = Some(crate::budget::BudgetSnapshot {
+            consumed_bytes: 384 * 1024 * 1024 * 1024,
+            cap_bytes: 500 * 1024 * 1024 * 1024,
+            usage_pct: 76,
+            days_remaining: 14,
+            scope: crate::budget::BudgetScope::Combined,
+            is_over_budget: false,
+            cycle_start: "2026-09-01".to_string(),
+            cycle_end: "2026-10-01".to_string(),
+            milestone_to_notify: None,
+        });
+
+        let data_enabled = build_adaptive_card_data(&snap, &cfg, "Large");
+        assert_eq!(data_enabled["hasDataBudget"], json!(true));
+        assert_eq!(data_enabled["budgetUsedWidth"], json!(76));
+        assert_eq!(data_enabled["budgetRemainingWidth"], json!(24));
+        assert_eq!(data_enabled["budgetBarColor"], json!("Accent"));
+        assert!(
+            data_enabled["budgetText"]
+                .as_str()
+                .unwrap()
+                .contains("14 days left")
+        );
+
+        // Over budget (118%)
+        snap.budget = Some(crate::budget::BudgetSnapshot {
+            consumed_bytes: 590 * 1024 * 1024 * 1024,
+            cap_bytes: 500 * 1024 * 1024 * 1024,
+            usage_pct: 118,
+            days_remaining: 2,
+            scope: crate::budget::BudgetScope::Combined,
+            is_over_budget: true,
+            cycle_start: "2026-09-01".to_string(),
+            cycle_end: "2026-10-01".to_string(),
+            milestone_to_notify: None,
+        });
+
+        let data_over = build_adaptive_card_data(&snap, &cfg, "Large");
+        assert_eq!(data_over["hasDataBudget"], json!(true));
+        assert_eq!(data_over["budgetUsedWidth"], json!(100)); // clamped to 100
+        assert_eq!(data_over["budgetRemainingWidth"], json!(0));
+        assert_eq!(data_over["budgetBarColor"], json!("Attention"));
+    }
+
+    #[test]
+    fn test_settings_card_contains_budget_controls() {
+        let cfg = WidgetConfig::default();
+        let snap = snapshot_fixture();
+        let card_json = build_settings_card_for_size(&cfg, "Large", 0, &snap);
+        assert!(card_json.contains("budget_enabled"));
+        assert!(card_json.contains("budget_cap_gb"));
+        assert!(card_json.contains("budget_renewal_day"));
+        assert!(card_json.contains("budget_scope"));
     }
 }

@@ -1119,6 +1119,7 @@ pub struct NetworkSnapshot {
     pub active_connections_count: usize,
     pub latency: LatencySnapshot,
     pub physical_link: Option<PhysicalLinkInfo>,
+    pub budget: Option<crate::budget::BudgetSnapshot>,
 }
 
 impl NetworkSnapshot {
@@ -1171,6 +1172,7 @@ impl Default for NetworkSnapshot {
             active_connections_count: 0,
             latency: LatencySnapshot::default(),
             physical_link: None,
+            budget: None,
         }
     }
 }
@@ -1179,11 +1181,27 @@ pub fn compute_delta(prev: u64, curr: u64) -> u64 {
     curr.saturating_sub(prev)
 }
 
+/// Discontinuity-aware counter delta evaluation.
+///
+/// Returns None when `curr < prev` (indicating a counter reset, interface restart,
+/// driver reload, machine resume, or counter wrap). When None is returned, 0 bytes
+/// should be attributed to this tick rather than erroneously adding the current counter value.
+pub fn counter_delta(prev: u64, curr: u64) -> Option<u64> {
+    if curr < prev { None } else { Some(curr - prev) }
+}
+
+/// Tracking byte counts for a specific network interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct InterfaceCounterState {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
 /// Core telemetry backend that queries Windows network adapters, computes bandwidth, and tracks apps.
 pub struct NetworkBackend {
     pub mode: AggregateMode,
     /// Baseline byte counts for all known interfaces to avoid spikes when an adapter comes online.
-    prev_counters: HashMap<InterfaceLuid, (u64, u64)>,
+    prev_counters: HashMap<InterfaceLuid, InterfaceCounterState>,
     prev_time: Option<Instant>,
     pub peak_rx: f64,
     pub peak_tx: f64,
@@ -1214,6 +1232,16 @@ pub struct NetworkBackend {
     pub packet_loss_tracker: PacketLossTracker,
     /// Active physical link layer information (Wi-Fi PHY or Ethernet).
     pub physical_link: Option<PhysicalLinkInfo>,
+    /// Bounded day-keyed daily usage store tracking 90-day bandwidth history.
+    pub daily_usage: crate::daily_usage::DailyUsageStore,
+    /// Whether daily usage has accumulated changes that need atomic flush to disk.
+    pub daily_dirty: std::sync::atomic::AtomicBool,
+    /// Active data budget configuration.
+    pub budget_config: crate::budget::DataBudgetConfig,
+    /// Last time daily usage was flushed to disk.
+    last_daily_flush: Instant,
+    /// Current calendar day string to detect local midnight transitions.
+    last_local_day: String,
 }
 
 impl Default for NetworkBackend {
@@ -1253,6 +1281,11 @@ impl NetworkBackend {
             generation: 1,
             packet_loss_tracker: PacketLossTracker::default(),
             physical_link: None,
+            daily_usage: crate::daily_usage::DailyUsageStore::default(),
+            daily_dirty: std::sync::atomic::AtomicBool::new(false),
+            budget_config: crate::budget::DataBudgetConfig::default(),
+            last_daily_flush: Instant::now(),
+            last_local_day: String::new(),
         }
     }
 
@@ -1288,6 +1321,11 @@ impl NetworkBackend {
             generation: persisted.generation.max(1),
             packet_loss_tracker: PacketLossTracker::default(),
             physical_link: persisted.physical_link,
+            daily_usage: crate::daily_usage::load_daily_usage(),
+            daily_dirty: std::sync::atomic::AtomicBool::new(false),
+            budget_config: crate::card::load_user_config().budget,
+            last_daily_flush: Instant::now(),
+            last_local_day: String::new(),
         }
     }
 
@@ -1320,7 +1358,24 @@ impl NetworkBackend {
         self.physical_link = link;
     }
 
-    /// Flush session state to disk.
+    /// Updates the active data budget configuration.
+    pub fn update_budget_config(&mut self, config: crate::budget::DataBudgetConfig) {
+        if self.budget_config != config {
+            self.budget_config = config;
+            self.persist_daily_usage();
+        }
+    }
+
+    /// Flushes accumulated daily usage data atomically to disk if dirty.
+    pub fn persist_daily_usage(&mut self) {
+        if self.daily_dirty.load(std::sync::atomic::Ordering::SeqCst) {
+            crate::daily_usage::save_daily_usage(&self.daily_usage);
+            self.daily_dirty
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Flush session state and daily usage to disk.
     pub fn persist_session(&self) {
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1337,6 +1392,11 @@ impl NetworkBackend {
             latency: self.latency,
             physical_link: self.physical_link.clone(),
         });
+        if self.daily_dirty.load(std::sync::atomic::Ordering::SeqCst) {
+            crate::daily_usage::save_daily_usage(&self.daily_usage);
+            self.daily_dirty
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Reset session: increment generation, re-anchor all baselines, clear totals and history.
@@ -1441,6 +1501,17 @@ impl NetworkBackend {
         crate::process::reconcile_app_bandwidth(&mut active_apps, snapshot.rx_bps, snapshot.tx_bps);
         snapshot.active_apps = active_apps;
         snapshot.active_connections_count = active_conns;
+
+        // Batched periodic flush of daily usage store (every 30 seconds if dirty)
+        if self.daily_dirty.load(std::sync::atomic::Ordering::SeqCst)
+            && self.last_daily_flush.elapsed() >= Duration::from_secs(30)
+        {
+            crate::daily_usage::save_daily_usage(&self.daily_usage);
+            self.daily_dirty
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            self.last_daily_flush = now;
+        }
+
         Ok(snapshot)
     }
 
@@ -1473,9 +1544,9 @@ impl NetworkBackend {
             // regardless of oper_status or mode. This prevents false spikes
             // when an interface cycles Down → Up.
             let (delta_in, delta_out) = match self.prev_counters.get(&iface.luid) {
-                Some(&(prev_in, prev_out)) => {
-                    let d_in = compute_delta(prev_in, iface.in_octets);
-                    let d_out = compute_delta(prev_out, iface.out_octets);
+                Some(prev) => {
+                    let d_in = counter_delta(prev.rx_bytes, iface.in_octets).unwrap_or(0);
+                    let d_out = counter_delta(prev.tx_bytes, iface.out_octets).unwrap_or(0);
                     (d_in, d_out)
                 }
                 None => {
@@ -1485,8 +1556,13 @@ impl NetworkBackend {
             };
 
             // Unconditionally update baseline to current values
-            self.prev_counters
-                .insert(iface.luid, (iface.in_octets, iface.out_octets));
+            self.prev_counters.insert(
+                iface.luid,
+                InterfaceCounterState {
+                    rx_bytes: iface.in_octets,
+                    tx_bytes: iface.out_octets,
+                },
+            );
 
             // Only active, mode-matching interfaces contribute to aggregation
             if iface.oper_status != 1 {
@@ -1580,6 +1656,27 @@ impl NetworkBackend {
         self.session_rx += total_delta_in;
         self.session_tx += total_delta_out;
 
+        // Daily usage accumulation and date rollover check
+        let today_ymd = crate::budget::current_local_ymd();
+        let today_str = crate::budget::format_ymd(today_ymd.0, today_ymd.1, today_ymd.2);
+        if !self.last_local_day.is_empty() && self.last_local_day != today_str {
+            if self.daily_dirty.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::daily_usage::save_daily_usage(&self.daily_usage);
+                self.daily_dirty
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.last_local_day = today_str.clone();
+        } else if self.last_local_day.is_empty() {
+            self.last_local_day = today_str.clone();
+        }
+
+        if total_delta_in > 0 || total_delta_out > 0 {
+            self.daily_usage
+                .record_usage_delta(&today_str, total_delta_in, total_delta_out);
+            self.daily_dirty
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         let instant_rx_bps = if elapsed_secs > 0.0 {
             total_delta_in as f64 / elapsed_secs
         } else {
@@ -1651,6 +1748,12 @@ impl NetworkBackend {
             .unwrap_or(0);
         let session_duration_secs = now_unix.saturating_sub(self.session_start_unix);
 
+        let budget_snap = crate::budget::calculate_budget_snapshot(
+            &self.budget_config,
+            &mut self.daily_usage,
+            today_ymd,
+        );
+
         NetworkSnapshot {
             generation: self.generation,
             rx_bps,
@@ -1676,6 +1779,7 @@ impl NetworkBackend {
             active_connections_count: 0,
             latency: self.latency,
             physical_link: self.physical_link.clone(),
+            budget: Some(budget_snap),
         }
     }
 }
@@ -2812,6 +2916,50 @@ mod tests {
         assert_eq!(compute_delta(100, 250), 150);
         assert_eq!(compute_delta(250, 250), 0);
         assert_eq!(compute_delta(500, 50), 0); // counter reset
+    }
+
+    #[test]
+    fn test_counter_delta_discontinuity() {
+        assert_eq!(counter_delta(100, 250), Some(150));
+        assert_eq!(counter_delta(250, 250), Some(0));
+        assert_eq!(counter_delta(8_000_000, 100_000), None);
+    }
+
+    #[test]
+    fn test_backend_daily_usage_accumulation() {
+        let mut backend = NetworkBackend::new();
+        let t0 = Instant::now();
+        let ifaces = vec![mock_iface(
+            1,
+            InterfaceCategory::Physical,
+            InterfaceMedium::Wifi,
+            1,
+            1000,
+            2000,
+        )];
+        // Sample 1 establishes baseline
+        backend.sample_from_interfaces(&ifaces, t0);
+
+        // Sample 2 adds 500 bytes RX and 300 bytes TX
+        let t1 = t0 + Duration::from_secs(1);
+        let ifaces2 = vec![mock_iface(
+            1,
+            InterfaceCategory::Physical,
+            InterfaceMedium::Wifi,
+            1,
+            1500,
+            2300,
+        )];
+        let snap = backend.sample_from_interfaces(&ifaces2, t1);
+        assert_eq!(snap.session_rx, 500);
+        assert_eq!(snap.session_tx, 300);
+        assert!(snap.budget.is_some());
+
+        let today_ymd = crate::budget::current_local_ymd();
+        let today_str = crate::budget::format_ymd(today_ymd.0, today_ymd.1, today_ymd.2);
+        let entry = backend.daily_usage.get_entry(&today_str).unwrap();
+        assert_eq!(entry.rx_bytes, 500);
+        assert_eq!(entry.tx_bytes, 300);
     }
 
     #[test]

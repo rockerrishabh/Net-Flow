@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-29
+
+### Added
+
+- **Data Budgeting & Billing Cycle Quota Management**:
+  - Configurable data cap allowance in gigabytes (`cap_gb`), custom monthly billing cycle renewal day (1–31), and tracking scope (`AllInterfaces`, `MeteredOnly`, `WifiOnly`, `EthernetOnly`).
+  - Formalized monthly billing cycle boundaries (`cycle_start <= date < cycle_end`) with dynamic clamping to actual days in the month (`min(configured_day, days_in_month)`), full leap-year support, and year-wrap handling.
+  - Zero-truncation `usage_pct: u16` supporting >100% over-budget states while providing clamped 0..=100 progress widths for UI cards.
+- **Bounded Day-Keyed Historical Rolling Usage Store (`daily_usage.json`)**:
+  - Mutable, sorted time-series keyed by unique local calendar date (`YYYY-MM-DD`) with automatic duplicate coalescing.
+  - Automatic 90-day retention pruning discarding older entries on date rollover.
+  - Batched in-memory accumulation on sampling ticks flushed atomically to disk every 30 seconds, on process shutdown, date rollover (midnight), and configuration update.
+  - Atomic persistence using process-unique temporary files and atomic renames, preventing file corruption across sudden reboots or sleep/resume cycles.
+- **Robust Interface Counter Discontinuity & NIC Reset Protection**:
+  - Associating byte baselines with stable 64-bit `InterfaceLuid` keys in `HashMap<InterfaceLuid, InterfaceCounterState>`.
+  - Explicit counter discontinuity policy (`counter_delta(previous, current) -> Option<u64>`) attributing 0 bytes on counter wraps, adapter resets, driver restarts, or sleep/resume instead of corrupting user budgets with massive false deltas.
+- **Crossing-Based Multi-Tier Quota Alerts**:
+  - Crossing-based milestone evaluation (`previous < threshold && current >= threshold && !notified`) for 80%, 90%, and 100% data budget thresholds.
+  - Core-owned evaluation producing `Option<BudgetMilestone>` in `BudgetSnapshot`, decoupling alert logic from presentation hosts.
+  - Multi-tier Windows toast notifications delivered via clean Windows notification XML (`show_budget_alert`), with cycle reset detection resetting milestone notification flags on each new billing cycle.
+- **Adaptive Card Data Budget Progress & Customization Settings**:
+  - Large widget card container with dual-column proportional progress bar (`budgetUsedWidth` and `budgetRemainingWidth`), semantic color styling (`Accent` <80%, `Warning` 80–99%, `Attention` ≥100%), consumed vs total volume text, and remaining billing cycle days.
+  - Medium widget card compact badge (`58% of 500 GB · 12d left`).
+  - Native widget settings card controls for toggling data budget, setting allowance cap (GB), renewal day (1–31), and interface scope.
+- **System Tray Tooltip Quota Status**:
+  - Live tooltip now displays real-time budget quota status (e.g. `Budget: 289.4 GB / 500 GB (58%) · 12d left`).
+
+---
+
 ## [0.6.0] - 2026-09-29
 
 ### Added

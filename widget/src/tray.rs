@@ -347,6 +347,11 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
             let _ = crate::toast::show_bandwidth_alert(event);
         }
 
+        // 4. Data Budget Quota Milestone Alert Evaluation
+        if let Some(milestone) = snapshot.budget.as_ref().and_then(|b| b.milestone_to_notify) {
+            let _ = crate::toast::show_budget_alert(milestone);
+        }
+
         next_sample = started + sample_period;
     }
 }
@@ -459,13 +464,14 @@ unsafe fn remove_icon(hwnd: HWND) {
 unsafe fn update_tooltip(hwnd: HWND) {
     unsafe {
         let Some(ctx) = context(hwnd) else { return };
-        let (rx_bps, tx_bps, latency, phy_link) = {
+        let (rx_bps, tx_bps, latency, phy_link, budget) = {
             let snapshot = ctx.state.latest_snapshot.read_safe();
             (
                 snapshot.rx_bps,
                 snapshot.tx_bps,
                 snapshot.latency,
                 snapshot.physical_link.clone(),
+                snapshot.budget.clone(),
             )
         };
         let mut tip = format!(
@@ -474,6 +480,15 @@ unsafe fn update_tooltip(hwnd: HWND) {
             format_bandwidth(tx_bps),
             latency.detailed_display_text(),
         );
+        if let Some(b) = &budget
+            && b.cap_bytes > 0
+        {
+            let budget_str = format!("Quota: {}% ({}d left)", b.usage_pct, b.days_remaining);
+            let candidate = format!("{}\n{}", tip, budget_str);
+            if candidate.encode_utf16().count() <= 126 {
+                tip = candidate;
+            }
+        }
         if let Some(link) = phy_link {
             let summary = link.display_summary();
             if !summary.is_empty() {

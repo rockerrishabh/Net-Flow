@@ -28,6 +28,42 @@ pub fn show_bandwidth_alert(event: AlertEvent) -> windows::core::Result<()> {
     ToastNotificationManager::CreateToastNotifier()?.Show(&toast)
 }
 
+pub fn show_budget_alert(
+    milestone: net_flow_core::budget::BudgetMilestone,
+) -> windows::core::Result<()> {
+    let (icon, title_suffix) = match milestone.tier {
+        net_flow_core::budget::MilestoneTier::Percent80 => ("⚠️", "approaching monthly cap (80%)"),
+        net_flow_core::budget::MilestoneTier::Percent90 => ("⚠️", "near monthly cap (90%)"),
+        net_flow_core::budget::MilestoneTier::Percent100 => {
+            ("🚨", "monthly data cap reached (100%)")
+        }
+    };
+    let title = format!("Net Flow: {icon} {title_suffix}");
+    let days_label = if milestone.days_remaining == 1 {
+        "1 day remaining in billing cycle.".to_string()
+    } else {
+        format!(
+            "{} days remaining in billing cycle.",
+            milestone.days_remaining
+        )
+    };
+    let body = format!(
+        "Used {} of {} ({}%). {}",
+        net_flow_core::format_bytes(milestone.consumed_bytes),
+        net_flow_core::format_bytes(milestone.cap_bytes),
+        milestone.usage_pct,
+        days_label
+    );
+    let xml = XmlDocument::new()?;
+    xml.LoadXml(&HSTRING::from(format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        escape_xml(&title),
+        escape_xml(&body),
+    )))?;
+    let toast = ToastNotification::CreateToastNotification(&xml)?;
+    ToastNotificationManager::CreateToastNotifier()?.Show(&toast)
+}
+
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
