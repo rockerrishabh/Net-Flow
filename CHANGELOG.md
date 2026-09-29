@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-09-29
+
+### Fixed
+
+- **Widget Customization Flyout Viewport Safety**:
+  - Restructured the settings card into a compact, table-aligned 3-column layout (`Bandwidth alerts` and `Data budget & quota`).
+  - Reduced total vertical height from ~500px down to ~330px, providing ~150px of safety headroom inside the fixed-height Windows 11 Widgets Board dialog.
+  - Eliminated vertical clipping that prevented the Monthly Cap input, Renewal Day input, Scope dropdown, and Save/Cancel buttons from being displayed.
+  - Removed duplicate "Reset session" action from the settings dialog in favor of the one-click `[⟳]` button in the card session footer and the system tray context menu.
+
+---
+
 ## [0.7.0] - 2026-09-29
 
 ### Added
