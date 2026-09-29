@@ -1,5 +1,7 @@
 use crate::alerts::BandwidthAlertConfig;
-use crate::backend::{InterfaceMedium, InterfaceSample, NetworkSnapshot};
+use crate::backend::{
+    InterfaceMedium, InterfaceSample, LatencySnapshot, NetworkSnapshot, PhysicalLinkInfo,
+};
 use crate::chart::{
     GraphStyle, ThemeMode, render_idle_unified_chart_data_uri, render_unified_chart_data_uri,
 };
@@ -507,15 +509,47 @@ fn app_slot_template(slot: usize) -> Value {
     })
 }
 
+/// Formats the latency status text according to widget size hierarchy:
+/// - Small: `18 ms` (or `Timeout`/`Unavailable`)
+/// - Medium: `18 ms · 0% loss`
+/// - Large: `18 ms · ±2 ms · 0% loss`
+pub fn format_card_latency_header(latency: &LatencySnapshot, size: &str) -> String {
+    if let Some(ms) = latency.latency_ms {
+        match size {
+            "Small" => format!("{} ms", ms),
+            "Large" => {
+                let jitter_part = match latency.jitter_ms {
+                    Some(j) => format!(" · ±{} ms", j),
+                    None => String::new(),
+                };
+                let loss_part = match latency.packet_loss_pct {
+                    Some(pct) => format!(" · {}% loss", pct),
+                    None => String::new(),
+                };
+                format!("{} ms{}{}", ms, jitter_part, loss_part)
+            }
+            _ => {
+                let loss_part = match latency.packet_loss_pct {
+                    Some(pct) => format!(" · {}% loss", pct),
+                    None => String::new(),
+                };
+                format!("{} ms{}", ms, loss_part)
+            }
+        }
+    } else {
+        latency.display_text()
+    }
+}
+
 /// Header: medium glyph, interface name, live latency + connection count, and settings button.
-fn header_row(snapshot: &NetworkSnapshot) -> Value {
+fn header_row(snapshot: &NetworkSnapshot, size: &str) -> Value {
     let active_count = if snapshot.active_connections_count > 0 {
         snapshot.active_connections_count
     } else {
         snapshot.active_apps.len()
     };
 
-    let latency_text = snapshot.latency.display_text();
+    let latency_text = format_card_latency_header(&snapshot.latency, size);
     let status_text = format!("{} • {} conns", latency_text, active_count);
 
     json!({
@@ -1020,11 +1054,49 @@ fn session_row(snapshot: &NetworkSnapshot) -> Value {
 
 fn build_card(snapshot: &NetworkSnapshot, config: &WidgetConfig, layout: &Layout) -> Value {
     let mut body: Vec<Value> = vec![
-        header_row(snapshot),
+        header_row(snapshot, layout.chart_size),
         metrics_row(snapshot, config, layout.value_size),
     ];
 
     body.extend(chart_element(snapshot, config, layout.chart_size));
+
+    if layout.chart_size == "Large"
+        && let Some(link) = &snapshot.physical_link
+    {
+        let (icon, text) = match link {
+            PhysicalLinkInfo::Wifi(_) => (icons::MEDIUM_WIFI, link.display_summary()),
+            PhysicalLinkInfo::Ethernet(_) => (icons::MEDIUM_ETHERNET, link.display_summary()),
+        };
+        body.push(json!({
+            "type": "Container",
+            "spacing": "Small",
+            "items": [
+                {
+                    "type": "ColumnSet",
+                    "spacing": "None",
+                    "columns": [
+                        glyph_column(icon, 14, "Physical link", "None"),
+                        {
+                            "type": "Column",
+                            "width": "stretch",
+                            "verticalContentAlignment": "Center",
+                            "spacing": "Small",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": text,
+                                    "size": "Small",
+                                    "isSubtle": true,
+                                    "wrap": false
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+    }
+
     body.extend(apps_section(snapshot, config, layout));
 
     if layout.show_session {
@@ -1209,6 +1281,53 @@ pub fn build_adaptive_card_template(size: &str) -> String {
         "size": "Stretch",
         "spacing": "Medium"
     }));
+
+    // Large cards display the active physical transmission link (Wi-Fi 7/6/5 or Ethernet)
+    if size == "Large" {
+        body.push(json!({
+            "type": "Container",
+            "$when": "${hasPhysicalLink == true}",
+            "spacing": "Small",
+            "items": [
+                {
+                    "type": "ColumnSet",
+                    "spacing": "None",
+                    "columns": [
+                        {
+                            "type": "Column",
+                            "width": "auto",
+                            "verticalContentAlignment": "Center",
+                            "spacing": "None",
+                            "items": [
+                                {
+                                    "type": "Image",
+                                    "url": "${physicalLinkIcon}",
+                                    "width": "14px",
+                                    "height": "14px",
+                                    "altText": "Physical link"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "Column",
+                            "width": "stretch",
+                            "verticalContentAlignment": "Center",
+                            "spacing": "Small",
+                            "items": [
+                                {
+                                    "type": "TextBlock",
+                                    "text": "${physicalLinkText}",
+                                    "size": "Small",
+                                    "isSubtle": true,
+                                    "wrap": false
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }));
+    }
 
     // Large cards have enough space for a compact live breakdown of every
     // connected adapter when multiple interfaces are active.
@@ -1597,20 +1716,7 @@ pub fn build_adaptive_card_data(
         "primaryName".to_string(),
         json!(truncate_name(display_name, 22)),
     );
-    let latency_text = if size != "Small" {
-        if let (Some(ms), Some(jitter)) = (snapshot.latency.latency_ms, snapshot.latency.jitter_ms)
-        {
-            if jitter > 0 {
-                format!("{} ms (±{} ms)", ms, jitter)
-            } else {
-                format!("{} ms", ms)
-            }
-        } else {
-            snapshot.latency.display_text()
-        }
-    } else {
-        snapshot.latency.display_text()
-    };
+    let latency_text = format_card_latency_header(&snapshot.latency, size);
     data_map.insert(
         "activeConnsText".to_string(),
         json!(format!("{} • {} conns", latency_text, active_count)),
@@ -1620,6 +1726,21 @@ pub fn build_adaptive_card_data(
         "latencyDetailedText".to_string(),
         json!(snapshot.latency.detailed_display_text()),
     );
+
+    let (has_physical_link, physical_link_text, physical_link_icon) =
+        if let Some(link) = &snapshot.physical_link {
+            let icon = match link {
+                PhysicalLinkInfo::Wifi(_) => icons::MEDIUM_WIFI,
+                PhysicalLinkInfo::Ethernet(_) => icons::MEDIUM_ETHERNET,
+            };
+            (true, link.display_summary(), icon)
+        } else {
+            (false, String::new(), "")
+        };
+
+    data_map.insert("hasPhysicalLink".to_string(), json!(has_physical_link));
+    data_map.insert("physicalLinkText".to_string(), json!(physical_link_text));
+    data_map.insert("physicalLinkIcon".to_string(), json!(physical_link_icon));
     data_map.insert(
         "downloadRate".to_string(),
         json!(fmt_bw(display_rx_bps, config.speed_unit)),
@@ -2215,6 +2336,7 @@ mod tests {
             active_connections_count: 11,
             generation: 1,
             latency: Default::default(),
+            physical_link: None,
         }
     }
 
@@ -2876,5 +2998,65 @@ mod tests {
         let upload_items = upload_col["items"].as_array().unwrap();
         assert_eq!(upload_items[1]["horizontalAlignment"], "Right");
         assert_eq!(upload_items[2]["horizontalAlignment"], "Right");
+    }
+
+    #[test]
+    fn test_card_data_physical_link_bindings() {
+        let mut snap = snapshot_fixture();
+        snap.physical_link = Some(PhysicalLinkInfo::Wifi(crate::backend::WifiPhyMetrics {
+            ssid: "HomeMesh".to_string(),
+            generation: crate::backend::WifiGeneration::Wifi6,
+            band: crate::backend::WifiBand::Band5Ghz,
+            channel: Some(36),
+            signal_quality_pct: 84,
+            rssi_dbm: Some(-58),
+            tx_rate_mbps: Some(866),
+            rx_rate_mbps: Some(866),
+            is_mlo: false,
+            link_count: 1,
+        }));
+
+        let cfg = WidgetConfig::default();
+        let data = build_adaptive_card_data(&snap, &cfg, "Large");
+        assert_eq!(data["hasPhysicalLink"], json!(true));
+        assert_eq!(
+            data["physicalLinkText"],
+            json!("Wi-Fi 6 · 5 GHz · -58 dBm · 866 Mbps")
+        );
+        assert_eq!(data["physicalLinkIcon"], json!(icons::MEDIUM_WIFI));
+
+        // When physical_link is None
+        snap.physical_link = None;
+        let data_none = build_adaptive_card_data(&snap, &cfg, "Large");
+        assert_eq!(data_none["hasPhysicalLink"], json!(false));
+        assert_eq!(data_none["physicalLinkText"], json!(""));
+    }
+
+    #[test]
+    fn test_card_latency_header_hierarchy() {
+        let latency = LatencySnapshot {
+            latency_ms: Some(18),
+            jitter_ms: Some(2),
+            packet_loss_pct: Some(0),
+            ..Default::default()
+        };
+
+        assert_eq!(format_card_latency_header(&latency, "Small"), "18 ms");
+        assert_eq!(
+            format_card_latency_header(&latency, "Medium"),
+            "18 ms · 0% loss"
+        );
+        assert_eq!(
+            format_card_latency_header(&latency, "Large"),
+            "18 ms · ±2 ms · 0% loss"
+        );
+    }
+
+    #[test]
+    fn test_large_card_template_contains_physical_link_container() {
+        let tpl = build_adaptive_card_template("Large");
+        assert!(tpl.contains("${hasPhysicalLink == true}"));
+        assert!(tpl.contains("${physicalLinkText}"));
+        assert!(tpl.contains("${physicalLinkIcon}"));
     }
 }

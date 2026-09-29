@@ -9,7 +9,7 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.5.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.6.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -33,7 +33,9 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 ## ✨ Highlights
 
 - **🪟 Native Windows 11 Widgets Board Integration**: First-class widget integration (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 support across **Small**, **Medium**, and **Large** card dimensions, powered by modern **Windows App SDK 2.x**.
-- **⚡ Live Network Latency & Ping Jitter**: Real-time ICMP ping measurement and variance tracking using asynchronous Win32 `IcmpSendEcho2`, probing your active IPv4 default gateway or public internet (`1.1.1.1`) with jitter indicators (`18 ms (±2 ms)`) and dedicated latency sparklines on Medium & Large cards.
+- **⚡ Dual-Stack IPv6 & IPv4 Latency Engine**: True dual-stack ICMP telemetry with automatic IPv6 preference and seamless IPv4 fallback using native Win32 `Icmp6SendEcho2` and `IcmpSendEcho2`, probing gateway or public internet with ping jitter spread (`18 ms · ±2 ms`).
+- **📉 20-Sample Rolling Packet Loss & Semantic Health**: Continuously calculates packet loss % across an authoritative circular window (~40s), tracking clear semantic health states (`Healthy`, `Degraded`, `Timeout`, `Unavailable`).
+- **🛜 Deep Wi-Fi PHY & Physical Link Telemetry**: Real-time physical layer metrics using Windows Native Wi-Fi API (`WLAN_REALTIME_CONNECTION_QUALITY`) without requiring location permissions: detects Wi-Fi 7 / 6 / 5 generations, frequency bands (2.4 / 5 / 6 GHz), RSSI dBm, negotiated rates, Multi-Link Operation (MLO), and Ethernet link speeds.
 - **🛡️ Persistent Background System Tray Host**: Decoupled notification-area host (`net-flow.exe --tray`) started automatically at login via Windows `<uap5:StartupTask>`, featuring quick session resets, startup toggling, and fast latency target cycling.
 - **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline and upload traffic below on a shared scale with glowing pulse nodes and peak-preserving Catmull-Rom smoothing.
 - **🌓 System Theme-Aware Palettes**: Automatic Windows Dark/Light mode tracking via `AppsUseLightTheme` registry integration, rendering vibrant dark palettes or high-contrast light palettes with in-card overrides.
@@ -222,8 +224,8 @@ Net Flow follows a focused, four-stage incremental path towards production-ready
 | Milestone | Theme | Key Capabilities | Status |
 | :--- | :--- | :--- | :---: |
 | **v0.5.0** | **Modern Runtime & Polish** | Windows App SDK 2.x, ICMP jitter variance, and expanded tray host controls | ✅ Released |
-| **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | 🚧 Planned |
-| **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | 📅 Planned |
+| **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | ✅ Released |
+| **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | 🚧 Planned |
 | **v0.8.0** | **Tray Flyout & ARM64** | Native Win32 click-from-tray companion flyout (<5 MB RAM) and native Windows on ARM64 (`aarch64-pc-windows-msvc`) | 📅 Planned |
 | **v1.0.0** | **General Availability (GA)** | Multi-arch Store MSIX bundle, one-click CSV/JSON diagnostic export, multi-language localization (i18n), and 72h stress hardening | 🌟 Planned |
 

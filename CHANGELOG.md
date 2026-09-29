@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-29
+
+### Added
+
+- **Dual-Stack IPv6 & IPv4 Probing**:
+  - Native Win32 ICMPv6 telemetry via `Icmp6CreateFile`, `Icmp6SendEcho2`, and `Icmp6ParseReplies` using a platform-neutral internal abstraction `probe_latency(target, timeout_ms)`.
+  - Automatic IPv6 preference with seamless IPv4 fallback, querying best route to Cloudflare DNS (`2606:4700:4700::1111`) via `GetBestRoute2` to resolve source IP and interface index.
+  - Clear semantic distinction between successful ping responses, timeouts, and route unavailabilities.
+- **Rolling Circular Packet Loss % & Semantic Latency Health**:
+  - Authoritative 20-sample rolling circular buffer (~40-second window) maintained exclusively in `backend.rs` as the single source of truth for both widget cards and system tray.
+  - Proper packet loss calculation that excludes route unavailabilities from dropped packet counts.
+  - Explicit semantic health classifications: `Healthy`, `Degraded`, `Timeout`, and `Unavailable`.
+- **Physical Link Telemetry & Wi-Fi 7 / MLO Data Model**:
+  - Deep Wi-Fi physical layer telemetry using Windows Native Wi-Fi API (`wlanapi.dll`) with `WLAN_REALTIME_CONNECTION_QUALITY` (opcode 19), requiring zero location permissions.
+  - Pure deterministic 802.11 generation mapping from `DOT11_PHY_TYPE` (Wi-Fi 7/EHT, Wi-Fi 6/HE, Wi-Fi 5/VHT, Wi-Fi 4/HT, Legacy) and documented RSSI dBm calculation (`(quality / 2) - 100`).
+  - Active Multi-Link Operation (MLO) connection tracking (`is_mlo`, `link_count`).
+  - Dynamic Ethernet link speed detection via IP Helper `MIB_IF_ROW2` (`tx_speed_bps`, `rx_speed_bps`) formatted cleanly (e.g. `Ethernet · 1 Gbps`).
+- **Adaptive Card Physical Link Slot & Hierarchical Header Layout**:
+  - Conditional physical link container on Large widget cards utilizing Adaptive Cards 1.6 `$when: "${hasPhysicalLink == true}"`.
+  - Clean semantic latency hierarchy across card sizes:
+    - Small: `18 ms` (or `Timeout`/`Unavailable`)
+    - Medium: `18 ms · 0% loss`
+    - Large: `18 ms · ±2 ms · 0% loss` with Physical Link line displayed cleanly below.
+- **Enriched System Tray Tooltip**:
+  - Live tooltip now displays authoritative packet loss % and active physical transmission link summary while strictly respecting the 127-character `szTip` buffer limit.
+
 ---
 
 ## [0.5.0] - 2026-09-28

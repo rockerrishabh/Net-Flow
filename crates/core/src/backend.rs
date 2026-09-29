@@ -179,7 +179,7 @@ impl HistorySample {
 }
 
 /// Persistent telemetry metrics saved across widget restarts and session resets.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
     #[serde(default = "default_session_generation")]
     pub generation: u64,
@@ -197,6 +197,8 @@ pub struct SessionState {
     pub updated_at_unix: u64,
     #[serde(default)]
     pub latency: LatencySnapshot,
+    #[serde(default)]
+    pub physical_link: Option<PhysicalLinkInfo>,
 }
 
 const fn default_session_generation() -> u64 {
@@ -218,6 +220,7 @@ impl Default for SessionState {
             all_time_peak_tx: 0.0,
             updated_at_unix: now_unix,
             latency: LatencySnapshot::default(),
+            physical_link: None,
         }
     }
 }
@@ -296,7 +299,7 @@ pub fn write_atomic(path: &std::path::Path, content: &[u8]) -> std::io::Result<(
 
 pub fn save_persisted_session_state(state: &SessionState) {
     let path = get_session_state_path();
-    let mut updated = *state;
+    let mut updated = state.clone();
     if updated.updated_at_unix == 0 {
         updated.updated_at_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -623,6 +626,298 @@ impl LatencyTarget {
     }
 }
 
+/// Operational IP protocol utilized for network latency probing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IpProtocol {
+    #[default]
+    Ipv4,
+    Ipv6,
+}
+
+impl IpProtocol {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ipv4 => "IPv4",
+            Self::Ipv6 => "IPv6",
+        }
+    }
+}
+
+/// Point-in-time result of an individual network ICMP latency probe attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProbeResult {
+    /// Echo reply successfully received with round-trip latency.
+    Success { latency: Duration },
+    /// Echo probe timed out waiting for response.
+    Timeout,
+    /// Probe could not be executed (e.g. no route or network down).
+    Unavailable,
+}
+
+/// Overall latency connectivity health state derived from probe history and packet loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LatencyHealth {
+    /// Latency not yet probed, disabled, or network unreachable.
+    #[default]
+    Unavailable,
+    /// Probe succeeded with 0% rolling packet loss.
+    Healthy,
+    /// Probe succeeded but experiencing packet loss (> 0% and < 100%).
+    Degraded,
+    /// All probes in rolling window timed out (100% loss).
+    Timeout,
+}
+
+impl LatencyHealth {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "Unavailable",
+            Self::Healthy => "Healthy",
+            Self::Degraded => "Degraded",
+            Self::Timeout => "Timeout",
+        }
+    }
+}
+
+/// Circular sliding-window buffer tracking recent probe results to compute rolling packet loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PacketLossTracker {
+    pub samples: [Option<ProbeResult>; 20],
+    pub head: usize,
+    pub count: usize,
+}
+
+impl PacketLossTracker {
+    pub fn record(&mut self, result: ProbeResult) {
+        self.samples[self.head] = Some(result);
+        self.head = (self.head + 1) % 20;
+        self.count = (self.count + 1).min(20);
+    }
+
+    /// Calculates rolling packet loss percentage and packet counts.
+    /// Unavailable attempts are excluded from packet loss accounting.
+    pub fn evaluate(&self) -> (Option<u8>, u32, u32, LatencyHealth) {
+        let mut total_attempts = 0u32;
+        let mut lost_packets = 0u32;
+
+        for i in 0..self.count {
+            if let Some(res) = self.samples[i] {
+                match res {
+                    ProbeResult::Success { .. } => {
+                        total_attempts += 1;
+                    }
+                    ProbeResult::Timeout => {
+                        total_attempts += 1;
+                        lost_packets += 1;
+                    }
+                    ProbeResult::Unavailable => {}
+                }
+            }
+        }
+
+        if total_attempts == 0 {
+            return (None, 0, 0, LatencyHealth::Unavailable);
+        }
+
+        let pct = ((lost_packets as f64 / total_attempts as f64) * 100.0).round() as u8;
+        let health = if lost_packets == 0 {
+            LatencyHealth::Healthy
+        } else if lost_packets == total_attempts {
+            LatencyHealth::Timeout
+        } else {
+            LatencyHealth::Degraded
+        };
+
+        (Some(pct), lost_packets, total_attempts, health)
+    }
+
+    /// Convenience getter for rolling packet loss percentage.
+    pub fn loss_pct(&self) -> Option<u8> {
+        self.evaluate().0
+    }
+
+    /// Convenience getter for (lost_packets, total_attempts).
+    pub fn counts(&self) -> (u32, u32) {
+        let (_, lost, total, _) = self.evaluate();
+        (lost, total)
+    }
+
+    /// Convenience getter for latency health assessment.
+    pub fn health(&self) -> LatencyHealth {
+        self.evaluate().3
+    }
+}
+
+/// Wi-Fi generation / standard mapped from 802.11 PHY types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WifiGeneration {
+    #[default]
+    Unknown,
+    Legacy,
+    Wifi4,
+    Wifi5,
+    Wifi6,
+    Wifi7,
+}
+
+impl WifiGeneration {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Legacy => "Wi-Fi (Legacy)",
+            Self::Wifi4 => "Wi-Fi 4",
+            Self::Wifi5 => "Wi-Fi 5",
+            Self::Wifi6 => "Wi-Fi 6",
+            Self::Wifi7 => "Wi-Fi 7",
+            Self::Unknown => "Wi-Fi",
+        }
+    }
+}
+
+/// Pure deterministic mapping from Windows DOT11_PHY_TYPE to WifiGeneration.
+pub fn wifi_generation(phy: u32) -> WifiGeneration {
+    match phy {
+        7 => WifiGeneration::Wifi4,          // dot11_phy_type_ht (802.11n)
+        8 => WifiGeneration::Wifi5,          // dot11_phy_type_vht (802.11ac)
+        10 => WifiGeneration::Wifi6,         // dot11_phy_type_he (802.11ax)
+        11 => WifiGeneration::Wifi7,         // dot11_phy_type_eht (802.11be)
+        1..=6 | 9 => WifiGeneration::Legacy, // fhss, dsss, ir, ofdm, hrdsss, erp, dmg
+        _ => WifiGeneration::Unknown,
+    }
+}
+
+/// Operating frequency band of a Wi-Fi connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WifiBand {
+    #[default]
+    Unknown,
+    Band24Ghz,
+    Band5Ghz,
+    Band6Ghz,
+}
+
+impl WifiBand {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Band24Ghz => "2.4 GHz",
+            Self::Band5Ghz => "5 GHz",
+            Self::Band6Ghz => "6 GHz",
+            Self::Unknown => "",
+        }
+    }
+}
+
+/// Pure deterministic deduction of Wi-Fi band from channel frequency (MHz) or channel number.
+pub fn wifi_band(freq_mhz: u32, channel: Option<u32>) -> WifiBand {
+    if (5925..=7125).contains(&freq_mhz) {
+        WifiBand::Band6Ghz
+    } else if (4900..=5895).contains(&freq_mhz) {
+        WifiBand::Band5Ghz
+    } else if (2400..=2500).contains(&freq_mhz) {
+        WifiBand::Band24Ghz
+    } else if let Some(ch) = channel {
+        if (1..=14).contains(&ch) {
+            WifiBand::Band24Ghz
+        } else if (32..=177).contains(&ch) {
+            WifiBand::Band5Ghz
+        } else if ch > 177 {
+            WifiBand::Band6Ghz
+        } else {
+            WifiBand::Unknown
+        }
+    } else {
+        WifiBand::Unknown
+    }
+}
+
+/// Pure deterministic conversion from 0..=100 link quality percentage to estimated RSSI in dBm.
+/// Microsoft documentation: 0 -> -100 dBm, 100 -> -50 dBm with linear interpolation.
+pub fn signal_quality_to_rssi_dbm(quality: u8) -> i16 {
+    let clamped = quality.min(100);
+    (clamped as i16 / 2) - 100
+}
+
+/// Physical layer link attributes for an active Wi-Fi connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WifiPhyMetrics {
+    pub ssid: String,
+    pub generation: WifiGeneration,
+    pub band: WifiBand,
+    pub channel: Option<u32>,
+    pub signal_quality_pct: u8,
+    pub rssi_dbm: Option<i16>,
+    pub tx_rate_mbps: Option<u32>,
+    pub rx_rate_mbps: Option<u32>,
+    pub is_mlo: bool,
+    pub link_count: u8,
+}
+
+/// Physical link metrics for a wired Ethernet connection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EthernetLinkMetrics {
+    pub adapter_name: String,
+    pub tx_speed_bps: u64,
+    pub rx_speed_bps: u64,
+}
+
+/// Unified physical link model representing the active physical transmission medium.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PhysicalLinkInfo {
+    Wifi(WifiPhyMetrics),
+    Ethernet(EthernetLinkMetrics),
+}
+
+impl PhysicalLinkInfo {
+    /// Formats a concise physical link summary string for Adaptive Cards and tooltips.
+    pub fn display_summary(&self) -> String {
+        match self {
+            Self::Wifi(w) => {
+                let mut parts = Vec::new();
+                let gen_str = w.generation.as_str();
+                if !gen_str.is_empty() {
+                    parts.push(gen_str.to_string());
+                }
+                let band_str = w.band.as_str();
+                if !band_str.is_empty() {
+                    parts.push(band_str.to_string());
+                }
+                if let Some(rssi) = w.rssi_dbm {
+                    parts.push(format!("{} dBm", rssi));
+                } else {
+                    parts.push(format!("{}%", w.signal_quality_pct));
+                }
+                if let Some(tx) = w.tx_rate_mbps {
+                    parts.push(format!("{} Mbps", tx));
+                }
+                parts.join(" · ")
+            }
+            Self::Ethernet(e) => {
+                let max_speed = e.tx_speed_bps.max(e.rx_speed_bps);
+                if max_speed >= 1_000_000_000 {
+                    let gbps = max_speed as f64 / 1_000_000_000.0;
+                    if gbps.fract() == 0.0 {
+                        format!("Ethernet · {:.0} Gbps", gbps)
+                    } else {
+                        format!("Ethernet · {:.1} Gbps", gbps)
+                    }
+                } else if max_speed >= 1_000_000 {
+                    format!("Ethernet · {} Mbps", max_speed / 1_000_000)
+                } else {
+                    "Ethernet".to_string()
+                }
+            }
+        }
+    }
+}
+
+/// Discovered IPv6 routing parameters from `GetBestRoute2`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ipv6Route {
+    pub interface_luid: u64,
+    pub interface_index: u32,
+    pub source: std::net::Ipv6Addr,
+    pub gateway: Option<std::net::Ipv6Addr>,
+}
+
 /// Operational state of network latency telemetry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LatencyState {
@@ -631,6 +926,8 @@ pub enum LatencyState {
     Unavailable,
     /// Successfully received ICMP echo reply within timeout.
     Healthy,
+    /// Partial packet loss observed across recent probes.
+    Degraded,
     /// ICMP echo request timed out without response.
     Timeout,
 }
@@ -638,7 +935,7 @@ pub enum LatencyState {
 /// Point-in-time network round-trip latency measurement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatencySnapshot {
-    /// Round-trip time in milliseconds if Healthy.
+    /// Round-trip time in milliseconds if Healthy or Degraded.
     pub latency_ms: Option<u32>,
     /// State of the probe.
     pub state: LatencyState,
@@ -650,6 +947,21 @@ pub struct LatencySnapshot {
     pub sampled_at_unix: u64,
     /// Jitter (latency variance from previous probe) in milliseconds.
     pub jitter_ms: Option<u32>,
+    /// IP Protocol utilized for the probe (IPv4 or IPv6).
+    #[serde(default)]
+    pub protocol: Option<IpProtocol>,
+    /// Rolling packet loss percentage (0..=100). None if no valid probe attempts.
+    #[serde(default)]
+    pub packet_loss_pct: Option<u8>,
+    /// Number of lost pings in the rolling window.
+    #[serde(default)]
+    pub pings_lost: u32,
+    /// Total number of valid probe attempts in the rolling window.
+    #[serde(default)]
+    pub pings_total: u32,
+    /// Evaluated latency health status.
+    #[serde(default)]
+    pub health: LatencyHealth,
 }
 
 impl Default for LatencySnapshot {
@@ -661,6 +973,11 @@ impl Default for LatencySnapshot {
             sequence: 0,
             sampled_at_unix: 0,
             jitter_ms: None,
+            protocol: None,
+            packet_loss_pct: None,
+            pings_lost: 0,
+            pings_total: 0,
+            health: LatencyHealth::Unavailable,
         }
     }
 }
@@ -670,36 +987,100 @@ impl LatencySnapshot {
         self.sampled_at_unix > 0 && now_unix.saturating_sub(self.sampled_at_unix) <= max_age_secs
     }
 
-    /// User-facing short string for header status pill: "18 ms", "Timeout", "-- ms".
+    /// User-facing short string for header status pill: "18 ms", "18 ms (5% loss)", "Timeout", "-- ms".
     pub fn display_text(&self) -> String {
         match self.state {
             LatencyState::Healthy => {
                 if let Some(ms) = self.latency_ms {
-                    format!("{} ms", ms)
+                    if let Some(loss) = self.packet_loss_pct {
+                        format!("{} ms · {}% loss", ms, loss)
+                    } else {
+                        format!("{} ms", ms)
+                    }
                 } else {
                     "-- ms".to_string()
                 }
             }
-            LatencyState::Timeout => "Timeout".to_string(),
+            LatencyState::Degraded => {
+                if let (Some(ms), Some(loss)) = (self.latency_ms, self.packet_loss_pct) {
+                    format!("{} ms ({}% loss)", ms, loss)
+                } else if let Some(ms) = self.latency_ms {
+                    format!("{} ms", ms)
+                } else {
+                    "Degraded".to_string()
+                }
+            }
+            LatencyState::Timeout => {
+                if let Some(loss) = self.packet_loss_pct {
+                    format!("Timeout · {}% loss", loss)
+                } else {
+                    "Timeout".to_string()
+                }
+            }
             LatencyState::Unavailable => "-- ms".to_string(),
         }
     }
 
-    /// Detailed display string: "18 ms · Internet", "Timeout · Gateway", "-- ms".
+    /// Detailed display string: "18 ms (±2 ms) · 0% loss · Internet", "Timeout · Gateway", "-- ms".
     pub fn detailed_display_text(&self) -> String {
         match self.state {
             LatencyState::Healthy => {
                 if let Some(ms) = self.latency_ms {
-                    if let Some(jitter) = self.jitter_ms {
-                        format!("{} ms (±{} ms) · {}", ms, jitter, self.target.label())
+                    let mut s = if let Some(jitter) = self.jitter_ms {
+                        if jitter > 0 {
+                            format!("{} ms (±{} ms)", ms, jitter)
+                        } else {
+                            format!("{} ms", ms)
+                        }
                     } else {
-                        format!("{} ms · {}", ms, self.target.label())
+                        format!("{} ms", ms)
+                    };
+                    if let Some(loss) = self.packet_loss_pct {
+                        s.push_str(&format!(" · {}% loss", loss));
                     }
+                    s.push_str(&format!(" · {}", self.target.label()));
+                    if let Some(proto) = self.protocol {
+                        s.push_str(&format!(" ({})", proto.as_str()));
+                    }
+                    s
                 } else {
                     format!("-- ms · {}", self.target.label())
                 }
             }
-            LatencyState::Timeout => format!("Timeout · {}", self.target.label()),
+            LatencyState::Degraded => {
+                let mut s = if let Some(ms) = self.latency_ms {
+                    if let Some(jitter) = self.jitter_ms {
+                        if jitter > 0 {
+                            format!("{} ms (±{} ms)", ms, jitter)
+                        } else {
+                            format!("{} ms", ms)
+                        }
+                    } else {
+                        format!("{} ms", ms)
+                    }
+                } else {
+                    "Degraded".to_string()
+                };
+                if let Some(loss) = self.packet_loss_pct {
+                    s.push_str(&format!(" · {}% loss", loss));
+                }
+                s.push_str(&format!(" · {}", self.target.label()));
+                if let Some(proto) = self.protocol {
+                    s.push_str(&format!(" ({})", proto.as_str()));
+                }
+                s
+            }
+            LatencyState::Timeout => {
+                let mut s = if let Some(loss) = self.packet_loss_pct {
+                    format!("Timeout · {}% loss · {}", loss, self.target.label())
+                } else {
+                    format!("Timeout · {}", self.target.label())
+                };
+                if let Some(proto) = self.protocol {
+                    s.push_str(&format!(" ({})", proto.as_str()));
+                }
+                s
+            }
             LatencyState::Unavailable => "-- ms".to_string(),
         }
     }
@@ -737,6 +1118,7 @@ pub struct NetworkSnapshot {
     pub active_apps: Vec<crate::process::ActiveAppInfo>,
     pub active_connections_count: usize,
     pub latency: LatencySnapshot,
+    pub physical_link: Option<PhysicalLinkInfo>,
 }
 
 impl NetworkSnapshot {
@@ -788,6 +1170,7 @@ impl Default for NetworkSnapshot {
             active_apps: Vec::new(),
             active_connections_count: 0,
             latency: LatencySnapshot::default(),
+            physical_link: None,
         }
     }
 }
@@ -827,6 +1210,10 @@ pub struct NetworkBackend {
     pub latency: LatencySnapshot,
     /// Monotonically increasing session generation counter.
     pub generation: u64,
+    /// Authoritative packet loss tracker maintaining rolling probe history.
+    pub packet_loss_tracker: PacketLossTracker,
+    /// Active physical link layer information (Wi-Fi PHY or Ethernet).
+    pub physical_link: Option<PhysicalLinkInfo>,
 }
 
 impl Default for NetworkBackend {
@@ -864,6 +1251,8 @@ impl NetworkBackend {
             rolling_window: RollingRateWindow::new(1_000_000_000),
             latency: LatencySnapshot::default(),
             generation: 1,
+            packet_loss_tracker: PacketLossTracker::default(),
+            physical_link: None,
         }
     }
 
@@ -897,6 +1286,8 @@ impl NetworkBackend {
             rolling_window: RollingRateWindow::new(1_000_000_000),
             latency: persisted.latency,
             generation: persisted.generation.max(1),
+            packet_loss_tracker: PacketLossTracker::default(),
+            physical_link: persisted.physical_link,
         }
     }
 
@@ -905,6 +1296,28 @@ impl NetworkBackend {
             latency.jitter_ms = Some(curr.abs_diff(prev));
         }
         self.latency = latency;
+    }
+
+    /// Records an ICMP probe outcome into the authoritative packet loss tracker
+    /// and derives updated packet loss percentage and health on the latency snapshot.
+    pub fn update_latency_probe(&mut self, mut snap: LatencySnapshot, result: ProbeResult) {
+        if let (Some(curr), Some(prev)) = (snap.latency_ms, self.latency.latency_ms) {
+            snap.jitter_ms = Some(curr.abs_diff(prev));
+        }
+        self.packet_loss_tracker.record(result);
+        let (loss_pct, lost, total, health) = self.packet_loss_tracker.evaluate();
+        snap.packet_loss_pct = loss_pct;
+        snap.pings_lost = lost;
+        snap.pings_total = total;
+        snap.health = health;
+        if health == LatencyHealth::Degraded {
+            snap.state = LatencyState::Degraded;
+        }
+        self.latency = snap;
+    }
+
+    pub fn set_physical_link(&mut self, link: Option<PhysicalLinkInfo>) {
+        self.physical_link = link;
     }
 
     /// Flush session state to disk.
@@ -922,6 +1335,7 @@ impl NetworkBackend {
             all_time_peak_tx: self.peak_tx,
             updated_at_unix: now_unix,
             latency: self.latency,
+            physical_link: self.physical_link.clone(),
         });
     }
 
@@ -956,6 +1370,7 @@ impl NetworkBackend {
             all_time_peak_tx: 0.0,
             updated_at_unix: now_unix,
             latency: self.latency,
+            physical_link: self.physical_link.clone(),
         });
     }
 
@@ -998,6 +1413,7 @@ impl NetworkBackend {
         if persisted.latency.is_fresh(now_unix, 10) {
             self.latency = persisted.latency;
         }
+        self.physical_link = persisted.physical_link;
         generation_changed
     }
 
@@ -1006,6 +1422,8 @@ impl NetworkBackend {
         let interfaces = query_interfaces()?;
         let now = Instant::now();
         let mut snapshot = self.sample_from_interfaces(&interfaces, now);
+        self.physical_link = query_physical_link_info(snapshot.primary_medium);
+        snapshot.physical_link = self.physical_link.clone();
 
         let need_process_sample = match self.last_process_sample {
             Some(last) => now.duration_since(last) >= Duration::from_millis(1000),
@@ -1257,6 +1675,7 @@ impl NetworkBackend {
             active_apps: Vec::new(),
             active_connections_count: 0,
             latency: self.latency,
+            physical_link: self.physical_link.clone(),
         }
     }
 }
@@ -1308,6 +1727,35 @@ struct WLAN_CONNECTION_ATTRIBUTES {
 
 #[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
 #[repr(C)]
+struct WLAN_RATE_SET {
+    uRateSetLength: u32,
+    usRateSet: [u16; 126],
+}
+
+#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[repr(C)]
+struct WLAN_REALTIME_CONNECTION_QUALITY_LINK_INFO {
+    ucLinkID: u8,
+    ulChannelCenterFrequencyMhz: u32,
+    ulBandwidth: u32,
+    lRssi: i32,
+    wlanRateSet: WLAN_RATE_SET,
+}
+
+#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[repr(C)]
+struct WLAN_REALTIME_CONNECTION_QUALITY {
+    dot11PhyType: u32,
+    ulLinkQuality: u32,
+    ulRxRate: u32,
+    ulTxRate: u32,
+    bIsMLOConnection: i32,
+    ulNumLinks: u32,
+    linksInfo: [WLAN_REALTIME_CONNECTION_QUALITY_LINK_INFO; 1],
+}
+
+#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[repr(C)]
 struct WLAN_INTERFACE_INFO {
     InterfaceGuid: [u8; 16],
     strInterfaceDescription: [u16; 256],
@@ -1321,6 +1769,10 @@ struct WLAN_INTERFACE_INFO_LIST {
     dwIndex: u32,
     InterfaceInfo: [WLAN_INTERFACE_INFO; 1],
 }
+
+const WLAN_INTF_OPCODE_CURRENT_CONNECTION: u32 = 7;
+const WLAN_INTF_OPCODE_CHANNEL_NUMBER: u32 = 8;
+const WLAN_INTF_OPCODE_REALTIME_CONNECTION_QUALITY: u32 = 19;
 
 #[link(name = "wlanapi")]
 unsafe extern "system" {
@@ -1348,8 +1800,10 @@ unsafe extern "system" {
     fn WlanFreeMemory(pMemory: *mut core::ffi::c_void);
 }
 
-/// Queries the SSID of the currently connected Wi-Fi network using the native Windows WlanAPI.
-pub fn query_active_wifi_ssid() -> Option<String> {
+/// Queries deep Wi-Fi physical layer (PHY) telemetry using Windows Native Wi-Fi API.
+/// Uses `WLAN_REALTIME_CONNECTION_QUALITY` as the primary rate, quality, and MLO source
+/// without requiring Windows location permissions, with graceful fallback to connection attributes.
+pub fn query_active_wifi_metrics() -> Option<WifiPhyMetrics> {
     unsafe {
         let mut negotiated = 0u32;
         let mut handle = 0isize;
@@ -1361,11 +1815,11 @@ pub fn query_active_wifi_ssid() -> Option<String> {
         let mut list_ptr: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
         let enum_res = WlanEnumInterfaces(handle, std::ptr::null_mut(), &mut list_ptr);
         if enum_res != 0 || list_ptr.is_null() {
-            WlanCloseHandle(handle, std::ptr::null_mut());
+            let _ = WlanCloseHandle(handle, std::ptr::null_mut());
             return None;
         }
 
-        let mut found_ssid: Option<String> = None;
+        let mut found_metrics: Option<WifiPhyMetrics> = None;
         let count = (*list_ptr).dwNumberOfItems;
         if count > 0 {
             let interfaces =
@@ -1375,17 +1829,24 @@ pub fn query_active_wifi_ssid() -> Option<String> {
                 if iface.isState == 1 {
                     let mut data_size = 0u32;
                     let mut data_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
-                    // OpCode 7 = wlan_intf_opcode_current_connection
-                    let query_res = WlanQueryInterface(
+
+                    // 1. Query current connection to extract SSID
+                    let mut ssid = String::new();
+                    let query_conn = WlanQueryInterface(
                         handle,
                         &iface.InterfaceGuid,
-                        7,
+                        WLAN_INTF_OPCODE_CURRENT_CONNECTION,
                         std::ptr::null_mut(),
                         &mut data_size,
                         &mut data_ptr,
                         std::ptr::null_mut(),
                     );
-                    if query_res == 0 && !data_ptr.is_null() {
+                    let mut fallback_phy = 0u32;
+                    let mut fallback_quality = 0u32;
+                    let mut fallback_rx_rate = 0u32;
+                    let mut fallback_tx_rate = 0u32;
+
+                    if query_conn == 0 && !data_ptr.is_null() {
                         let conn_attrs = &*(data_ptr as *const WLAN_CONNECTION_ATTRIBUTES);
                         let ssid_len =
                             conn_attrs.wlanAssociationAttributes.dot11Ssid.uSSIDLength as usize;
@@ -1395,19 +1856,140 @@ pub fn query_active_wifi_ssid() -> Option<String> {
                             let ssid_lossy = String::from_utf8_lossy(bytes);
                             let trimmed = ssid_lossy.trim_matches(['\0', ' ']);
                             if !trimmed.is_empty() {
-                                found_ssid = Some(trimmed.to_string());
+                                ssid = trimmed.to_string();
                             }
                         }
-                        if found_ssid.is_none() {
+                        if ssid.is_empty() {
                             let prof = wchar_to_string(&conn_attrs.strProfileName);
                             let trimmed = prof.trim();
                             if !trimmed.is_empty() {
-                                found_ssid = Some(trimmed.to_string());
+                                ssid = trimmed.to_string();
                             }
                         }
+                        fallback_phy = conn_attrs.wlanAssociationAttributes.dot11PhyType;
+                        fallback_quality = conn_attrs.wlanAssociationAttributes.wlanSignalQuality;
+                        fallback_rx_rate = conn_attrs.wlanAssociationAttributes.ulRxRate;
+                        fallback_tx_rate = conn_attrs.wlanAssociationAttributes.ulTxRate;
                         WlanFreeMemory(data_ptr);
                     }
-                    if found_ssid.is_some() {
+
+                    if ssid.is_empty() {
+                        ssid = "Wi-Fi".to_string();
+                    }
+
+                    // 2. Query WLAN_REALTIME_CONNECTION_QUALITY (Opcode 19)
+                    let mut rt_size = 0u32;
+                    let mut rt_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+                    let query_rt = WlanQueryInterface(
+                        handle,
+                        &iface.InterfaceGuid,
+                        WLAN_INTF_OPCODE_REALTIME_CONNECTION_QUALITY,
+                        std::ptr::null_mut(),
+                        &mut rt_size,
+                        &mut rt_ptr,
+                        std::ptr::null_mut(),
+                    );
+
+                    if query_rt == 0 && !rt_ptr.is_null() {
+                        let rt = &*(rt_ptr as *const WLAN_REALTIME_CONNECTION_QUALITY);
+                        let wifi_gen = wifi_generation(rt.dot11PhyType);
+                        let quality_pct = rt.ulLinkQuality.min(100) as u8;
+                        let is_mlo = rt.bIsMLOConnection != 0;
+                        let link_count = rt.ulNumLinks.clamp(1, 255) as u8;
+
+                        let (freq_mhz, rssi_dbm) = if rt.ulNumLinks > 0 {
+                            let link = &rt.linksInfo[0];
+                            let r = if link.lRssi != 0 {
+                                Some(link.lRssi as i16)
+                            } else {
+                                Some(signal_quality_to_rssi_dbm(quality_pct))
+                            };
+                            (link.ulChannelCenterFrequencyMhz, r)
+                        } else {
+                            (0, Some(signal_quality_to_rssi_dbm(quality_pct)))
+                        };
+
+                        let band = wifi_band(freq_mhz, None);
+                        let tx_mbps = if rt.ulTxRate > 0 {
+                            Some(rt.ulTxRate / 1000)
+                        } else {
+                            None
+                        };
+                        let rx_mbps = if rt.ulRxRate > 0 {
+                            Some(rt.ulRxRate / 1000)
+                        } else {
+                            None
+                        };
+
+                        WlanFreeMemory(rt_ptr);
+
+                        found_metrics = Some(WifiPhyMetrics {
+                            ssid,
+                            generation: wifi_gen,
+                            band,
+                            channel: if freq_mhz > 0 { Some(freq_mhz) } else { None },
+                            signal_quality_pct: quality_pct,
+                            rssi_dbm,
+                            tx_rate_mbps: tx_mbps,
+                            rx_rate_mbps: rx_mbps,
+                            is_mlo,
+                            link_count,
+                        });
+                    } else {
+                        // 3. Fallback to association attributes + channel query
+                        let wifi_gen = wifi_generation(fallback_phy);
+                        let quality_pct = fallback_quality.min(100) as u8;
+                        let rssi = Some(signal_quality_to_rssi_dbm(quality_pct));
+                        let tx_mbps = if fallback_tx_rate > 0 {
+                            Some(fallback_tx_rate / 1000)
+                        } else {
+                            None
+                        };
+                        let rx_mbps = if fallback_rx_rate > 0 {
+                            Some(fallback_rx_rate / 1000)
+                        } else {
+                            None
+                        };
+
+                        // Query channel number (Opcode 8)
+                        let mut ch_size = 0u32;
+                        let mut ch_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+                        let mut channel_opt: Option<u32> = None;
+                        if WlanQueryInterface(
+                            handle,
+                            &iface.InterfaceGuid,
+                            WLAN_INTF_OPCODE_CHANNEL_NUMBER,
+                            std::ptr::null_mut(),
+                            &mut ch_size,
+                            &mut ch_ptr,
+                            std::ptr::null_mut(),
+                        ) == 0
+                            && !ch_ptr.is_null()
+                        {
+                            let ch = *(ch_ptr as *const u32);
+                            if ch > 0 {
+                                channel_opt = Some(ch);
+                            }
+                            WlanFreeMemory(ch_ptr);
+                        }
+
+                        let band = wifi_band(0, channel_opt);
+
+                        found_metrics = Some(WifiPhyMetrics {
+                            ssid,
+                            generation: wifi_gen,
+                            band,
+                            channel: channel_opt,
+                            signal_quality_pct: quality_pct,
+                            rssi_dbm: rssi,
+                            tx_rate_mbps: tx_mbps,
+                            rx_rate_mbps: rx_mbps,
+                            is_mlo: false,
+                            link_count: 1,
+                        });
+                    }
+
+                    if found_metrics.is_some() {
                         break;
                     }
                 }
@@ -1415,29 +1997,88 @@ pub fn query_active_wifi_ssid() -> Option<String> {
         }
 
         WlanFreeMemory(list_ptr as *mut core::ffi::c_void);
-        WlanCloseHandle(handle, std::ptr::null_mut());
-        found_ssid
+        let _ = WlanCloseHandle(handle, std::ptr::null_mut());
+        found_metrics
     }
 }
 
-static WIFI_SSID_CACHE: std::sync::Mutex<(Option<String>, Option<Instant>)> =
+static WIFI_PHY_CACHE: std::sync::Mutex<(Option<WifiPhyMetrics>, Option<Instant>)> =
     std::sync::Mutex::new((None, None));
 
-/// Cached Wi-Fi SSID lookup with a 2-second TTL to avoid spamming WlanAPI on every 500ms tick.
-pub fn query_cached_wifi_ssid() -> Option<String> {
+/// Cached Wi-Fi PHY metrics lookup with a 2-second TTL to avoid spamming WlanAPI on every 500ms tick.
+pub fn query_cached_wifi_phy() -> Option<WifiPhyMetrics> {
     const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = Instant::now();
-    if let Ok(mut cache) = WIFI_SSID_CACHE.lock() {
-        if let (Some(ssid), Some(last_query)) = &*cache
+    if let Ok(mut cache) = WIFI_PHY_CACHE.lock() {
+        if let (Some(phy), Some(last_query)) = &*cache
             && now.duration_since(*last_query) < CACHE_TTL
         {
-            return Some(ssid.clone());
+            return Some(phy.clone());
         }
-        let fresh_ssid = query_active_wifi_ssid();
-        *cache = (fresh_ssid.clone(), Some(now));
-        fresh_ssid
+        let fresh = query_active_wifi_metrics();
+        *cache = (fresh.clone(), Some(now));
+        fresh
     } else {
-        query_active_wifi_ssid()
+        query_active_wifi_metrics()
+    }
+}
+
+/// Cached Wi-Fi SSID lookup utilizing the unified Wi-Fi cache.
+pub fn query_cached_wifi_ssid() -> Option<String> {
+    query_cached_wifi_phy().map(|w| w.ssid)
+}
+
+/// Query active Ethernet connection link speed using IP Helper MIB_IF_ROW2.
+pub fn query_active_ethernet_metrics() -> Option<EthernetLinkMetrics> {
+    use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+
+    unsafe {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        if GetIfTable2(&mut table).0 != 0 || table.is_null() {
+            return None;
+        }
+
+        let num_entries = (*table).NumEntries as usize;
+        let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), num_entries);
+        let mut best: Option<EthernetLinkMetrics> = None;
+
+        for row in rows {
+            // IF_TYPE_ETHERNET_CSMACD = 6, IF_TYPE_GIGABITETHERNET = 117, IF_TYPE_FASTETHER = 62, IfOperStatusUp = 1
+            if (row.Type == 6 || row.Type == 117 || row.Type == 62) && row.OperStatus.0 == 1 {
+                let tx_bps = row.TransmitLinkSpeed;
+                let rx_bps = row.ReceiveLinkSpeed;
+                let desc = wchar_to_string(&row.Description);
+                let alias = wchar_to_string(&row.Alias);
+                let name = if !alias.is_empty() {
+                    alias
+                } else if !desc.is_empty() {
+                    desc
+                } else {
+                    "Ethernet".to_string()
+                };
+
+                best = Some(EthernetLinkMetrics {
+                    adapter_name: name,
+                    tx_speed_bps: tx_bps,
+                    rx_speed_bps: rx_bps,
+                });
+                break;
+            }
+        }
+
+        FreeMibTable(table as *const core::ffi::c_void);
+        best
+    }
+}
+
+/// Resolves physical layer link information according to active medium.
+pub fn query_physical_link_info(primary_medium: InterfaceMedium) -> Option<PhysicalLinkInfo> {
+    match primary_medium {
+        InterfaceMedium::Wifi => query_cached_wifi_phy().map(PhysicalLinkInfo::Wifi),
+        InterfaceMedium::Ethernet => {
+            query_active_ethernet_metrics().map(PhysicalLinkInfo::Ethernet)
+        }
+        _ => None,
     }
 }
 
@@ -1666,14 +2307,110 @@ pub fn query_ipv4_gateway_address(interface_luid: Option<u64>) -> Option<std::ne
     None
 }
 
-/// Probes round-trip latency to the given IPv4 target using asynchronous Win32 `IcmpSendEcho2`.
+/// Query the active default IPv6 route and gateway using `GetBestRoute2`.
 ///
-/// An event handle is supplied so `IcmpSendEcho2` operates asynchronously. The calling latency
-/// worker thread waits on the event with `WaitForSingleObject` up to `timeout_ms`.
-pub fn probe_latency_ipv4(
-    target_ip: std::net::Ipv4Addr,
-    timeout_ms: u32,
-) -> Result<u32, LatencyState> {
+/// Uses Windows `GetBestRoute2` towards Cloudflare IPv6 DNS (`2606:4700:4700::1111`) to determine
+/// the preferred interface, best source address, and next-hop IPv6 gateway.
+/// Falls back to scanning default route entries (`::/0`) via `GetIpForwardTable2`.
+pub fn query_ipv6_route(interface_luid: Option<u64>) -> Option<Ipv6Route> {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetBestRoute2, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+    };
+    use windows::Win32::NetworkManagement::Ndis::NET_LUID_LH;
+    use windows::Win32::Networking::WinSock::{AF_INET6, IN6_ADDR, SOCKADDR_INET};
+
+    unsafe {
+        let mut dest: SOCKADDR_INET = std::mem::zeroed();
+        dest.si_family = AF_INET6;
+        dest.Ipv6.sin6_family = AF_INET6;
+        dest.Ipv6.sin6_addr = IN6_ADDR {
+            u: windows::Win32::Networking::WinSock::IN6_ADDR_0 {
+                Byte: [
+                    0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x11, 0x11,
+                ],
+            },
+        };
+
+        let mut best_route: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
+        let mut best_source: SOCKADDR_INET = std::mem::zeroed();
+
+        let luid_val = interface_luid.map(|l| NET_LUID_LH { Value: l });
+        let luid_ptr = luid_val.as_ref().map(|l| l as *const _);
+
+        let status = GetBestRoute2(
+            luid_ptr,
+            0,
+            None,
+            &dest,
+            0,
+            &mut best_route,
+            &mut best_source,
+        );
+
+        if status.0 == 0 {
+            let source_ip = std::net::Ipv6Addr::from(best_source.Ipv6.sin6_addr.u.Byte);
+            let gateway_ip = if best_route.NextHop.si_family == AF_INET6 {
+                let bytes = best_route.NextHop.Ipv6.sin6_addr.u.Byte;
+                let addr = std::net::Ipv6Addr::from(bytes);
+                if !addr.is_unspecified() {
+                    Some(addr)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            return Some(Ipv6Route {
+                interface_luid: best_route.InterfaceLuid.Value,
+                interface_index: best_route.InterfaceIndex,
+                source: source_ip,
+                gateway: gateway_ip,
+            });
+        }
+
+        // Fallback: check IPv6 forward table for default ::/0 route
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        if GetIpForwardTable2(AF_INET6, &mut table).0 == 0 && !table.is_null() {
+            let entries = (*table).NumEntries as usize;
+            let rows = std::slice::from_raw_parts((*table).Table.as_ptr(), entries);
+            let mut best_route_match = None;
+            let mut lowest_metric = u32::MAX;
+
+            for row in rows {
+                if let Some(target_luid) = interface_luid
+                    && row.InterfaceLuid.Value != target_luid
+                {
+                    continue;
+                }
+                if row.DestinationPrefix.PrefixLength == 0 && row.NextHop.si_family == AF_INET6 {
+                    let bytes = row.NextHop.Ipv6.sin6_addr.u.Byte;
+                    let addr = std::net::Ipv6Addr::from(bytes);
+                    if !addr.is_unspecified() && row.Metric < lowest_metric {
+                        lowest_metric = row.Metric;
+                        best_route_match = Some(Ipv6Route {
+                            interface_luid: row.InterfaceLuid.Value,
+                            interface_index: row.InterfaceIndex,
+                            source: std::net::Ipv6Addr::UNSPECIFIED,
+                            gateway: Some(addr),
+                        });
+                    }
+                }
+            }
+
+            FreeMibTable(table as *const core::ffi::c_void);
+            if best_route_match.is_some() {
+                return best_route_match;
+            }
+        }
+    }
+
+    None
+}
+
+/// Probes round-trip latency to the given IPv4 target using asynchronous Win32 `IcmpSendEcho2`.
+pub fn probe_latency_ipv4(target_ip: std::net::Ipv4Addr, timeout_ms: u32) -> ProbeResult {
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::NetworkManagement::IpHelper::{
         ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpParseReplies, IcmpSendEcho2,
@@ -1683,18 +2420,17 @@ pub fn probe_latency_ipv4(
     unsafe {
         let icmp_handle = match IcmpCreateFile() {
             Ok(h) if !h.is_invalid() => h,
-            _ => return Err(LatencyState::Unavailable),
+            _ => return ProbeResult::Unavailable,
         };
 
         let event = match CreateEventW(None, false, false, None) {
             Ok(h) => h,
             Err(_) => {
                 let _ = IcmpCloseHandle(icmp_handle);
-                return Err(LatencyState::Unavailable);
+                return ProbeResult::Unavailable;
             }
         };
 
-        // Reply buffer needs space for ICMP_ECHO_REPLY + data payload + padding
         let reply_buf_len = size_of::<ICMP_ECHO_REPLY>() + 64;
         let mut reply_buf = vec![0u8; reply_buf_len];
         let send_data = *b"NetFlow";
@@ -1725,74 +2461,295 @@ pub fn probe_latency_ipv4(
             if parse_count > 0 {
                 let reply = &*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY);
                 if reply.Status == 0 {
-                    Ok(reply.RoundTripTime)
+                    ProbeResult::Success {
+                        latency: Duration::from_millis(reply.RoundTripTime as u64),
+                    }
                 } else {
-                    Err(LatencyState::Timeout)
+                    ProbeResult::Timeout
                 }
             } else {
-                Err(LatencyState::Timeout)
+                ProbeResult::Timeout
             }
         } else if wait_result == WAIT_TIMEOUT {
             let _ = IcmpCloseHandle(icmp_handle);
-            Err(LatencyState::Timeout)
+            ProbeResult::Timeout
         } else {
             let _ = IcmpCloseHandle(icmp_handle);
-            Err(LatencyState::Unavailable)
+            ProbeResult::Unavailable
         }
     }
 }
 
-/// Convenience method that resolves the active probe target according to `LatencyTargetMode`
-/// and queries the IPv4 round-trip latency, returning a complete `LatencySnapshot`.
-pub fn sample_latency_snapshot(
+/// Probes round-trip latency to the given IPv6 target using asynchronous Win32 `Icmp6SendEcho2`.
+pub fn probe_latency_ipv6(target_ip: std::net::Ipv6Addr, timeout_ms: u32) -> ProbeResult {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::NetworkManagement::IpHelper::{
+        ICMPV6_ECHO_REPLY_LH, Icmp6CreateFile, Icmp6ParseReplies, Icmp6SendEcho2, IcmpCloseHandle,
+    };
+    use windows::Win32::Networking::WinSock::{AF_INET6, IN6_ADDR, SOCKADDR_IN6};
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+    unsafe {
+        let icmp_handle = match Icmp6CreateFile() {
+            Ok(h) if !h.is_invalid() => h,
+            _ => return ProbeResult::Unavailable,
+        };
+
+        let event = match CreateEventW(None, false, false, None) {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = IcmpCloseHandle(icmp_handle);
+                return ProbeResult::Unavailable;
+            }
+        };
+
+        let reply_buf_len = size_of::<ICMPV6_ECHO_REPLY_LH>() + 128;
+        let mut reply_buf = vec![0u8; reply_buf_len];
+        let send_data = *b"NetFlow";
+
+        let mut dest: SOCKADDR_IN6 = std::mem::zeroed();
+        dest.sin6_family = AF_INET6;
+        dest.sin6_addr = IN6_ADDR {
+            u: windows::Win32::Networking::WinSock::IN6_ADDR_0 {
+                Byte: target_ip.octets(),
+            },
+        };
+
+        let mut source: SOCKADDR_IN6 = std::mem::zeroed();
+        source.sin6_family = AF_INET6;
+
+        let _ = Icmp6SendEcho2(
+            icmp_handle,
+            Some(event),
+            None,
+            None,
+            &source,
+            &dest,
+            send_data.as_ptr() as *const _,
+            send_data.len() as u16,
+            None,
+            reply_buf.as_mut_ptr() as *mut _,
+            reply_buf_len as u32,
+            timeout_ms,
+        );
+
+        let wait_result = WaitForSingleObject(event, timeout_ms);
+        let _ = CloseHandle(event);
+
+        if wait_result == WAIT_OBJECT_0 {
+            let parse_count =
+                Icmp6ParseReplies(reply_buf.as_mut_ptr() as *mut _, reply_buf_len as u32);
+            let _ = IcmpCloseHandle(icmp_handle);
+
+            if parse_count > 0 {
+                let reply = &*(reply_buf.as_ptr() as *const ICMPV6_ECHO_REPLY_LH);
+                if reply.Status == 0 {
+                    ProbeResult::Success {
+                        latency: Duration::from_millis(reply.RoundTripTime as u64),
+                    }
+                } else {
+                    ProbeResult::Timeout
+                }
+            } else {
+                ProbeResult::Timeout
+            }
+        } else if wait_result == WAIT_TIMEOUT {
+            let _ = IcmpCloseHandle(icmp_handle);
+            ProbeResult::Timeout
+        } else {
+            let _ = IcmpCloseHandle(icmp_handle);
+            ProbeResult::Unavailable
+        }
+    }
+}
+
+/// Platform-neutral internal probe function dispatching between IPv4 and IPv6 ICMP echo APIs.
+pub fn probe_latency(target: std::net::IpAddr, timeout_ms: u32) -> ProbeResult {
+    match target {
+        std::net::IpAddr::V4(ipv4) => probe_latency_ipv4(ipv4, timeout_ms),
+        std::net::IpAddr::V6(ipv6) => probe_latency_ipv6(ipv6, timeout_ms),
+    }
+}
+
+/// Probes round-trip latency using dual-stack IPv6-first routing with seamless IPv4 fallback.
+/// Returns the constructed `LatencySnapshot` along with the individual `ProbeResult`.
+pub fn sample_latency_snapshot_dual_stack(
     mode: LatencyTargetMode,
     sequence: u64,
     timeout_ms: u32,
-) -> LatencySnapshot {
-    let gateway = query_ipv4_gateway_address(None);
-    let (target, ip) = match mode {
-        LatencyTargetMode::Internet => {
-            (LatencyTarget::Internet, std::net::Ipv4Addr::new(1, 1, 1, 1))
-        }
-        LatencyTargetMode::Gateway => {
-            if let Some(gw) = gateway {
-                (LatencyTarget::Gateway, gw)
-            } else {
-                (LatencyTarget::Gateway, std::net::Ipv4Addr::new(1, 1, 1, 1))
-            }
-        }
-        LatencyTargetMode::Auto => {
-            if gateway.is_some() {
-                (LatencyTarget::Internet, std::net::Ipv4Addr::new(1, 1, 1, 1))
-            } else {
-                (LatencyTarget::Gateway, std::net::Ipv4Addr::new(1, 1, 1, 1))
-            }
-        }
-    };
-
+    prev_ms: Option<u32>,
+) -> (LatencySnapshot, ProbeResult) {
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    match probe_latency_ipv4(ip, timeout_ms) {
-        Ok(ms) => LatencySnapshot {
-            latency_ms: Some(ms),
-            state: LatencyState::Healthy,
-            target,
-            sequence,
-            sampled_at_unix: now_unix,
-            jitter_ms: None,
-        },
-        Err(state) => LatencySnapshot {
-            latency_ms: None,
+    let ipv6_route = query_ipv6_route(None);
+    let ipv4_gateway = query_ipv4_gateway_address(None);
+
+    let (target, primary_ipv6, fallback_ipv4) = match mode {
+        LatencyTargetMode::Internet => (
+            LatencyTarget::Internet,
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111,
+            ))),
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))),
+        ),
+        LatencyTargetMode::Gateway => {
+            let gw_v6 = ipv6_route
+                .as_ref()
+                .and_then(|r| r.gateway)
+                .map(std::net::IpAddr::V6);
+            let gw_v4 = ipv4_gateway.map(std::net::IpAddr::V4);
+            (LatencyTarget::Gateway, gw_v6, gw_v4)
+        }
+        LatencyTargetMode::Auto => {
+            if let Some(gw_v6) = ipv6_route.as_ref().and_then(|r| r.gateway) {
+                (
+                    LatencyTarget::Gateway,
+                    Some(std::net::IpAddr::V6(gw_v6)),
+                    ipv4_gateway.map(std::net::IpAddr::V4),
+                )
+            } else if let Some(gw_v4) = ipv4_gateway {
+                (
+                    LatencyTarget::Gateway,
+                    None,
+                    Some(std::net::IpAddr::V4(gw_v4)),
+                )
+            } else {
+                (
+                    LatencyTarget::Internet,
+                    Some(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
+                        0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111,
+                    ))),
+                    Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))),
+                )
+            }
+        }
+    };
+
+    // 1. Try IPv6 first if route / target is available
+    if let Some(ip6) = primary_ipv6 {
+        let res = probe_latency(ip6, timeout_ms);
+        match res {
+            ProbeResult::Success { latency } => {
+                let ms = latency.as_millis() as u32;
+                let jitter = prev_ms.map(|p| ms.abs_diff(p));
+                let snap = LatencySnapshot {
+                    latency_ms: Some(ms),
+                    state: LatencyState::Healthy,
+                    target,
+                    sequence,
+                    sampled_at_unix: now_unix,
+                    jitter_ms: jitter,
+                    protocol: Some(IpProtocol::Ipv6),
+                    packet_loss_pct: None,
+                    pings_lost: 0,
+                    pings_total: 0,
+                    health: LatencyHealth::Healthy,
+                };
+                return (snap, res);
+            }
+            ProbeResult::Unavailable => {
+                // IPv6 route unavailable -> fall back to IPv4
+            }
+            ProbeResult::Timeout => {
+                // If IPv6 timed out, test if IPv4 has connectivity
+                if let Some(ip4) = fallback_ipv4 {
+                    let res4 = probe_latency(ip4, timeout_ms);
+                    if let ProbeResult::Success { latency } = res4 {
+                        let ms = latency.as_millis() as u32;
+                        let jitter = prev_ms.map(|p| ms.abs_diff(p));
+                        let snap = LatencySnapshot {
+                            latency_ms: Some(ms),
+                            state: LatencyState::Healthy,
+                            target,
+                            sequence,
+                            sampled_at_unix: now_unix,
+                            jitter_ms: jitter,
+                            protocol: Some(IpProtocol::Ipv4),
+                            packet_loss_pct: None,
+                            pings_lost: 0,
+                            pings_total: 0,
+                            health: LatencyHealth::Healthy,
+                        };
+                        return (snap, res4);
+                    }
+                }
+                let snap = LatencySnapshot {
+                    latency_ms: None,
+                    state: LatencyState::Timeout,
+                    target,
+                    sequence,
+                    sampled_at_unix: now_unix,
+                    jitter_ms: None,
+                    protocol: Some(IpProtocol::Ipv6),
+                    packet_loss_pct: None,
+                    pings_lost: 0,
+                    pings_total: 0,
+                    health: LatencyHealth::Timeout,
+                };
+                return (snap, ProbeResult::Timeout);
+            }
+        }
+    }
+
+    // 2. IPv4 probe fallback
+    if let Some(ip4) = fallback_ipv4 {
+        let res = probe_latency(ip4, timeout_ms);
+        let (state, ms) = match res {
+            ProbeResult::Success { latency } => {
+                (LatencyState::Healthy, Some(latency.as_millis() as u32))
+            }
+            ProbeResult::Timeout => (LatencyState::Timeout, None),
+            ProbeResult::Unavailable => (LatencyState::Unavailable, None),
+        };
+        let jitter = ms.and_then(|m| prev_ms.map(|p| m.abs_diff(p)));
+        let health = match state {
+            LatencyState::Healthy => LatencyHealth::Healthy,
+            LatencyState::Timeout => LatencyHealth::Timeout,
+            _ => LatencyHealth::Unavailable,
+        };
+        let snap = LatencySnapshot {
+            latency_ms: ms,
             state,
             target,
             sequence,
             sampled_at_unix: now_unix,
+            jitter_ms: jitter,
+            protocol: Some(IpProtocol::Ipv4),
+            packet_loss_pct: None,
+            pings_lost: 0,
+            pings_total: 0,
+            health,
+        };
+        (snap, res)
+    } else {
+        let snap = LatencySnapshot {
+            latency_ms: None,
+            state: LatencyState::Unavailable,
+            target,
+            sequence,
+            sampled_at_unix: now_unix,
             jitter_ms: None,
-        },
+            protocol: None,
+            packet_loss_pct: None,
+            pings_lost: 0,
+            pings_total: 0,
+            health: LatencyHealth::Unavailable,
+        };
+        (snap, ProbeResult::Unavailable)
     }
+}
+
+/// Convenience method that resolves the active probe target according to `LatencyTargetMode`
+/// and queries round-trip latency, returning a complete `LatencySnapshot`.
+pub fn sample_latency_snapshot(
+    mode: LatencyTargetMode,
+    sequence: u64,
+    timeout_ms: u32,
+) -> LatencySnapshot {
+    sample_latency_snapshot_dual_stack(mode, sequence, timeout_ms, None).0
 }
 
 #[cfg(test)]
@@ -2246,7 +3203,7 @@ mod tests {
         // Safe execution check: whether running on Wi-Fi, Ethernet, or headless VM,
         // this must never panic and must return cleanly.
         let _ = query_cached_wifi_ssid();
-        let _ = query_active_wifi_ssid();
+        let _ = query_cached_wifi_phy();
     }
 
     #[test]
@@ -2499,6 +3456,7 @@ mod tests {
             all_time_peak_tx: 1200000.0,
             updated_at_unix: 1700000500,
             latency: LatencySnapshot::default(),
+            physical_link: None,
         };
         let serialized = serde_json::to_string(&state).expect("serialize");
         let deserialized: SessionState = serde_json::from_str(&serialized).expect("deserialize");
@@ -2690,6 +3648,11 @@ mod tests {
             sequence: 1,
             sampled_at_unix: 1700000000,
             jitter_ms: None,
+            protocol: None,
+            packet_loss_pct: None,
+            pings_lost: 0,
+            pings_total: 1,
+            health: LatencyHealth::Healthy,
         };
         assert_eq!(healthy.display_text(), "18 ms");
         assert_eq!(healthy.detailed_display_text(), "18 ms · Internet");
@@ -2703,25 +3666,181 @@ mod tests {
             sequence: 2,
             sampled_at_unix: 1700000001,
             jitter_ms: Some(2),
+            protocol: None,
+            packet_loss_pct: None,
+            pings_lost: 0,
+            pings_total: 2,
+            health: LatencyHealth::Healthy,
         };
         assert_eq!(
             with_jitter.detailed_display_text(),
             "18 ms (±2 ms) · Internet"
         );
 
+        let with_dual_stack_and_loss = LatencySnapshot {
+            latency_ms: Some(18),
+            state: LatencyState::Healthy,
+            target: LatencyTarget::Internet,
+            sequence: 3,
+            sampled_at_unix: 1700000002,
+            jitter_ms: Some(2),
+            protocol: Some(IpProtocol::Ipv6),
+            packet_loss_pct: Some(5),
+            pings_lost: 1,
+            pings_total: 20,
+            health: LatencyHealth::Degraded,
+        };
+        assert_eq!(
+            with_dual_stack_and_loss.detailed_display_text(),
+            "18 ms (±2 ms) · 5% loss · Internet (IPv6)"
+        );
+
         let timeout = LatencySnapshot {
             latency_ms: None,
             state: LatencyState::Timeout,
             target: LatencyTarget::Gateway,
-            sequence: 3,
-            sampled_at_unix: 1700000002,
+            sequence: 4,
+            sampled_at_unix: 1700000003,
             jitter_ms: None,
+            protocol: Some(IpProtocol::Ipv4),
+            packet_loss_pct: Some(100),
+            pings_lost: 20,
+            pings_total: 20,
+            health: LatencyHealth::Timeout,
         };
-        assert_eq!(timeout.display_text(), "Timeout");
-        assert_eq!(timeout.detailed_display_text(), "Timeout · Gateway");
+        assert_eq!(timeout.display_text(), "Timeout · 100% loss");
+        assert_eq!(
+            timeout.detailed_display_text(),
+            "Timeout · 100% loss · Gateway (IPv4)"
+        );
 
         let unavailable = LatencySnapshot::default();
         assert_eq!(unavailable.display_text(), "-- ms");
         assert_eq!(unavailable.detailed_display_text(), "-- ms");
+    }
+
+    #[test]
+    fn test_wifi_generation_pure_mapping() {
+        assert_eq!(wifi_generation(7), WifiGeneration::Wifi4);
+        assert_eq!(wifi_generation(8), WifiGeneration::Wifi5);
+        assert_eq!(wifi_generation(10), WifiGeneration::Wifi6);
+        assert_eq!(wifi_generation(11), WifiGeneration::Wifi7);
+        assert_eq!(wifi_generation(4), WifiGeneration::Legacy);
+        assert_eq!(wifi_generation(9), WifiGeneration::Legacy);
+        assert_eq!(wifi_generation(99), WifiGeneration::Unknown);
+        assert_eq!(WifiGeneration::Wifi7.as_str(), "Wi-Fi 7");
+        assert_eq!(WifiGeneration::Wifi6.as_str(), "Wi-Fi 6");
+    }
+
+    #[test]
+    fn test_signal_quality_to_rssi_dbm() {
+        assert_eq!(signal_quality_to_rssi_dbm(0), -100);
+        assert_eq!(signal_quality_to_rssi_dbm(50), -75);
+        assert_eq!(signal_quality_to_rssi_dbm(100), -50);
+        assert_eq!(signal_quality_to_rssi_dbm(80), -60);
+    }
+
+    #[test]
+    fn test_wifi_band_resolution() {
+        assert_eq!(wifi_band(2412, None), WifiBand::Band24Ghz);
+        assert_eq!(wifi_band(5180, None), WifiBand::Band5Ghz);
+        assert_eq!(wifi_band(6100, None), WifiBand::Band6Ghz);
+        assert_eq!(wifi_band(0, Some(6)), WifiBand::Band24Ghz);
+        assert_eq!(wifi_band(0, Some(36)), WifiBand::Band5Ghz);
+        assert_eq!(wifi_band(0, None), WifiBand::Unknown);
+        assert_eq!(WifiBand::Band24Ghz.as_str(), "2.4 GHz");
+        assert_eq!(WifiBand::Band5Ghz.as_str(), "5 GHz");
+        assert_eq!(WifiBand::Band6Ghz.as_str(), "6 GHz");
+    }
+
+    #[test]
+    fn test_packet_loss_tracker_semantics_and_rollover() {
+        let mut tracker = PacketLossTracker::default();
+        assert_eq!(tracker.loss_pct(), None);
+        assert_eq!(tracker.health(), LatencyHealth::Unavailable);
+
+        // 1. Successes only
+        for _ in 0..10 {
+            tracker.record(ProbeResult::Success {
+                latency: Duration::from_millis(15),
+            });
+        }
+        assert_eq!(tracker.loss_pct(), Some(0));
+        assert_eq!(tracker.health(), LatencyHealth::Healthy);
+        assert_eq!(tracker.counts(), (0, 10));
+
+        // 2. Unavailable probes MUST NOT count towards packet loss
+        for _ in 0..5 {
+            tracker.record(ProbeResult::Unavailable);
+        }
+        // Total valid pings remains 10, lost remains 0, so 0% loss
+        assert_eq!(tracker.loss_pct(), Some(0));
+        assert_eq!(tracker.health(), LatencyHealth::Healthy);
+        assert_eq!(tracker.counts(), (0, 10));
+
+        // 3. One Timeout -> degraded
+        tracker.record(ProbeResult::Timeout);
+        assert_eq!(tracker.loss_pct(), Some(9)); // 1/11 = 9%
+        assert_eq!(tracker.health(), LatencyHealth::Degraded);
+        assert_eq!(tracker.counts(), (1, 11));
+
+        // 4. Overwrite earlier samples with 19 successes so buffer is 19 success + 1 timeout
+        for _ in 0..19 {
+            tracker.record(ProbeResult::Success {
+                latency: Duration::from_millis(18),
+            });
+        }
+        assert_eq!(tracker.counts(), (1, 20));
+        assert_eq!(tracker.loss_pct(), Some(5)); // 1/20 = 5%
+        assert_eq!(tracker.health(), LatencyHealth::Degraded);
+
+        // 5. Test rollover: push 20 timeouts
+        for _ in 0..20 {
+            tracker.record(ProbeResult::Timeout);
+        }
+        assert_eq!(tracker.counts(), (20, 20));
+        assert_eq!(tracker.loss_pct(), Some(100));
+        assert_eq!(tracker.health(), LatencyHealth::Timeout);
+    }
+
+    #[test]
+    fn test_physical_link_summary_formatting() {
+        let wifi = PhysicalLinkInfo::Wifi(WifiPhyMetrics {
+            ssid: "HomeMesh".to_string(),
+            generation: WifiGeneration::Wifi6,
+            band: WifiBand::Band5Ghz,
+            channel: Some(36),
+            signal_quality_pct: 84,
+            rssi_dbm: Some(-58),
+            tx_rate_mbps: Some(866),
+            rx_rate_mbps: Some(866),
+            is_mlo: false,
+            link_count: 1,
+        });
+        assert_eq!(
+            wifi.display_summary(),
+            "Wi-Fi 6 · 5 GHz · -58 dBm · 866 Mbps"
+        );
+
+        let eth_1g = PhysicalLinkInfo::Ethernet(EthernetLinkMetrics {
+            adapter_name: "Ethernet".to_string(),
+            tx_speed_bps: 1_000_000_000,
+            rx_speed_bps: 1_000_000_000,
+        });
+        assert_eq!(eth_1g.display_summary(), "Ethernet · 1 Gbps");
+
+        let eth_2_5g = PhysicalLinkInfo::Ethernet(EthernetLinkMetrics {
+            adapter_name: "Ethernet 2".to_string(),
+            tx_speed_bps: 2_500_000_000,
+            rx_speed_bps: 2_500_000_000,
+        });
+        assert_eq!(eth_2_5g.display_summary(), "Ethernet · 2.5 Gbps");
+
+        let eth_100m = PhysicalLinkInfo::Ethernet(EthernetLinkMetrics {
+            adapter_name: "Ethernet".to_string(),
+            tx_speed_bps: 100_000_000,
+            rx_speed_bps: 100_000_000,
+        });
+        assert_eq!(eth_100m.display_summary(), "Ethernet · 100 Mbps");
     }
 }

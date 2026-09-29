@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use net_flow_core::backend::{NetworkBackend, NetworkSnapshot};
 use net_flow_core::card::load_user_config;
 use net_flow_core::{
-    BandwidthAlertConfig, BandwidthAlertEngine, format_bandwidth, sample_latency_snapshot,
+    BandwidthAlertConfig, BandwidthAlertEngine, format_bandwidth, query_physical_link_info,
+    sample_latency_snapshot_dual_stack,
 };
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WAIT_OBJECT_0, WPARAM,
@@ -303,13 +304,20 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
             break;
         }
 
-        // 1. Latency Probing every 2s
+        // 1. Dual-Stack Latency Probing & Physical Link every 2s
         if last_latency.elapsed() >= latency_period {
             let user_cfg = load_user_config();
-            let snap = sample_latency_snapshot(user_cfg.latency_target, 0, 1000);
+            let (prev_ms, primary_medium) = {
+                let s = state.latest_snapshot.read_safe();
+                (s.latency.latency_ms, s.primary_medium)
+            };
+            let (snap, probe_res) =
+                sample_latency_snapshot_dual_stack(user_cfg.latency_target, 0, 1000, prev_ms);
+            let phy_link = query_physical_link_info(primary_medium);
             {
                 let mut b = state.backend.lock_safe();
-                b.set_latency(snap);
+                b.update_latency_probe(snap, probe_res);
+                b.set_physical_link(phy_link);
             }
             last_latency = Instant::now();
         }
@@ -451,16 +459,30 @@ unsafe fn remove_icon(hwnd: HWND) {
 unsafe fn update_tooltip(hwnd: HWND) {
     unsafe {
         let Some(ctx) = context(hwnd) else { return };
-        let (rx_bps, tx_bps, latency) = {
+        let (rx_bps, tx_bps, latency, phy_link) = {
             let snapshot = ctx.state.latest_snapshot.read_safe();
-            (snapshot.rx_bps, snapshot.tx_bps, snapshot.latency)
+            (
+                snapshot.rx_bps,
+                snapshot.tx_bps,
+                snapshot.latency,
+                snapshot.physical_link.clone(),
+            )
         };
-        let tip = format!(
+        let mut tip = format!(
             "Net Flow\n\u{2193} {}  \u{2191} {}\nLatency: {}",
             format_bandwidth(rx_bps),
             format_bandwidth(tx_bps),
             latency.detailed_display_text(),
         );
+        if let Some(link) = phy_link {
+            let summary = link.display_summary();
+            if !summary.is_empty() {
+                let candidate = format!("{}\nLink: {}", tip, summary);
+                if candidate.encode_utf16().count() <= 126 {
+                    tip = candidate;
+                }
+            }
+        }
         let mut data = base_notify_data(hwnd);
         data.uFlags = NIF_GUID | NIF_TIP;
         set_tip(&mut data, &tip);
