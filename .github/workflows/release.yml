@@ -392,6 +392,42 @@ jobs:
           layout-dir: target/msix_store_arm64
           output-path: target/NetFlow_Store_arm64.msix
 
+      - name: Create Unified Store MSIX Bundle
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        shell: pwsh
+        run: |
+          $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
+          $makeappx = Join-Path $sdkBin "makeappx.exe"
+          if (-not (Test-Path $makeappx)) {
+            $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $makeappx) { throw "makeappx.exe not found!" }
+
+          $bundleStage = "target/bundle_stage"
+          if (Test-Path $bundleStage) { Remove-Item $bundleStage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $bundleStage | Out-Null
+
+          Copy-Item "target/NetFlow_Store_x64.msix" $bundleStage -Force
+          if (Test-Path "target/NetFlow_Store_arm64.msix") {
+            Copy-Item "target/NetFlow_Store_arm64.msix" $bundleStage -Force
+          }
+
+          $bundlePath = "target/NetFlow_Store.msixbundle"
+          if (Test-Path $bundlePath) { Remove-Item $bundlePath -Force }
+          & $makeappx bundle /v /d $bundleStage /p $bundlePath /o
+          Write-Host "Created unified Store bundle: $bundlePath"
+
+      - name: Upload Store Packages Artifact
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: store-packages
+          path: |
+            target/NetFlow_Store_x64.msix
+            target/NetFlow_Store_arm64.msix
+            target/NetFlow_Store.msixbundle
+          if-no-files-found: warn
+
       - name: Setup Microsoft Store Developer CLI
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         uses: microsoft/microsoft-store-apppublisher@v1.4
@@ -433,14 +469,13 @@ jobs:
           $storeNotes = if ($notesFile -and (Test-Path $notesFile)) { (Get-Content $notesFile -Raw).Trim() } else { "" }
           Write-Host "Loaded $( $storeNotes.Length ) characters of Store release notes."
 
-          Write-Host "Uploading packages as draft submission (noCommit) for Product ID $env:STORE_PRODUCT_ID..."
-          $storePackages = @()
-          if (Test-Path "target/NetFlow_Store_x64.msix") { $storePackages += "target/NetFlow_Store_x64.msix" }
-          if (Test-Path "target/NetFlow_Store_arm64.msix") { $storePackages += "target/NetFlow_Store_arm64.msix" }
-          foreach ($pkg in $storePackages) {
-            Write-Host "Publishing Store package: $pkg"
-            msstore publish -v "$pkg" --appId "$env:STORE_PRODUCT_ID" --noCommit
+          $uploadPkg = if (Test-Path "target/NetFlow_Store.msixbundle") {
+            "target/NetFlow_Store.msixbundle"
+          } else {
+            "target/NetFlow_Store_x64.msix"
           }
+          Write-Host "Publishing Store package bundle ($uploadPkg) for Product ID $env:STORE_PRODUCT_ID..."
+          msstore publish -v "$uploadPkg" --appId "$env:STORE_PRODUCT_ID" --noCommit
 
           # Update submission metadata with What's New release notes and Description
           if ($storeNotes -or $storeDescription) {
