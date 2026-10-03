@@ -3,18 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-use windows::core::{GUID, PCWSTR, Result, w};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Dwm::{
-    DWMWINDOWATTRIBUTE, DwmSetWindowAttribute,
-};
+use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{GUID, PCWSTR, Result, w};
 
 use crate::provider::RwLockExt;
 
@@ -410,14 +406,8 @@ pub fn toggle_flyout(flyout_hwnd: HWND, tray_hwnd: HWND, tray_guid: GUID) {
 
         let icon_rect = get_tray_icon_rect(tray_hwnd, tray_guid);
         let (fallback_edge, work_area) = get_taskbar_edge_and_work_area(tray_hwnd);
-        let (x, y) = calculate_flyout_geometry(
-            icon_rect,
-            fallback_edge,
-            work_area,
-            width,
-            height,
-            margin,
-        );
+        let (x, y) =
+            calculate_flyout_geometry(icon_rect, fallback_edge, work_area, width, height, margin);
 
         unsafe {
             let _ = apply_window_chrome(flyout_hwnd, is_dark_mode_active());
@@ -446,11 +436,7 @@ pub fn toggle_flyout(flyout_hwnd: HWND, tray_hwnd: HWND, tray_guid: GUID) {
 unsafe fn get_flyout_context(hwnd: HWND) -> Option<&'static FlyoutContext> {
     unsafe {
         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FlyoutContext;
-        if ptr.is_null() {
-            None
-        } else {
-            Some(&*ptr)
-        }
+        if ptr.is_null() { None } else { Some(&*ptr) }
     }
 }
 
@@ -496,14 +482,46 @@ fn render_flyout(
     let dpi = ctx.dpi.load(Ordering::SeqCst);
 
     // Color definitions
-    let bg_color = if is_dark { rgb(24, 24, 27) } else { rgb(248, 249, 250) };
-    let card_bg = if is_dark { rgb(36, 36, 40) } else { rgb(255, 255, 255) };
-    let card_border = if is_dark { rgb(54, 54, 60) } else { rgb(226, 232, 240) };
-    let text_primary = if is_dark { rgb(244, 244, 245) } else { rgb(15, 23, 42) };
-    let text_secondary = if is_dark { rgb(161, 161, 170) } else { rgb(100, 116, 139) };
-    let text_muted = if is_dark { rgb(113, 113, 122) } else { rgb(148, 163, 184) };
-    let rx_green = if is_dark { rgb(16, 185, 129) } else { rgb(5, 150, 105) };
-    let tx_blue = if is_dark { rgb(59, 130, 246) } else { rgb(37, 99, 235) };
+    let bg_color = if is_dark {
+        rgb(24, 24, 27)
+    } else {
+        rgb(248, 249, 250)
+    };
+    let card_bg = if is_dark {
+        rgb(36, 36, 40)
+    } else {
+        rgb(255, 255, 255)
+    };
+    let card_border = if is_dark {
+        rgb(54, 54, 60)
+    } else {
+        rgb(226, 232, 240)
+    };
+    let text_primary = if is_dark {
+        rgb(244, 244, 245)
+    } else {
+        rgb(15, 23, 42)
+    };
+    let text_secondary = if is_dark {
+        rgb(161, 161, 170)
+    } else {
+        rgb(100, 116, 139)
+    };
+    let text_muted = if is_dark {
+        rgb(113, 113, 122)
+    } else {
+        rgb(148, 163, 184)
+    };
+    let rx_green = if is_dark {
+        rgb(16, 185, 129)
+    } else {
+        rgb(5, 150, 105)
+    };
+    let tx_blue = if is_dark {
+        rgb(59, 130, 246)
+    } else {
+        rgb(37, 99, 235)
+    };
     let warn_amber = rgb(245, 158, 11);
     let alert_red = rgb(239, 68, 68);
 
@@ -539,7 +557,12 @@ fn render_flyout(
         };
         let old_font = SelectObject(hdc, font_title.into());
         SetTextColor(hdc, text_primary);
-        gdi_draw_text(hdc, "Net Flow", &mut header_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            "Net Flow",
+            &mut header_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         let medium_str = match snapshot.primary_medium {
             net_flow_core::backend::InterfaceMedium::Ethernet => "Ethernet",
@@ -610,7 +633,12 @@ fn render_flyout(
         };
         SelectObject(hdc, font_small.into());
         SetTextColor(hdc, rx_green);
-        gdi_draw_text(hdc, "DOWNLOAD ↓", &mut dl_lbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            "DOWNLOAD ↓",
+            &mut dl_lbl,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         let dl_val = net_flow_core::format::format_bandwidth(snapshot.rx_bps);
         let mut dl_val_rect = RECT {
@@ -621,7 +649,12 @@ fn render_flyout(
         };
         SelectObject(hdc, font_speed.into());
         SetTextColor(hdc, text_primary);
-        gdi_draw_text(hdc, &dl_val, &mut dl_val_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            &dl_val,
+            &mut dl_val_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // Upload texts
         let mut ul_lbl = RECT {
@@ -632,7 +665,12 @@ fn render_flyout(
         };
         SelectObject(hdc, font_small.into());
         SetTextColor(hdc, tx_blue);
-        gdi_draw_text(hdc, "UPLOAD ↑", &mut ul_lbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            "UPLOAD ↑",
+            &mut ul_lbl,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         let ul_val = net_flow_core::format::format_bandwidth(snapshot.tx_bps);
         let mut ul_val_rect = RECT {
@@ -643,7 +681,12 @@ fn render_flyout(
         };
         SelectObject(hdc, font_speed.into());
         SetTextColor(hdc, text_primary);
-        gdi_draw_text(hdc, &ul_val, &mut ul_val_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            &ul_val,
+            &mut ul_val_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // --- SECTION 3: Latency & Health Pill ---
         let pill_y = card_y + card_h + dpi_scale(8, dpi);
@@ -690,7 +733,10 @@ fn render_flyout(
 
         let lat_txt = if let Some(ms) = snapshot.latency_ms {
             let j = snapshot.jitter_ms.unwrap_or(0);
-            format!("{ms} ms (±{j}ms) • {:.0}% loss • {health_str}", snapshot.packet_loss_pct)
+            format!(
+                "{ms} ms (±{j}ms) • {:.0}% loss • {health_str}",
+                snapshot.packet_loss_pct
+            )
         } else {
             "ICMP Diagnostics Active".to_string()
         };
@@ -806,7 +852,12 @@ fn render_flyout(
         };
         SelectObject(hdc, font_small.into());
         SetTextColor(hdc, text_primary);
-        gdi_draw_text(hdc, &sess_txt, &mut sess_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            &sess_txt,
+            &mut sess_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         if let Some(pct) = snapshot.budget_usage_pct {
             let cap_str = net_flow_core::format::format_bytes(snapshot.budget_cap_bytes);
@@ -824,7 +875,12 @@ fn render_flyout(
                 bottom: sess_y + dpi_scale(38, dpi),
             };
             SetTextColor(hdc, text_secondary);
-            gdi_draw_text(hdc, &bgt_txt, &mut bgt_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            gdi_draw_text(
+                hdc,
+                &bgt_txt,
+                &mut bgt_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
 
             // Progress bar
             let bar_l = margin_x + dpi_scale(10, dpi);
@@ -986,7 +1042,11 @@ fn render_flyout(
 
         // Reset Button
         let reset_bg = if hover == 1 {
-            if is_dark { rgb(56, 56, 64) } else { rgb(226, 232, 240) }
+            if is_dark {
+                rgb(56, 56, 64)
+            } else {
+                rgb(226, 232, 240)
+            }
         } else {
             card_bg
         };
@@ -1007,11 +1067,20 @@ fn render_flyout(
         let mut r_txt_rc = reset_rc;
         SelectObject(hdc, font_body.into());
         SetTextColor(hdc, text_primary);
-        gdi_draw_text(hdc, "Reset Session", &mut r_txt_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            "Reset Session",
+            &mut r_txt_rc,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // Close Button
         let close_bg = if hover == 2 {
-            if is_dark { rgb(56, 56, 64) } else { rgb(226, 232, 240) }
+            if is_dark {
+                rgb(56, 56, 64)
+            } else {
+                rgb(226, 232, 240)
+            }
         } else {
             card_bg
         };
@@ -1032,7 +1101,12 @@ fn render_flyout(
         let mut c_txt_rc = close_rc;
         SelectObject(hdc, font_body.into());
         SetTextColor(hdc, text_primary);
-        gdi_draw_text(hdc, "Close", &mut c_txt_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        gdi_draw_text(
+            hdc,
+            "Close",
+            &mut c_txt_rc,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // Cleanup GDI objects
         SelectObject(hdc, old_brush);
@@ -1056,16 +1130,14 @@ unsafe extern "system" fn flyout_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_NCCREATE => {
-            unsafe {
-                let cs = lparam.0 as *const CREATESTRUCTW;
-                if !cs.is_null() {
-                    let ctx_ptr = (*cs).lpCreateParams as isize;
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctx_ptr);
-                }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
+        WM_NCCREATE => unsafe {
+            let cs = lparam.0 as *const CREATESTRUCTW;
+            if !cs.is_null() {
+                let ctx_ptr = (*cs).lpCreateParams as isize;
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctx_ptr);
             }
-        }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
         WM_PAINT => {
             unsafe {
                 let mut ps = PAINTSTRUCT::default();
@@ -1076,7 +1148,8 @@ unsafe extern "system" fn flyout_wndproc(
                     let width = client_rect.right - client_rect.left;
                     let height = client_rect.bottom - client_rect.top;
 
-                    if width > 0 && height > 0
+                    if width > 0
+                        && height > 0
                         && let Some(ctx) = get_flyout_context(hwnd)
                     {
                         let snapshot = ctx.snapshot.read_safe().clone();
@@ -1108,7 +1181,11 @@ unsafe extern "system" fn flyout_wndproc(
             if activation == WA_INACTIVE {
                 unsafe {
                     if let Some(ctx) = get_flyout_context(hwnd) {
-                        let elapsed = ctx.open_time.lock().map(|t| t.elapsed()).unwrap_or_default();
+                        let elapsed = ctx
+                            .open_time
+                            .lock()
+                            .map(|t| t.elapsed())
+                            .unwrap_or_default();
                         if elapsed.as_millis() > 150 {
                             let cur = *ctx.lifecycle.read_safe();
                             if cur == FlyoutLifecycleState::Visible {
@@ -1125,7 +1202,11 @@ unsafe extern "system" fn flyout_wndproc(
         WM_KILLFOCUS => {
             unsafe {
                 if let Some(ctx) = get_flyout_context(hwnd) {
-                    let elapsed = ctx.open_time.lock().map(|t| t.elapsed()).unwrap_or_default();
+                    let elapsed = ctx
+                        .open_time
+                        .lock()
+                        .map(|t| t.elapsed())
+                        .unwrap_or_default();
                     if elapsed.as_millis() > 150 {
                         let cur = *ctx.lifecycle.read_safe();
                         if cur == FlyoutLifecycleState::Visible {
@@ -1212,10 +1293,16 @@ unsafe extern "system" fn flyout_wndproc(
 
             unsafe {
                 if let Some(ctx) = get_flyout_context(hwnd) {
-                    let reset_clicked =
-                        ctx.reset_rect.lock().map(|r| pt_in_rect(&r, pt)).unwrap_or(false);
-                    let close_clicked =
-                        ctx.close_rect.lock().map(|r| pt_in_rect(&r, pt)).unwrap_or(false);
+                    let reset_clicked = ctx
+                        .reset_rect
+                        .lock()
+                        .map(|r| pt_in_rect(&r, pt))
+                        .unwrap_or(false);
+                    let close_clicked = ctx
+                        .close_rect
+                        .lock()
+                        .map(|r| pt_in_rect(&r, pt))
+                        .unwrap_or(false);
 
                     if reset_clicked {
                         (ctx.on_reset)();
@@ -1229,16 +1316,14 @@ unsafe extern "system" fn flyout_wndproc(
             }
             LRESULT(0)
         }
-        WM_NCDESTROY => {
-            unsafe {
-                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FlyoutContext;
-                if !ptr.is_null() {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    drop(Box::from_raw(ptr));
-                }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
+        WM_NCDESTROY => unsafe {
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FlyoutContext;
+            if !ptr.is_null() {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                drop(Box::from_raw(ptr));
             }
-        }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -1296,14 +1381,7 @@ mod tests {
             right: 1832,
             bottom: 40,
         });
-        let (x, y) = calculate_flyout_geometry(
-            icon_rect,
-            TaskbarEdge::Top,
-            work_area,
-            328,
-            456,
-            8,
-        );
+        let (x, y) = calculate_flyout_geometry(icon_rect, TaskbarEdge::Top, work_area, 328, 456, 8);
 
         assert!(x + 328 <= work_area.right);
         assert!(y >= work_area.top);
