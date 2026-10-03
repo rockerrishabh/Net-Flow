@@ -60,8 +60,11 @@ const IDM_RESET_SESSION: usize = 1001;
 const IDM_EXIT: usize = 1002;
 const IDM_STARTUP_TOGGLE: usize = 1003;
 const IDM_LATENCY_TOGGLE: usize = 1004;
+const IDM_EXPORT_CSV: usize = 1005;
+const IDM_EXPORT_JSON: usize = 1006;
 
 const WM_LBUTTONUP: u32 = 0x0202;
+
 const WM_RBUTTONUP: u32 = 0x0205;
 
 // Window messages handled by the tray window proc.
@@ -501,11 +504,21 @@ fn run_tray_ui(state: Arc<TrayState>, quit: Arc<AtomicBool>, tx: mpsc::Sender<is
         let on_reset = Arc::new(move || {
             reset_session(&reset_state);
         });
+        let export_state = Arc::clone(&state);
+        let on_export = Arc::new(move |flyout_hwnd| {
+            let mut b = export_state.backend.lock_safe();
+            crate::export_controller::handle_export_dialog(
+                flyout_hwnd,
+                crate::export_controller::ExportFormat::Csv,
+                &mut b,
+            );
+        });
         if let Ok(flyout_hwnd) = crate::flyout::create_flyout_window(
             hinstance,
             Arc::clone(&state.flyout_snapshot),
             Arc::clone(&state.flyout_lifecycle),
             on_reset,
+            on_export,
         ) {
             state
                 .flyout_hwnd
@@ -692,6 +705,19 @@ unsafe fn show_menu(hwnd: HWND) {
             w!("Reset session totals"),
         );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            IDM_EXPORT_CSV,
+            w!("Export Diagnostics (CSV)..."),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            IDM_EXPORT_JSON,
+            w!("Export Diagnostics (JSON)..."),
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT, w!("Exit Net Flow"));
 
         let mut point = POINT::default();
@@ -811,6 +837,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         net_flow_core::card::save_user_config(&config);
                         if let Some(ctx) = context(hwnd) {
                             ctx.state.ui_dirty.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    IDM_EXPORT_CSV => {
+                        if let Some(ctx) = context(hwnd) {
+                            let mut b = ctx.state.backend.lock_safe();
+                            crate::export_controller::handle_export_dialog(
+                                hwnd,
+                                crate::export_controller::ExportFormat::Csv,
+                                &mut b,
+                            );
+                        }
+                    }
+                    IDM_EXPORT_JSON => {
+                        if let Some(ctx) = context(hwnd) {
+                            let mut b = ctx.state.backend.lock_safe();
+                            crate::export_controller::handle_export_dialog(
+                                hwnd,
+                                crate::export_controller::ExportFormat::Json,
+                                &mut b,
+                            );
                         }
                     }
                     IDM_EXIT => {

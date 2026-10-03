@@ -10,6 +10,7 @@
     warnings
 )]
 mod bindings;
+pub mod export_controller;
 mod factory;
 pub mod flyout;
 mod provider;
@@ -55,6 +56,28 @@ unsafe extern "system" {
 
 fn main() -> windows_core::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+
+    // 1. Check for headless diagnostic export invocation
+    if args.iter().any(|arg| arg == "--export" || arg == "-e") {
+        let code = run_headless_export(&args);
+        std::process::exit(match code {
+            std::process::ExitCode::SUCCESS => 0,
+            _ => 1,
+        });
+    }
+
+    // 2. Check for toast notification activation (action=open-file&token=<token>)
+    for arg in &args {
+        if arg.contains("token=")
+            && let Some(token_part) = arg.split("token=").nth(1)
+        {
+            let token = token_part.split('&').next().unwrap_or(token_part);
+            if export_controller::open_exported_file(token) {
+                return Ok(());
+            }
+        }
+    }
+
     let is_com_server = args.iter().any(|arg| {
         arg.eq_ignore_ascii_case("-RegisterProcessAsComServer")
             || arg.eq_ignore_ascii_case("/RegisterProcessAsComServer")
@@ -65,6 +88,67 @@ fn main() -> windows_core::Result<()> {
         run_com_server()
     } else {
         tray::run_tray_host()
+    }
+}
+
+fn run_headless_export(args: &[String]) -> std::process::ExitCode {
+    let export_pos = args.iter().position(|a| a == "--export" || a == "-e");
+    let Some(pos) = export_pos else {
+        return std::process::ExitCode::FAILURE;
+    };
+
+    let format_str = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("json");
+    let target_path_str = args.get(pos + 2).map(|s| s.as_str());
+
+    let is_json = format_str.eq_ignore_ascii_case("json");
+    let is_csv = format_str.eq_ignore_ascii_case("csv");
+
+    if !is_json && !is_csv {
+        eprintln!(
+            "Error: Invalid export format '{}'. Supported formats: 'csv', 'json'",
+            format_str
+        );
+        return std::process::ExitCode::FAILURE;
+    }
+
+    let mut backend = net_flow_core::NetworkBackend::load_or_create(
+        net_flow_core::AggregateMode::PhysicalTransport,
+    );
+    let snapshot = backend.collect_diagnostics_snapshot();
+
+    let output_data = if is_csv {
+        net_flow_core::export::export_to_csv(&snapshot)
+    } else {
+        match net_flow_core::export::export_to_json(&snapshot, true) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("Error generating JSON export: {}", e);
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    };
+
+    match target_path_str {
+        None | Some("-") => {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut handle = stdout.lock();
+            if let Err(e) = handle.write_all(output_data.as_bytes()) {
+                eprintln!("Error writing export to stdout: {}", e);
+                return std::process::ExitCode::FAILURE;
+            }
+            let _ = handle.flush();
+            std::process::ExitCode::SUCCESS
+        }
+        Some(path_str) => {
+            let target_path = std::path::Path::new(path_str);
+            if let Err(e) = export_controller::atomic_write_file(target_path, &output_data) {
+                eprintln!("Error writing export file to '{}': {}", path_str, e);
+                return std::process::ExitCode::FAILURE;
+            }
+            eprintln!("Diagnostics export written successfully to: {}", path_str);
+            std::process::ExitCode::SUCCESS
+        }
     }
 }
 

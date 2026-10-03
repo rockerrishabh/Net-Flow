@@ -746,6 +746,19 @@ impl PacketLossTracker {
     pub fn health(&self) -> LatencyHealth {
         self.evaluate().3
     }
+
+    /// Extracts successful probe latencies in chronological order in milliseconds.
+    pub fn latencies_ms(&self) -> Vec<f64> {
+        let mut result = Vec::with_capacity(self.count);
+        let start = (self.head + 20 - self.count) % 20;
+        for i in 0..self.count {
+            let idx = (start + i) % 20;
+            if let Some(ProbeResult::Success { latency }) = self.samples[idx] {
+                result.push(latency.as_secs_f64() * 1000.0);
+            }
+        }
+        result
+    }
 }
 
 /// Wi-Fi generation / standard mapped from 802.11 PHY types.
@@ -2856,6 +2869,854 @@ pub fn sample_latency_snapshot(
     sample_latency_snapshot_dual_stack(mode, sequence, timeout_ms, None).0
 }
 
+#[derive(Debug, Clone)]
+pub struct RawAdapterInfo {
+    pub name: String,
+    pub description: String,
+    pub friendly_name: String,
+    pub interface_type: crate::export::InterfaceType,
+    pub is_physical: bool,
+    pub is_up: bool,
+    pub routing_metric: u32,
+    pub link_speed_bps: u64,
+    pub mac_address: String,
+    pub ipv4_addresses: Vec<String>,
+    pub ipv6_addresses: Vec<String>,
+    pub default_gateways: Vec<String>,
+    pub dns_servers: Vec<String>,
+    pub dhcp_enabled: bool,
+    pub dhcp_server: Option<String>,
+    pub mtu: u32,
+    pub wifi: Option<crate::export::WifiDiagnostics>,
+}
+
+pub fn is_physical_adapter(
+    interface_type: crate::export::InterfaceType,
+    desc: &str,
+    friendly: &str,
+) -> bool {
+    if interface_type == crate::export::InterfaceType::Loopback
+        || interface_type == crate::export::InterfaceType::Vpn
+    {
+        return false;
+    }
+    let lower_desc = desc.to_lowercase();
+    let lower_friendly = friendly.to_lowercase();
+    let virtual_keywords = [
+        "hyper-v",
+        "virtual",
+        "wsl",
+        "docker",
+        "vmware",
+        "virtualbox",
+        "tap-",
+        "vethernet",
+        "tailscale",
+        "zerotier",
+        "wireguard",
+        "vpn",
+        "loopback",
+        "bluetooth",
+        "pseudo",
+    ];
+    for kw in &virtual_keywords {
+        if lower_desc.contains(kw) || lower_friendly.contains(kw) {
+            return false;
+        }
+    }
+    interface_type == crate::export::InterfaceType::Ethernet
+        || interface_type == crate::export::InterfaceType::Wifi
+        || interface_type == crate::export::InterfaceType::Cellular
+}
+
+pub fn has_usable_ip(ipv4: &[String], ipv6: &[String]) -> bool {
+    let has_v4 = ipv4.iter().any(|s| {
+        let ip_str = s.split('/').next().unwrap_or(s);
+        if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local()
+        } else {
+            false
+        }
+    });
+    if has_v4 {
+        return true;
+    }
+    ipv6.iter().any(|s| {
+        let ip_str = s.split('/').next().unwrap_or(s);
+        if let Ok(ip) = ip_str.parse::<std::net::Ipv6Addr>() {
+            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_unicast_link_local()
+        } else {
+            false
+        }
+    })
+}
+
+pub fn has_default_gateway(gateways: &[String]) -> bool {
+    gateways.iter().any(|s| {
+        if let Ok(ip) = s.parse::<std::net::IpAddr>() {
+            !ip.is_loopback() && !ip.is_unspecified()
+        } else {
+            false
+        }
+    })
+}
+
+pub fn select_active_adapter(
+    mut adapters: Vec<RawAdapterInfo>,
+) -> (
+    Option<crate::export::AdapterDiagnostics>,
+    Vec<crate::export::AdapterSummary>,
+) {
+    let mut best_index = None;
+    let mut best_score: Option<(bool, bool, bool, bool, u32, u64)> = None;
+
+    for (i, a) in adapters.iter().enumerate() {
+        let is_up = a.is_up;
+        let has_gateway = has_default_gateway(&a.default_gateways);
+        let has_ip = has_usable_ip(&a.ipv4_addresses, &a.ipv6_addresses);
+        let is_phys = a.is_physical;
+        let metric = a.routing_metric;
+        let speed = a.link_speed_bps;
+
+        // Active adapter MUST be operational and possess a usable non-APIPA IP
+        if !is_up || !has_ip {
+            continue;
+        }
+
+        let score = (is_up, has_gateway, has_ip, is_phys, metric, speed);
+
+        match &best_score {
+            None => {
+                best_score = Some(score);
+                best_index = Some(i);
+            }
+            Some(curr_best) => {
+                // Active Adapter Selection Hierarchy:
+                // 1. Gateway presence (prefer default route)
+                // 2. Physical adapter preference (Ethernet/Wi-Fi over Virtual/Hyper-V)
+                // 3. Lowest routing metric
+                // 4. Highest link speed
+                let is_better = if score.1 != curr_best.1 {
+                    score.1 && !curr_best.1
+                } else if score.3 != curr_best.3 {
+                    score.3 && !curr_best.3
+                } else if score.4 != curr_best.4 {
+                    score.4 < curr_best.4
+                } else {
+                    score.5 > curr_best.5
+                };
+
+                if is_better {
+                    best_score = Some(score);
+                    best_index = Some(i);
+                }
+            }
+        }
+    }
+
+    let mut active = None;
+    let mut summaries = Vec::with_capacity(adapters.len());
+
+    if let Some(idx) = best_index {
+        let chosen = adapters.remove(idx);
+        active = Some(crate::export::AdapterDiagnostics {
+            name: chosen.name,
+            description: chosen.description,
+            friendly_name: chosen.friendly_name,
+            interface_type: chosen.interface_type,
+            mac_address: chosen.mac_address,
+            ipv4_addresses: chosen.ipv4_addresses,
+            ipv6_addresses: chosen.ipv6_addresses,
+            default_gateways: chosen.default_gateways,
+            dns_servers: chosen.dns_servers,
+            dhcp_enabled: chosen.dhcp_enabled,
+            dhcp_server: chosen.dhcp_server,
+            mtu: chosen.mtu,
+            link_speed_bps: chosen.link_speed_bps,
+            wifi: chosen.wifi,
+        });
+    }
+
+    for a in adapters {
+        summaries.push(crate::export::AdapterSummary {
+            name: a.name,
+            friendly_name: a.friendly_name,
+            interface_type: a.interface_type,
+            is_up: a.is_up,
+            ipv4_addresses: a.ipv4_addresses,
+        });
+    }
+
+    (active, summaries)
+}
+
+unsafe fn sockaddr_to_ip(
+    sa_ptr: *const windows::Win32::Networking::WinSock::SOCKADDR,
+) -> Option<std::net::IpAddr> {
+    if sa_ptr.is_null() {
+        return None;
+    }
+    use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
+    unsafe {
+        let family = (*sa_ptr).sa_family;
+        if family == AF_INET {
+            let sin = &*(sa_ptr as *const SOCKADDR_IN);
+            let s_addr = sin.sin_addr.S_un.S_addr;
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::from(
+                s_addr.to_ne_bytes(),
+            )))
+        } else if family == AF_INET6 {
+            let sin6 = &*(sa_ptr as *const SOCKADDR_IN6);
+            let bytes = sin6.sin6_addr.u.Byte;
+            Some(std::net::IpAddr::V6(std::net::Ipv6Addr::from(bytes)))
+        } else {
+            None
+        }
+    }
+}
+
+pub fn query_raw_adapters() -> Vec<RawAdapterInfo> {
+    use windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses,
+        IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    let mut buf_len = 16384u32;
+    let mut buf = vec![0u8; buf_len as usize];
+    let flags = GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_INCLUDE_PREFIX;
+
+    let mut ret = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC.0 as u32,
+            flags,
+            None,
+            Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+            &mut buf_len,
+        )
+    };
+
+    if ret == ERROR_BUFFER_OVERFLOW.0 {
+        buf.resize(buf_len as usize, 0);
+        ret = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                flags,
+                None,
+                Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut buf_len,
+            )
+        };
+    }
+
+    if ret != 0 {
+        return Vec::new();
+    }
+
+    let mut raw_adapters = Vec::new();
+    let mut curr_ptr = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+
+    while !curr_ptr.is_null() {
+        let curr = unsafe { &*curr_ptr };
+
+        let (name, friendly_name, description) = unsafe {
+            (
+                curr.AdapterName.to_string().unwrap_or_default(),
+                curr.FriendlyName.to_string().unwrap_or_default(),
+                curr.Description.to_string().unwrap_or_default(),
+            )
+        };
+        let if_type = curr.IfType as i32;
+        let is_up = curr.OperStatus.0 == 1; // IfOperStatusUp = 1
+
+        let (category, medium) = classify_interface(if_type, 0, &description, &friendly_name);
+        let interface_type = match medium {
+            InterfaceMedium::Ethernet => crate::export::InterfaceType::Ethernet,
+            InterfaceMedium::Wifi => crate::export::InterfaceType::Wifi,
+            InterfaceMedium::Cellular => crate::export::InterfaceType::Cellular,
+            InterfaceMedium::Loopback => crate::export::InterfaceType::Loopback,
+            InterfaceMedium::Virtual => {
+                let desc_low = description.to_lowercase();
+                let f_low = friendly_name.to_lowercase();
+                if desc_low.contains("vpn") || f_low.contains("vpn") {
+                    crate::export::InterfaceType::Vpn
+                } else {
+                    crate::export::InterfaceType::Other
+                }
+            }
+            InterfaceMedium::Other => {
+                let desc_low = description.to_lowercase();
+                let f_low = friendly_name.to_lowercase();
+                if desc_low.contains("vpn") || f_low.contains("vpn") {
+                    crate::export::InterfaceType::Vpn
+                } else {
+                    crate::export::InterfaceType::Other
+                }
+            }
+        };
+
+        let is_physical = category == InterfaceCategory::Physical
+            && is_physical_adapter(interface_type, &description, &friendly_name);
+
+        let phys_len = curr.PhysicalAddressLength as usize;
+        let mac_address = if phys_len == 6 {
+            let p = &curr.PhysicalAddress;
+            format!(
+                "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                p[0], p[1], p[2], p[3], p[4], p[5]
+            )
+        } else if phys_len > 0 && phys_len <= 8 {
+            curr.PhysicalAddress[..phys_len]
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(":")
+        } else {
+            String::new()
+        };
+
+        let mut ipv4_addresses = Vec::new();
+        let mut ipv6_addresses = Vec::new();
+        let mut unicast_ptr = curr.FirstUnicastAddress;
+        while !unicast_ptr.is_null() {
+            let u = unsafe { &*unicast_ptr };
+            let prefix = u.OnLinkPrefixLength;
+            if let Some(ip) = unsafe { sockaddr_to_ip(u.Address.lpSockaddr) } {
+                match ip {
+                    std::net::IpAddr::V4(v4) => ipv4_addresses.push(format!("{}/{}", v4, prefix)),
+                    std::net::IpAddr::V6(v6) => ipv6_addresses.push(format!("{}/{}", v6, prefix)),
+                }
+            }
+            unicast_ptr = u.Next;
+        }
+
+        let mut default_gateways = Vec::new();
+        let mut gw_ptr = curr.FirstGatewayAddress;
+        while !gw_ptr.is_null() {
+            let gw = unsafe { &*gw_ptr };
+            if let Some(ip) = unsafe { sockaddr_to_ip(gw.Address.lpSockaddr) } {
+                default_gateways.push(ip.to_string());
+            }
+            gw_ptr = gw.Next;
+        }
+
+        let mut dns_servers = Vec::new();
+        let mut dns_ptr = curr.FirstDnsServerAddress;
+        while !dns_ptr.is_null() {
+            let dns = unsafe { &*dns_ptr };
+            if let Some(ip) = unsafe { sockaddr_to_ip(dns.Address.lpSockaddr) } {
+                dns_servers.push(ip.to_string());
+            }
+            dns_ptr = dns.Next;
+        }
+
+        let dhcp_enabled = (unsafe { curr.Anonymous2.Flags } & 0x0004) != 0;
+        let dhcp_server = if dhcp_enabled {
+            unsafe { sockaddr_to_ip(curr.Dhcpv4Server.lpSockaddr).map(|ip| ip.to_string()) }
+        } else {
+            None
+        };
+
+        let mtu = curr.Mtu;
+        let link_speed_bps = curr.ReceiveLinkSpeed.max(curr.TransmitLinkSpeed);
+
+        let routing_metric = if curr.Ipv4Metric > 0 {
+            curr.Ipv4Metric
+        } else if curr.Ipv6Metric > 0 {
+            curr.Ipv6Metric
+        } else {
+            u32::MAX
+        };
+
+        let wifi = if interface_type == crate::export::InterfaceType::Wifi && is_up {
+            query_active_wifi_diagnostics()
+        } else {
+            None
+        };
+
+        raw_adapters.push(RawAdapterInfo {
+            name,
+            description,
+            friendly_name,
+            interface_type,
+            is_physical,
+            is_up,
+            routing_metric,
+            link_speed_bps,
+            mac_address,
+            ipv4_addresses,
+            ipv6_addresses,
+            default_gateways,
+            dns_servers,
+            dhcp_enabled,
+            dhcp_server,
+            mtu,
+            wifi,
+        });
+
+        curr_ptr = curr.Next;
+    }
+
+    raw_adapters
+}
+
+pub fn query_active_wifi_diagnostics() -> Option<crate::export::WifiDiagnostics> {
+    unsafe {
+        let mut negotiated = 0u32;
+        let mut handle = 0isize;
+        if WlanOpenHandle(2, std::ptr::null_mut(), &mut negotiated, &mut handle) != 0 || handle == 0
+        {
+            return None;
+        }
+
+        let mut list_ptr: *mut WLAN_INTERFACE_INFO_LIST = std::ptr::null_mut();
+        let enum_res = WlanEnumInterfaces(handle, std::ptr::null_mut(), &mut list_ptr);
+        if enum_res != 0 || list_ptr.is_null() {
+            let _ = WlanCloseHandle(handle, std::ptr::null_mut());
+            return None;
+        }
+
+        let mut found_diag: Option<crate::export::WifiDiagnostics> = None;
+        let count = (*list_ptr).dwNumberOfItems;
+        if count > 0 {
+            let interfaces =
+                std::slice::from_raw_parts((*list_ptr).InterfaceInfo.as_ptr(), count as usize);
+            for iface in interfaces {
+                if iface.isState == 1 {
+                    let mut data_size = 0u32;
+                    let mut data_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+
+                    let mut ssid = String::new();
+                    let mut bssid = String::new();
+                    let mut fallback_phy = 0u32;
+                    let mut fallback_quality = 0u32;
+                    let mut fallback_rx_rate = 0u32;
+                    let mut fallback_tx_rate = 0u32;
+
+                    let query_conn = WlanQueryInterface(
+                        handle,
+                        &iface.InterfaceGuid,
+                        WLAN_INTF_OPCODE_CURRENT_CONNECTION,
+                        std::ptr::null_mut(),
+                        &mut data_size,
+                        &mut data_ptr,
+                        std::ptr::null_mut(),
+                    );
+
+                    if query_conn == 0 && !data_ptr.is_null() {
+                        let conn_attrs = &*(data_ptr as *const WLAN_CONNECTION_ATTRIBUTES);
+                        let ssid_len =
+                            conn_attrs.wlanAssociationAttributes.dot11Ssid.uSSIDLength as usize;
+                        if ssid_len > 0 && ssid_len <= 32 {
+                            let bytes =
+                                &conn_attrs.wlanAssociationAttributes.dot11Ssid.ucSSID[..ssid_len];
+                            let ssid_lossy = String::from_utf8_lossy(bytes);
+                            let trimmed = ssid_lossy.trim_matches(['\0', ' ']);
+                            if !trimmed.is_empty() {
+                                ssid = trimmed.to_string();
+                            }
+                        }
+                        if ssid.is_empty() {
+                            let prof = wchar_to_string(&conn_attrs.strProfileName);
+                            let trimmed = prof.trim();
+                            if !trimmed.is_empty() {
+                                ssid = trimmed.to_string();
+                            }
+                        }
+
+                        let b = conn_attrs.wlanAssociationAttributes.dot11Bssid;
+                        bssid = format!(
+                            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                            b[0], b[1], b[2], b[3], b[4], b[5]
+                        );
+
+                        fallback_phy = conn_attrs.wlanAssociationAttributes.dot11PhyType;
+                        fallback_quality = conn_attrs.wlanAssociationAttributes.wlanSignalQuality;
+                        fallback_rx_rate = conn_attrs.wlanAssociationAttributes.ulRxRate;
+                        fallback_tx_rate = conn_attrs.wlanAssociationAttributes.ulTxRate;
+                        WlanFreeMemory(data_ptr);
+                    }
+
+                    if ssid.is_empty() {
+                        ssid = "Wi-Fi".to_string();
+                    }
+
+                    // Query realtime connection quality (OpCode 19)
+                    let mut rt_size = 0u32;
+                    let mut rt_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+                    let query_rt = WlanQueryInterface(
+                        handle,
+                        &iface.InterfaceGuid,
+                        WLAN_INTF_OPCODE_REALTIME_CONNECTION_QUALITY,
+                        std::ptr::null_mut(),
+                        &mut rt_size,
+                        &mut rt_ptr,
+                        std::ptr::null_mut(),
+                    );
+
+                    if query_rt == 0 && !rt_ptr.is_null() {
+                        let rt = &*(rt_ptr as *const WLAN_REALTIME_CONNECTION_QUALITY);
+                        let wifi_gen = match wifi_generation(rt.dot11PhyType) {
+                            WifiGeneration::Wifi7 => crate::export::WifiGeneration::Wifi7,
+                            WifiGeneration::Wifi6 => crate::export::WifiGeneration::Wifi6,
+                            WifiGeneration::Wifi5 => crate::export::WifiGeneration::Wifi5,
+                            WifiGeneration::Wifi4 => crate::export::WifiGeneration::Wifi4,
+                            _ => crate::export::WifiGeneration::Unknown,
+                        };
+                        let quality_pct = rt.ulLinkQuality.min(100) as u8;
+
+                        let (freq_mhz, rssi_dbm, ch_width) = if rt.ulNumLinks > 0 {
+                            let link = &rt.linksInfo[0];
+                            let r = if link.lRssi != 0 {
+                                link.lRssi
+                            } else {
+                                signal_quality_to_rssi_dbm(quality_pct) as i32
+                            };
+                            let w = if link.ulBandwidth > 0 {
+                                link.ulBandwidth
+                            } else {
+                                20
+                            };
+                            (link.ulChannelCenterFrequencyMhz, r, w)
+                        } else {
+                            (0, signal_quality_to_rssi_dbm(quality_pct) as i32, 20)
+                        };
+
+                        let band = wifi_band(freq_mhz, None);
+                        let tx_bps = if rt.ulTxRate > 0 {
+                            (rt.ulTxRate as u64) * 1000
+                        } else {
+                            0
+                        };
+                        let rx_bps = if rt.ulRxRate > 0 {
+                            (rt.ulRxRate as u64) * 1000
+                        } else {
+                            0
+                        };
+
+                        WlanFreeMemory(rt_ptr);
+
+                        found_diag = Some(crate::export::WifiDiagnostics {
+                            ssid,
+                            bssid,
+                            generation: wifi_gen,
+                            band_ghz: band.as_str().to_string(),
+                            channel: if freq_mhz > 0 { freq_mhz } else { 0 },
+                            channel_width_mhz: ch_width,
+                            rssi_dbm,
+                            transmit_rate_bps: tx_bps,
+                            receive_rate_bps: rx_bps,
+                        });
+                    } else {
+                        let wifi_gen = match wifi_generation(fallback_phy) {
+                            WifiGeneration::Wifi7 => crate::export::WifiGeneration::Wifi7,
+                            WifiGeneration::Wifi6 => crate::export::WifiGeneration::Wifi6,
+                            WifiGeneration::Wifi5 => crate::export::WifiGeneration::Wifi5,
+                            WifiGeneration::Wifi4 => crate::export::WifiGeneration::Wifi4,
+                            _ => crate::export::WifiGeneration::Unknown,
+                        };
+                        let quality_pct = fallback_quality.min(100) as u8;
+                        let rssi = signal_quality_to_rssi_dbm(quality_pct) as i32;
+                        let tx_bps = (fallback_tx_rate as u64) * 1000;
+                        let rx_bps = (fallback_rx_rate as u64) * 1000;
+
+                        // Query channel number (Opcode 8)
+                        let mut ch_size = 0u32;
+                        let mut ch_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+                        let mut channel_val = 0u32;
+                        if WlanQueryInterface(
+                            handle,
+                            &iface.InterfaceGuid,
+                            WLAN_INTF_OPCODE_CHANNEL_NUMBER,
+                            std::ptr::null_mut(),
+                            &mut ch_size,
+                            &mut ch_ptr,
+                            std::ptr::null_mut(),
+                        ) == 0
+                            && !ch_ptr.is_null()
+                        {
+                            channel_val = *(ch_ptr as *const u32);
+                            WlanFreeMemory(ch_ptr);
+                        }
+
+                        let band = wifi_band(
+                            0,
+                            if channel_val > 0 {
+                                Some(channel_val)
+                            } else {
+                                None
+                            },
+                        );
+
+                        found_diag = Some(crate::export::WifiDiagnostics {
+                            ssid,
+                            bssid,
+                            generation: wifi_gen,
+                            band_ghz: band.as_str().to_string(),
+                            channel: channel_val,
+                            channel_width_mhz: 20,
+                            rssi_dbm: rssi,
+                            transmit_rate_bps: tx_bps,
+                            receive_rate_bps: rx_bps,
+                        });
+                    }
+
+                    if found_diag.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        WlanFreeMemory(list_ptr as *mut core::ffi::c_void);
+        let _ = WlanCloseHandle(handle, std::ptr::null_mut());
+        found_diag
+    }
+}
+
+pub fn query_adapter_diagnostics() -> (
+    Option<crate::export::AdapterDiagnostics>,
+    Vec<crate::export::AdapterSummary>,
+) {
+    let raw = query_raw_adapters();
+    select_active_adapter(raw)
+}
+
+pub fn current_utc_iso8601() -> String {
+    #[repr(C)]
+    struct Win32SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetSystemTime(lpSystemTime: *mut Win32SystemTime);
+        }
+        let mut st = std::mem::zeroed();
+        GetSystemTime(&mut st);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            st.year, st.month, st.day, st.hour, st.minute, st.second
+        )
+    }
+}
+
+pub fn local_timezone_id() -> String {
+    #[repr(C)]
+    struct DynamicTimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: [u16; 8],
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: [u16; 8],
+        daylight_bias: i32,
+        time_zone_key_name: [u16; 128],
+        dynamic_daylight_time_disabled: u8,
+    }
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetDynamicTimeZoneInformation(
+                pTimeZoneInformation: *mut DynamicTimeZoneInformation,
+            ) -> u32;
+        }
+        let mut tz = std::mem::zeroed();
+        let res = GetDynamicTimeZoneInformation(&mut tz);
+        if res != 0xFFFFFFFF {
+            let key = wchar_to_string(&tz.time_zone_key_name);
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+            let std_name = wchar_to_string(&tz.standard_name);
+            let trimmed_std = std_name.trim();
+            if !trimmed_std.is_empty() {
+                return trimmed_std.to_string();
+            }
+        }
+    }
+    "UTC".to_string()
+}
+
+pub fn format_unix_timestamp_utc(unix_secs: u64) -> String {
+    let secs_per_day = 86400u64;
+    let days = (unix_secs / secs_per_day) as i64;
+    let rem_secs = (unix_secs % secs_per_day) as u32;
+
+    let hour = rem_secs / 3600;
+    let minute = (rem_secs % 3600) / 60;
+    let second = rem_secs % 60;
+
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hour, minute, second
+    )
+}
+
+pub fn build_diagnostics_snapshot(
+    backend: &NetworkBackend,
+    active_adapter: Option<crate::export::AdapterDiagnostics>,
+    other_adapters: Vec<crate::export::AdapterSummary>,
+) -> crate::export::DiagnosticsSnapshot {
+    let snapshot_time = current_utc_iso8601();
+    let export_time = snapshot_time.clone();
+
+    let arch = {
+        #[cfg(target_arch = "x86_64")]
+        {
+            crate::export::Architecture::X64
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            crate::export::Architecture::Arm64
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            crate::export::Architecture::Unknown
+        }
+    };
+
+    let today_ymd = crate::budget::current_local_ymd();
+    let end_date = crate::budget::format_ymd(today_ymd.0, today_ymd.1, today_ymd.2);
+    let (history_records, start_date) =
+        crate::export::zero_fill_history(&backend.daily_usage.entries, &end_date, 90);
+
+    let history_metadata = crate::export::HistoryMetadata {
+        timezone: local_timezone_id(),
+        start_date,
+        end_date,
+        days: 90,
+    };
+
+    let privacy = crate::export::PrivacyMetadata::default();
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let duration_seconds = now_unix.saturating_sub(backend.session_start_unix);
+    let session_start_utc = format_unix_timestamp_utc(backend.session_start_unix);
+    let bytes_total = backend.session_rx.saturating_add(backend.session_tx);
+
+    let budget_snap = crate::budget::calculate_budget_snapshot(
+        &backend.budget_config,
+        &mut backend.daily_usage.clone(),
+        today_ymd,
+    );
+
+    let session = crate::export::SessionDiagnostics {
+        session_start_utc,
+        duration_seconds,
+        bytes_downloaded: backend.session_rx,
+        bytes_uploaded: backend.session_tx,
+        bytes_total,
+        peak_download_bps: backend.peak_rx.round() as u64,
+        peak_upload_bps: backend.peak_tx.round() as u64,
+        budget_cap_bytes: backend.budget_config.monthly_cap_bytes,
+        budget_consumed_bytes: budget_snap.consumed_bytes,
+        budget_usage_pct: budget_snap.usage_pct,
+        budget_days_remaining: budget_snap.days_remaining,
+    };
+
+    let latencies = backend.packet_loss_tracker.latencies_ms();
+    let rtt_jitter_ms = if latencies.len() >= 2 {
+        crate::export::calculate_mean_absolute_rtt_difference(&latencies)
+    } else if let Some(j) = backend.latency.jitter_ms {
+        j as f64
+    } else {
+        0.0
+    };
+
+    let (lost_pkts, total_pkts) = backend.packet_loss_tracker.counts();
+    let loss_pct = backend.packet_loss_tracker.loss_pct().unwrap_or(0) as f64;
+    let rtt_ms = backend.latency.latency_ms.unwrap_or(0) as f64;
+    let semantic_health = match backend.packet_loss_tracker.health() {
+        LatencyHealth::Healthy => crate::export::SemanticHealth::Healthy,
+        LatencyHealth::Degraded => crate::export::SemanticHealth::Degraded,
+        LatencyHealth::Timeout => crate::export::SemanticHealth::Timeout,
+        LatencyHealth::Unavailable => crate::export::SemanticHealth::Unavailable,
+    };
+
+    let quality = crate::export::QualityDiagnostics {
+        target_host: backend.latency.target.label().to_string(),
+        rtt_ms,
+        rtt_jitter_ms,
+        jitter_method: "mean_absolute_rtt_difference".to_string(),
+        sample_count: total_pkts as usize,
+        packets_received: total_pkts.saturating_sub(lost_pkts) as usize,
+        packets_lost: lost_pkts as usize,
+        packet_loss_percent: loss_pct,
+        semantic_health,
+    };
+
+    let mut processes = Vec::new();
+    for app in &backend.cached_raw_apps.0 {
+        processes.push(crate::export::ProcessAttributionRecord {
+            process_name: app.process_name.clone(),
+            download_bps: app.rx_bps.round() as u64,
+            upload_bps: app.tx_bps.round() as u64,
+            socket_count: app.connection_count as u32,
+        });
+    }
+
+    crate::export::DiagnosticsSnapshot {
+        schema_version: crate::export::DIAGNOSTICS_SCHEMA_VERSION,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        architecture: arch,
+        snapshot_timestamp_utc: snapshot_time,
+        export_generated_at_utc: export_time,
+        history_metadata,
+        privacy,
+        active_adapter,
+        other_adapters,
+        session,
+        quality,
+        history: history_records,
+        processes,
+    }
+}
+
+impl NetworkBackend {
+    pub fn collect_diagnostics_snapshot(&mut self) -> crate::export::DiagnosticsSnapshot {
+        if self.cached_raw_apps.0.is_empty() {
+            self.cached_raw_apps = self.process_tracker.sample(Instant::now());
+        }
+
+        if self.latency.latency_ms.is_none() && self.latency.state == LatencyState::Unavailable {
+            let (snap, res) = sample_latency_snapshot_dual_stack(
+                LatencyTargetMode::Internet,
+                self.generation,
+                500,
+                None,
+            );
+            self.update_latency_probe(snap, res);
+        }
+
+        let (active, others) = query_adapter_diagnostics();
+        build_diagnostics_snapshot(self, active, others)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3990,5 +4851,185 @@ mod tests {
             rx_speed_bps: 100_000_000,
         });
         assert_eq!(eth_100m.display_summary(), "Ethernet · 100 Mbps");
+    }
+
+    #[test]
+    fn test_active_adapter_selection_hierarchy() {
+        let loopback = RawAdapterInfo {
+            name: "{1111}".to_string(),
+            description: "Software Loopback Interface 1".to_string(),
+            friendly_name: "Loopback Pseudo-Interface 1".to_string(),
+            interface_type: crate::export::InterfaceType::Loopback,
+            is_physical: false,
+            is_up: true,
+            routing_metric: 75,
+            link_speed_bps: 1_000_000_000,
+            mac_address: "".to_string(),
+            ipv4_addresses: vec!["127.0.0.1/8".to_string()],
+            ipv6_addresses: vec!["::1/128".to_string()],
+            default_gateways: vec![],
+            dns_servers: vec![],
+            dhcp_enabled: false,
+            dhcp_server: None,
+            mtu: 1500,
+            wifi: None,
+        };
+
+        let hyperv = RawAdapterInfo {
+            name: "{2222}".to_string(),
+            description: "Hyper-V Virtual Ethernet Adapter".to_string(),
+            friendly_name: "vEthernet (Default Switch)".to_string(),
+            interface_type: crate::export::InterfaceType::Other,
+            is_physical: false,
+            is_up: true,
+            routing_metric: 15,
+            link_speed_bps: 10_000_000_000,
+            mac_address: "00:15:5D:01:02:03".to_string(),
+            ipv4_addresses: vec!["172.20.10.1/24".to_string()],
+            ipv6_addresses: vec![],
+            default_gateways: vec!["172.20.10.254".to_string()],
+            dns_servers: vec!["172.20.10.254".to_string()],
+            dhcp_enabled: false,
+            dhcp_server: None,
+            mtu: 1500,
+            wifi: None,
+        };
+
+        let ethernet = RawAdapterInfo {
+            name: "{3333}".to_string(),
+            description: "Realtek Gaming 2.5GbE Family Controller".to_string(),
+            friendly_name: "Ethernet".to_string(),
+            interface_type: crate::export::InterfaceType::Ethernet,
+            is_physical: true,
+            is_up: true,
+            routing_metric: 25,
+            link_speed_bps: 2_500_000_000,
+            mac_address: "04:D4:C4:01:02:03".to_string(),
+            ipv4_addresses: vec!["192.168.1.150/24".to_string()],
+            ipv6_addresses: vec!["2401:4900:1::50/64".to_string()],
+            default_gateways: vec!["192.168.1.1".to_string()],
+            dns_servers: vec!["1.1.1.1".to_string(), "1.0.0.1".to_string()],
+            dhcp_enabled: true,
+            dhcp_server: Some("192.168.1.1".to_string()),
+            mtu: 1500,
+            wifi: None,
+        };
+
+        let wifi = RawAdapterInfo {
+            name: "{4444}".to_string(),
+            description: "Intel(R) Wi-Fi 6E AX211 160MHz".to_string(),
+            friendly_name: "Wi-Fi".to_string(),
+            interface_type: crate::export::InterfaceType::Wifi,
+            is_physical: true,
+            is_up: true,
+            routing_metric: 35,
+            link_speed_bps: 1_200_000_000,
+            mac_address: "50:EB:71:01:02:03".to_string(),
+            ipv4_addresses: vec!["192.168.1.105/24".to_string()],
+            ipv6_addresses: vec![],
+            default_gateways: vec!["192.168.1.1".to_string()],
+            dns_servers: vec!["1.1.1.1".to_string()],
+            dhcp_enabled: true,
+            dhcp_server: Some("192.168.1.1".to_string()),
+            mtu: 1500,
+            wifi: Some(crate::export::WifiDiagnostics {
+                ssid: "HomeMesh".to_string(),
+                bssid: "AA:BB:CC:DD:EE:FF".to_string(),
+                generation: crate::export::WifiGeneration::Wifi6E,
+                band_ghz: "5 GHz".to_string(),
+                channel: 36,
+                channel_width_mhz: 160,
+                rssi_dbm: -54,
+                transmit_rate_bps: 1_200_000_000,
+                receive_rate_bps: 1_200_000_000,
+            }),
+        };
+
+        let adapters = vec![loopback, hyperv, ethernet, wifi];
+        let (active, others) = select_active_adapter(adapters);
+
+        assert!(active.is_some());
+        let active = active.unwrap();
+        assert_eq!(active.name, "{3333}");
+        assert_eq!(active.friendly_name, "Ethernet");
+        assert_eq!(
+            active.interface_type,
+            crate::export::InterfaceType::Ethernet
+        );
+        assert!(active.wifi.is_none());
+
+        assert_eq!(others.len(), 3);
+        let other_names: Vec<String> = others.into_iter().map(|s| s.friendly_name).collect();
+        assert!(other_names.contains(&"vEthernet (Default Switch)".to_string()));
+        assert!(other_names.contains(&"Wi-Fi".to_string()));
+        assert!(other_names.contains(&"Loopback Pseudo-Interface 1".to_string()));
+    }
+
+    #[test]
+    fn test_no_active_adapter() {
+        let down_adapter = RawAdapterInfo {
+            name: "{down}".to_string(),
+            description: "Ethernet Controller".to_string(),
+            friendly_name: "Ethernet".to_string(),
+            interface_type: crate::export::InterfaceType::Ethernet,
+            is_physical: true,
+            is_up: false,
+            routing_metric: 25,
+            link_speed_bps: 0,
+            mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            ipv4_addresses: vec!["192.168.1.50/24".to_string()],
+            ipv6_addresses: vec![],
+            default_gateways: vec!["192.168.1.1".to_string()],
+            dns_servers: vec![],
+            dhcp_enabled: false,
+            dhcp_server: None,
+            mtu: 1500,
+            wifi: None,
+        };
+
+        let apipa_adapter = RawAdapterInfo {
+            name: "{apipa}".to_string(),
+            description: "Wi-Fi Adapter".to_string(),
+            friendly_name: "Wi-Fi".to_string(),
+            interface_type: crate::export::InterfaceType::Wifi,
+            is_physical: true,
+            is_up: true,
+            routing_metric: 25,
+            link_speed_bps: 54_000_000,
+            mac_address: "AA:BB:CC:DD:EE:00".to_string(),
+            ipv4_addresses: vec!["169.254.10.20/16".to_string()],
+            ipv6_addresses: vec![],
+            default_gateways: vec![],
+            dns_servers: vec![],
+            dhcp_enabled: true,
+            dhcp_server: None,
+            mtu: 1500,
+            wifi: None,
+        };
+
+        let (active, others) = select_active_adapter(vec![down_adapter, apipa_adapter]);
+        assert!(active.is_none());
+        assert_eq!(others.len(), 2);
+    }
+
+    #[test]
+    fn test_packet_loss_tracker_latencies_and_jitter() {
+        let mut tracker = PacketLossTracker::default();
+        tracker.record(ProbeResult::Success {
+            latency: Duration::from_millis(10),
+        });
+        tracker.record(ProbeResult::Success {
+            latency: Duration::from_millis(15),
+        });
+        tracker.record(ProbeResult::Timeout);
+        tracker.record(ProbeResult::Success {
+            latency: Duration::from_millis(12),
+        });
+
+        let lats = tracker.latencies_ms();
+        assert_eq!(lats, vec![10.0, 15.0, 12.0]);
+
+        let jitter = crate::export::calculate_mean_absolute_rtt_difference(&lats);
+        assert_eq!(jitter, 4.0);
     }
 }

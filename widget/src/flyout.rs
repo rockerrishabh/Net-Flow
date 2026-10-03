@@ -94,9 +94,11 @@ struct FlyoutContext {
     snapshot: Arc<RwLock<FlyoutSnapshot>>,
     lifecycle: Arc<RwLock<FlyoutLifecycleState>>,
     on_reset: Arc<dyn Fn() + Send + Sync>,
+    on_export: Arc<dyn Fn(HWND) + Send + Sync>,
     dpi: AtomicU32,
     open_time: Mutex<Instant>,
-    hover_button: AtomicU32, // 0 = none, 1 = reset, 2 = close
+    hover_button: AtomicU32, // 0 = none, 1 = export, 2 = reset, 3 = close
+    export_rect: Mutex<RECT>,
     reset_rect: Mutex<RECT>,
     close_rect: Mutex<RECT>,
     tracking_mouse: AtomicBool,
@@ -328,6 +330,7 @@ pub fn create_flyout_window(
     snapshot: Arc<RwLock<FlyoutSnapshot>>,
     lifecycle: Arc<RwLock<FlyoutLifecycleState>>,
     on_reset: Arc<dyn Fn() + Send + Sync>,
+    on_export: Arc<dyn Fn(HWND) + Send + Sync>,
 ) -> Result<HWND> {
     unsafe {
         let wc = WNDCLASSEXW {
@@ -346,9 +349,11 @@ pub fn create_flyout_window(
             snapshot,
             lifecycle,
             on_reset,
+            on_export,
             dpi: AtomicU32::new(96),
             open_time: Mutex::new(Instant::now()),
             hover_button: AtomicU32::new(0),
+            export_rect: Mutex::new(RECT::default()),
             reset_rect: Mutex::new(RECT::default()),
             close_rect: Mutex::new(RECT::default()),
             tracking_mouse: AtomicBool::new(false),
@@ -1013,26 +1018,35 @@ fn render_flyout(
             }
         }
 
-        // --- SECTION 7: Action Buttons ---
+        // --- SECTION 7: Action Buttons (3-button balanced bar) ---
         let btn_y = app_y + app_h + dpi_scale(8, dpi);
         let btn_h = dpi_scale(30, dpi);
-        let btn_w = (content_w - card_gap) / 2;
+        let btn_w = (content_w - card_gap * 2) / 3;
 
         let hover = ctx.hover_button.load(Ordering::SeqCst);
 
-        let reset_rc = RECT {
+        let export_rc = RECT {
             left: margin_x,
             top: btn_y,
             right: margin_x + btn_w,
             bottom: btn_y + btn_h,
         };
-        let close_rc = RECT {
+        let reset_rc = RECT {
             left: margin_x + btn_w + card_gap,
+            top: btn_y,
+            right: margin_x + btn_w * 2 + card_gap,
+            bottom: btn_y + btn_h,
+        };
+        let close_rc = RECT {
+            left: margin_x + (btn_w + card_gap) * 2,
             top: btn_y,
             right: width - margin_x,
             bottom: btn_y + btn_h,
         };
 
+        if let Ok(mut r) = ctx.export_rect.lock() {
+            *r = export_rc;
+        }
         if let Ok(mut r) = ctx.reset_rect.lock() {
             *r = reset_rc;
         }
@@ -1040,8 +1054,42 @@ fn render_flyout(
             *r = close_rc;
         }
 
-        // Reset Button
-        let reset_bg = if hover == 1 {
+        // Export Button (hover = 1)
+        let export_bg = if hover == 1 {
+            if is_dark {
+                rgb(56, 56, 64)
+            } else {
+                rgb(226, 232, 240)
+            }
+        } else {
+            card_bg
+        };
+        let export_brush = CreateSolidBrush(export_bg);
+        let b0 = SelectObject(hdc, export_brush.into());
+        let _ = RoundRect(
+            hdc,
+            export_rc.left,
+            export_rc.top,
+            export_rc.right,
+            export_rc.bottom,
+            dpi_scale(6, dpi),
+            dpi_scale(6, dpi),
+        );
+        SelectObject(hdc, b0);
+        let _ = DeleteObject(export_brush.into());
+
+        let mut e_txt_rc = export_rc;
+        SelectObject(hdc, font_body.into());
+        SetTextColor(hdc, text_primary);
+        gdi_draw_text(
+            hdc,
+            "Export",
+            &mut e_txt_rc,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+
+        // Reset Button (hover = 2)
+        let reset_bg = if hover == 2 {
             if is_dark {
                 rgb(56, 56, 64)
             } else {
@@ -1069,13 +1117,13 @@ fn render_flyout(
         SetTextColor(hdc, text_primary);
         gdi_draw_text(
             hdc,
-            "Reset Session",
+            "Reset",
             &mut r_txt_rc,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE,
         );
 
-        // Close Button
-        let close_bg = if hover == 2 {
+        // Close Button (hover = 3)
+        let close_bg = if hover == 3 {
             if is_dark {
                 rgb(56, 56, 64)
             } else {
@@ -1260,10 +1308,12 @@ unsafe extern "system" fn flyout_wndproc(
                     }
 
                     let mut new_hover = 0;
-                    if ctx.reset_rect.lock().is_ok_and(|r| pt_in_rect(&r, pt)) {
+                    if ctx.export_rect.lock().is_ok_and(|r| pt_in_rect(&r, pt)) {
                         new_hover = 1;
-                    } else if ctx.close_rect.lock().is_ok_and(|r| pt_in_rect(&r, pt)) {
+                    } else if ctx.reset_rect.lock().is_ok_and(|r| pt_in_rect(&r, pt)) {
                         new_hover = 2;
+                    } else if ctx.close_rect.lock().is_ok_and(|r| pt_in_rect(&r, pt)) {
+                        new_hover = 3;
                     }
 
                     let old_hover = ctx.hover_button.swap(new_hover, Ordering::SeqCst);
@@ -1293,6 +1343,11 @@ unsafe extern "system" fn flyout_wndproc(
 
             unsafe {
                 if let Some(ctx) = get_flyout_context(hwnd) {
+                    let export_clicked = ctx
+                        .export_rect
+                        .lock()
+                        .map(|r| pt_in_rect(&r, pt))
+                        .unwrap_or(false);
                     let reset_clicked = ctx
                         .reset_rect
                         .lock()
@@ -1304,7 +1359,9 @@ unsafe extern "system" fn flyout_wndproc(
                         .map(|r| pt_in_rect(&r, pt))
                         .unwrap_or(false);
 
-                    if reset_clicked {
+                    if export_clicked {
+                        (ctx.on_export)(hwnd);
+                    } else if reset_clicked {
                         (ctx.on_reset)();
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     } else if close_clicked {
@@ -1316,6 +1373,7 @@ unsafe extern "system" fn flyout_wndproc(
             }
             LRESULT(0)
         }
+
         WM_NCDESTROY => unsafe {
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FlyoutContext;
             if !ptr.is_null() {

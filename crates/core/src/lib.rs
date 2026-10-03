@@ -39,6 +39,7 @@ pub mod budget;
 pub mod card;
 pub mod chart;
 pub mod daily_usage;
+pub mod export;
 pub mod format;
 pub mod icons;
 pub mod process;

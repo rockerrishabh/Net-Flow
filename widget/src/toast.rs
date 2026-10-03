@@ -64,6 +64,40 @@ pub fn show_budget_alert(
     ToastNotificationManager::CreateToastNotifier()?.Show(&toast)
 }
 
+pub fn show_export_complete_toast(
+    path: &std::path::Path,
+    token: &str,
+) -> windows::core::Result<()> {
+    let filename = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "report".to_string());
+    let title = "Net Flow: Diagnostic report exported";
+    let body = format!("Saved {} successfully.", filename);
+    let launch_args = format!("action=open-file&token={}", token);
+
+    let xml = XmlDocument::new()?;
+    xml.LoadXml(&HSTRING::from(format!(
+        "<toast activationType=\"foreground\" launch=\"{}\">\
+            <visual>\
+                <binding template=\"ToastGeneric\">\
+                    <text>{}</text>\
+                    <text>{}</text>\
+                </binding>\
+            </visual>\
+            <actions>\
+                <action content=\"Open Report\" arguments=\"{}\" activationType=\"foreground\"/>\
+            </actions>\
+        </toast>",
+        escape_xml(&launch_args),
+        escape_xml(title),
+        escape_xml(&body),
+        escape_xml(&launch_args),
+    )))?;
+    let toast = ToastNotification::CreateToastNotification(&xml)?;
+    ToastNotificationManager::CreateToastNotifier()?.Show(&toast)
+}
+
 fn escape_xml(value: &str) -> String {
     value
         .replace('&', "&amp;")

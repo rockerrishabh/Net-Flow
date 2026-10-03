@@ -9,7 +9,7 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.8.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.9.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20(x64%20%2F%20ARM64)-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -32,8 +32,11 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 
 ## ✨ Highlights
 
-- **🪟 Native Win32 Tray Flyout Companion (<5 MB RAM)**: Ultra-lightweight popup companion summoned instantly by left-clicking the notification area icon (`WM_LBUTTONUP`). Powered by pure GDI double-buffering with zero XAML/WinUI runtime overhead, displaying live metric cards, sparklines, latency diagnostics, quota gauges, and top active network consumers.
+- **📋 Diagnostic Telemetry & Export Engine**: Generate comprehensive, reproducible network diagnostic reports via canonical **JSON** (`schema_version = 1`) and the specialized **CSV Dialect** (`netflow-diagnostics-v1`). Exports multi-adapter IP/MAC/gateway/DNS configuration, deep Wi-Fi RF telemetry, dual-stack ICMP quality with exact mean absolute RTT difference jitter, active process socket attribution, and a continuous 90-day zero-filled historical daily usage series.
+- **🖥️ Headless CLI & Stdout Automation**: Headless document extraction via `net-flow.exe --export <csv|json> [path]`. Piping to stdout (`-`) guarantees pristine data streams with all error logs and diagnostics directed strictly to stderr for seamless pipe composition (`net-flow.exe --export json - | jq .`).
+- **🪟 Native Win32 Tray Flyout Companion (<5 MB RAM)**: Ultra-lightweight popup companion summoned instantly by left-clicking the notification area icon (`WM_LBUTTONUP`). Powered by pure GDI double-buffering with zero XAML/WinUI runtime overhead, displaying live metric cards, sparklines, latency diagnostics, quota gauges, and a balanced 3-button action bar (`[Export]`, `[Reset]`, `[Close]`).
 - **🦾 Windows on ARM64 Tier-1 Support**: Native binary compilation for `aarch64-pc-windows-msvc` alongside `x86_64`, delivering fluid performance and extreme battery efficiency on Snapdragon X Elite and Copilot+ PCs.
+
 - **🪟 Native Windows 11 Widgets Board Integration**: First-class widget integration (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 support across **Small**, **Medium**, and **Large** card dimensions, powered by modern **Windows App SDK 2.x**.
 - **💳 Data Budgeting, Quotas & Rolling History**: User-configurable monthly data cap allowance (GB), custom renewal days with automatic month-end and leap-year clamping, multi-tier crossing warning toasts (80%, 90%, 100%), and 90-day bounded atomic JSON history.
 - **⚡ Dual-Stack IPv6 & IPv4 Latency Engine**: True dual-stack ICMP telemetry with automatic IPv6 preference and seamless IPv4 fallback using native Win32 `Icmp6SendEcho2` and `IcmpSendEcho2`, probing gateway or public internet with ping jitter spread (`18 ms · ±2 ms`).
@@ -230,7 +233,7 @@ net-flow/
 
 ## 🧪 Testing & Verification
 
-Run all **142 workspace unit tests**:
+Run all **157 workspace unit tests**:
 
 ```powershell
 cargo test --workspace
@@ -254,8 +257,8 @@ cargo build --release --workspace
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request across both `x86_64` and `aarch64` targets. Validates code formatting, executes all **142 automated unit tests**, and verifies MSIX layout packaging.
-2. **`release.yml`**: Triggered on Git tags (e.g. `v0.8.0`) or manual workflow dispatch. Builds optimized binaries for both x64 and ARM64, packages public sideload archives (`net-flow-windows-x64.zip` and `net-flow-windows-arm64.zip`) with SHA256 checksums, bundles both architectures into a unified Microsoft Store package (`NetFlow_Store.msixbundle`), performs pre-submission integrity validation, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** catalog via Partner Center.
+1. **`ci.yml`**: Runs on every push and pull request across both `x86_64` and `aarch64` targets. Validates code formatting, executes all **157 automated unit tests**, and verifies MSIX layout packaging.
+2. **`release.yml`**: Triggered on Git tags (e.g. `v0.9.0`) or manual workflow dispatch. Builds optimized binaries for both x64 and ARM64, packages public sideload archives (`net-flow-windows-x64.zip` and `net-flow-windows-arm64.zip`) with SHA256 checksums, bundles both architectures into a unified Microsoft Store package (`NetFlow_Store.msixbundle`), performs pre-submission integrity validation, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** catalog via Partner Center.
 
 ---
 
@@ -269,7 +272,9 @@ Net Flow follows a focused, incremental path towards production-ready General Av
 | **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | ✅ Released |
 | **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | ✅ Released |
 | **v0.8.0** | **Tray Flyout & ARM64 Hardening** | Native Win32 GDI companion flyout (<4 MB RAM), Tier-1 Windows on ARM64, and unified Store msixbundle | ✅ Released (2026-10-03) |
-| **v1.0.0** | **General Availability (GA)** | One-click CSV/JSON diagnostic telemetry export, multi-language localization (i18n), and 72h stress hardening | 🌟 Planned |
+| **v0.9.0** | **Diagnostic Telemetry & Export Engine** | Canonical JSON & CSV export, headless CLI, multi-adapter diagnostics, exact jitter, and 3-button flyout | ✅ Released (2026-10-03) |
+| **v1.0.0** | **General Availability (GA)** | Multi-language localization (i18n), zero-allocation sparklines, and 72h continuous stress hardening | 🌟 Planned |
+
 
 ---
 

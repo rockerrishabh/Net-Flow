@@ -5,7 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-03
+
+### Added
+
+- **Diagnostic Telemetry & Export Engine**:
+  - Pure-Rust canonical diagnostic data model (`schema_version = 1`) in `crates/core/src/export.rs` capturing deep network telemetry, multi-adapter configurations, session metrics, ICMP quality, and 90-day daily usage history.
+  - Strongly typed enums for `Architecture` (`x64`, `arm64`, `unknown`), `InterfaceType` (`ethernet`, `wifi`, `cellular`, `vpn`, `loopback`, `other`), `SemanticHealth` (`healthy`, `degraded`, `timeout`, `unavailable`), and `WifiGeneration` (`wifi_7`, `wifi_6e`, `wifi_6`, `wifi_5`, `wifi_4`, `unknown`).
+  - Structured machine-readable privacy metadata (`PrivacyMetadata`) declaring exposure of local network identifiers, Wi-Fi parameters, and active process names.
+  - Deterministic 5-point Active Adapter Selection Policy prioritizing `IfOperStatusUp`, Default Gateway presence, usable non-APIPA IP, physical interfaces over virtual/software adapters, and lowest routing metric.
+  - Dual document exporters:
+    - High-fidelity canonical JSON exporter (`export_to_json`) supporting pretty-printing and compact streaming.
+    - Specialized Net Flow CSV dialect (`export_to_csv`) with `# CSV Dialect: netflow-diagnostics-v1` header block and strict RFC 4180 CRLF rows with field quoting and escaping.
+  - Exact mean absolute RTT difference jitter calculation: $\text{Jitter} = \frac{1}{N-1} \sum_{i=2}^N |\text{RTT}_i - \text{RTT}_{i-1}|$ explicitly labeled and calculated without conflating with RFC 3550 RTP interarrival jitter.
+  - 90-day historical continuity padding (`zero_fill_history`) guaranteeing continuous chronological day-by-day records ending on the current local calendar date.
+- **Headless CLI Diagnostic Export**:
+  - Command-line diagnostic extraction interface: `net-flow.exe --export <csv|json> [path]`.
+  - Stdout pipeline mode: `net-flow.exe --export json -` writes exclusively to stdout, routing all logs and diagnostic messages strictly to stderr for clean pipe composition (`| jq .`).
+  - Headless atomic file writing with zero GUI dialogs or interactive prompts.
+- **Companion Flyout 3-Button Action Bar**:
+  - Transitioned Win32 companion flyout action bar to a balanced 3-button layout: `[Export]`, `[Reset]`, `[Close]`.
+  - Native Win32 GDI rendering with DPI-scaled hit-testing and hover tracking for all 3 buttons across 100%, 125%, 150%, and 200% scaling.
+  - Clicking `[Export]` directly opens the native Save As dialog defaulting to the Downloads folder.
+- **System Tray Diagnostics Menu**:
+  - Context menu items: `Export Diagnostics (CSV)...` and `Export Diagnostics (JSON)...` with native file dialog invocation.
+- **Secure File Writing & Toast Activation**:
+  - Atomic disk writing via `.netflow_export.<id>.tmp` buffer, flushed and synced, then atomically replaced via Win32 `MoveFileExW` (`MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`) with graceful rename fallback.
+  - In-memory bounded token registry (max 16 entries, 1-hour TTL) mapping opaque tokens (`action=open-file&token=<uuid>`) to canonical paths.
+  - Path validation verification ensuring that toast notification arguments cannot trigger arbitrary execution or directory traversal.
+
 ## [0.8.0] - 2026-10-03
+
 
 ### Added
 
