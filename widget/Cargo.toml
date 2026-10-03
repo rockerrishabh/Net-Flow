@@ -25,3 +25,14 @@ windows = { workspace = true }
 [build-dependencies]
 windows-bindgen = "0.100.0"
 winres = "0.1.12"
+
+[features]
+default = ["Windows_Widgets_Providers"]
+Microsoft = []
+# generated features
+Windows = ["Microsoft"]
+Windows_Widgets = ["Windows"]
+Windows_Widgets_Feeds = ["Windows_Widgets"]
+Windows_Widgets_Feeds_Providers = ["Windows_Widgets_Feeds"]
+Windows_Widgets_Notifications = ["Windows_Widgets"]
+Windows_Widgets_Providers = ["Windows_Widgets"]

@@ -203,14 +203,36 @@ mod tests {
     #[test]
     fn test_retention_pruning() {
         let mut store = DailyUsageStore::new();
-        for day in 1..=100 {
-            let date = format!("2026-01-{:03}", day);
-            store.record_usage_delta(&date, 10, 10);
+        let mut y = 2026;
+        let mut m = 1;
+        let mut d = 1;
+        let mut dates = Vec::with_capacity(100);
+        for _ in 1..=100 {
+            dates.push(format!("{y:04}-{m:02}-{d:02}"));
+            d += 1;
+            let dim = match m {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 => 28,
+                _ => 30,
+            };
+            if d > dim {
+                d = 1;
+                m += 1;
+                if m > 12 {
+                    m = 1;
+                    y += 1;
+                }
+            }
+        }
+
+        for date in &dates {
+            store.record_usage_delta(date, 10, 10);
         }
 
         assert_eq!(store.entries.len(), MAX_DAILY_ENTRIES);
-        assert_eq!(store.entries[0].date, "2026-01-011");
-        assert_eq!(store.entries.last().unwrap().date, "2026-01-100");
+        assert_eq!(store.entries[0].date, dates[10]);
+        assert_eq!(store.entries.last().unwrap().date, dates[99]);
     }
 
     #[test]

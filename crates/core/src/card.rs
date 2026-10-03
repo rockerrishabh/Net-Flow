@@ -332,59 +332,6 @@ fn icon_button_box(url: &str, px: u32, verb: &str, tooltip: &str) -> Value {
     })
 }
 
-/// A tappable text button control rendered inside an explicit hit-target container
-/// with centered content to provide a clean, tactile Fluent hover pill/effect.
-#[allow(dead_code)]
-fn text_button_box(
-    text: &str,
-    width_px: Option<u32>,
-    verb: &str,
-    tooltip: &str,
-    color: Option<&str>,
-    is_bold: bool,
-    associated_inputs: Option<&str>,
-) -> Value {
-    let mut select_action = json!({
-        "type": "Action.Execute",
-        "verb": verb,
-        "title": tooltip,
-        "tooltip": tooltip
-    });
-    if let Some(inputs) = associated_inputs {
-        select_action["associatedInputs"] = json!(inputs);
-    }
-
-    let mut text_item = json!({
-        "type": "TextBlock",
-        "text": text,
-        "size": "Small",
-        "horizontalAlignment": "Center",
-        "wrap": false
-    });
-    if is_bold {
-        text_item["weight"] = json!("Bolder");
-    }
-    if let Some(c) = color {
-        text_item["color"] = json!(c);
-    } else {
-        text_item["isSubtle"] = json!(true);
-    }
-
-    let mut container = json!({
-        "type": "Container",
-        "minHeight": "28px",
-        "roundedCorners": true,
-        "verticalContentAlignment": "Center",
-        "horizontalAlignment": "Center",
-        "selectAction": select_action,
-        "items": [text_item]
-    });
-    if let Some(w) = width_px {
-        container["width"] = json!(format!("{}px", w));
-    }
-    container
-}
-
 fn icon_button_column_spaced(
     url: &str,
     px: u32,

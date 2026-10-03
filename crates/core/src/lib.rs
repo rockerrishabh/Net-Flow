@@ -49,16 +49,17 @@ pub use alerts::{
     load_alert_config, save_alert_config,
 };
 pub use backend::{
-    AggregateMode, EthernetLinkMetrics, HISTORY_CAPACITY, HistorySample, InterfaceCategory,
-    InterfaceCounterState, InterfaceInfo, InterfaceLuid, InterfaceSample, IpProtocol, Ipv6Route,
-    LatencyHealth, LatencySnapshot, LatencyState, LatencyTarget, LatencyTargetMode, NetworkBackend,
-    NetworkSnapshot, PacketLossTracker, PhysicalLinkInfo, ProbeResult, SessionState, WifiBand,
+    AggregateMode, CounterPoint, EthernetLinkMetrics, HISTORY_CAPACITY, HistorySample,
+    InterfaceCategory, InterfaceCounterState, InterfaceInfo, InterfaceLuid, InterfaceMedium,
+    InterfaceSample, IpProtocol, Ipv6Route, LatencyHealth, LatencySnapshot, LatencyState,
+    LatencyTarget, LatencyTargetMode, NetworkBackend, NetworkSnapshot, PacketLossTracker,
+    PhysicalLinkInfo, ProbeResult, RateAccumulator, RollingRateWindow, SessionState, WifiBand,
     WifiGeneration, WifiPhyMetrics, classify_interface, compute_delta, counter_delta,
     load_persisted_session_state, probe_latency, probe_latency_ipv4, probe_latency_ipv6,
     query_active_ethernet_metrics, query_active_wifi_metrics, query_cached_wifi_phy,
     query_interfaces, query_ipv4_gateway_address, query_ipv6_route, query_physical_link_info,
     sample_latency_snapshot, sample_latency_snapshot_dual_stack, save_persisted_session_state,
-    signal_quality_to_rssi_dbm, wifi_band, wifi_generation,
+    signal_quality_to_rssi_dbm, wifi_band, wifi_generation, wifi_generation_with_band,
 };
 pub use budget::{
     BudgetMilestone, BudgetScope, BudgetSnapshot, DataBudgetConfig, MilestoneTier,

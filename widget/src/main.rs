@@ -9,6 +9,7 @@
     clippy::all,
     warnings
 )]
+#[path = "bindings/mod.rs"]
 mod bindings;
 pub mod export_controller;
 mod factory;

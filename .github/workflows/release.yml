@@ -235,7 +235,13 @@ jobs:
 
           # Prepare Store Product Description from STORE_DESCRIPTION.md if present
           if (Test-Path "STORE_DESCRIPTION.md") {
-            $descContent = (Get-Content "STORE_DESCRIPTION.md" -Raw).Trim()
+            $raw = (Get-Content "STORE_DESCRIPTION.md" -Raw).Trim()
+            # Strip internal developer submission metadata so only customer-facing copy is uploaded
+            $descContent = if ($raw -match '(?s)(.*?)\r?\n[━─-]{10,}\r?\n📋\s*STORE SUBMISSION METADATA') {
+              $matches[1].Trim()
+            } else {
+              $raw
+            }
             [System.IO.File]::WriteAllText("target/STORE_DESCRIPTION.txt", $descContent, [System.Text.Encoding]::UTF8)
             Write-Host "Generated target/STORE_DESCRIPTION.txt ($($descContent.Length) chars)"
           }
@@ -493,7 +499,12 @@ jobs:
           } else {
             ""
           }
-          $storeDescription = if ($descFile -and (Test-Path $descFile)) { (Get-Content $descFile -Raw).Trim() } else { "" }
+          $rawDesc = if ($descFile -and (Test-Path $descFile)) { (Get-Content $descFile -Raw).Trim() } else { "" }
+          $storeDescription = if ($rawDesc -match '(?s)(.*?)\r?\n[━─-]{10,}\r?\n📋\s*STORE SUBMISSION METADATA') {
+            $matches[1].Trim()
+          } else {
+            $rawDesc
+          }
           if ($storeDescription) {
             Write-Host "Loaded $( $storeDescription.Length ) characters of Store description."
           }

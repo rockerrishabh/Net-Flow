@@ -339,12 +339,7 @@ pub fn map_process_to_app(exe_name: &str) -> (String, &'static str) {
     }
 }
 
-#[allow(
-    non_snake_case,
-    non_camel_case_types,
-    dead_code,
-    clippy::upper_case_acronyms
-)]
+#[allow(non_snake_case, non_camel_case_types, clippy::upper_case_acronyms)]
 #[repr(C)]
 struct SHFILEINFOW {
     hIcon: isize,
@@ -357,7 +352,7 @@ struct SHFILEINFOW {
 const SHGFI_ICON: u32 = 0x000000100;
 const SHGFI_SMALLICON: u32 = 0x000000001;
 
-#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 #[repr(C)]
 struct ICONINFO {
     fIcon: i32,
@@ -367,7 +362,7 @@ struct ICONINFO {
     hbmColor: isize,
 }
 
-#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 #[repr(C)]
 struct BITMAP {
     bmType: i32,
@@ -379,7 +374,7 @@ struct BITMAP {
     bmBits: *mut u8,
 }
 
-#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 #[repr(C)]
 struct BITMAPINFOHEADER {
     biSize: u32,
@@ -395,7 +390,7 @@ struct BITMAPINFOHEADER {
     biClrImportant: u32,
 }
 
-#[allow(non_snake_case, dead_code, clippy::upper_case_acronyms)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 #[repr(C)]
 struct BITMAPINFO {
     bmiHeader: BITMAPINFOHEADER,
@@ -698,11 +693,15 @@ pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
                 0,
             )
         };
-        if res == 0 {
+        if res == 0 && buf.len() >= std::mem::size_of::<MIB_TCPTABLE_OWNER_PID>() {
             let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-            let entries = unsafe {
-                std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
-            };
+            let table_start = table.table.as_ptr() as usize;
+            let buf_end = buf.as_ptr() as usize + buf.len();
+            let bytes_avail = buf_end.saturating_sub(table_start);
+            let entry_size = std::mem::size_of_val(&table.table[0]).max(1);
+            let max_entries = bytes_avail / entry_size;
+            let safe_entries = (table.dwNumEntries as usize).min(max_entries);
+            let entries = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), safe_entries) };
             for entry in entries {
                 if entry.dwOwningPid > 0 {
                     *pid_counts.entry(entry.dwOwningPid).or_insert(0) += 1;
@@ -736,11 +735,15 @@ pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
                 0,
             )
         };
-        if res == 0 {
+        if res == 0 && buf.len() >= std::mem::size_of::<MIB_TCP6TABLE_OWNER_PID>() {
             let table = unsafe { &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
-            let entries = unsafe {
-                std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
-            };
+            let table_start = table.table.as_ptr() as usize;
+            let buf_end = buf.as_ptr() as usize + buf.len();
+            let bytes_avail = buf_end.saturating_sub(table_start);
+            let entry_size = std::mem::size_of_val(&table.table[0]).max(1);
+            let max_entries = bytes_avail / entry_size;
+            let safe_entries = (table.dwNumEntries as usize).min(max_entries);
+            let entries = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), safe_entries) };
             for entry in entries {
                 if entry.dwOwningPid > 0 {
                     *pid_counts.entry(entry.dwOwningPid).or_insert(0) += 1;
@@ -774,11 +777,15 @@ pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
                 0,
             )
         };
-        if res == 0 {
+        if res == 0 && buf.len() >= std::mem::size_of::<MIB_UDPTABLE_OWNER_PID>() {
             let table = unsafe { &*(buf.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
-            let entries = unsafe {
-                std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
-            };
+            let table_start = table.table.as_ptr() as usize;
+            let buf_end = buf.as_ptr() as usize + buf.len();
+            let bytes_avail = buf_end.saturating_sub(table_start);
+            let entry_size = std::mem::size_of_val(&table.table[0]).max(1);
+            let max_entries = bytes_avail / entry_size;
+            let safe_entries = (table.dwNumEntries as usize).min(max_entries);
+            let entries = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), safe_entries) };
             for entry in entries {
                 if entry.dwOwningPid > 0 {
                     *pid_counts.entry(entry.dwOwningPid).or_insert(0) += 1;
@@ -812,11 +819,15 @@ pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
                 0,
             )
         };
-        if res == 0 {
+        if res == 0 && buf.len() >= std::mem::size_of::<MIB_UDP6TABLE_OWNER_PID>() {
             let table = unsafe { &*(buf.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
-            let entries = unsafe {
-                std::slice::from_raw_parts(table.table.as_ptr(), table.dwNumEntries as usize)
-            };
+            let table_start = table.table.as_ptr() as usize;
+            let buf_end = buf.as_ptr() as usize + buf.len();
+            let bytes_avail = buf_end.saturating_sub(table_start);
+            let entry_size = std::mem::size_of_val(&table.table[0]).max(1);
+            let max_entries = bytes_avail / entry_size;
+            let safe_entries = (table.dwNumEntries as usize).min(max_entries);
+            let entries = unsafe { std::slice::from_raw_parts(table.table.as_ptr(), safe_entries) };
             for entry in entries {
                 if entry.dwOwningPid > 0 {
                     *pid_counts.entry(entry.dwOwningPid).or_insert(0) += 1;

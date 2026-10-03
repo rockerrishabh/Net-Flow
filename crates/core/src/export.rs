@@ -14,7 +14,7 @@ use crate::format::format_bytes;
 pub const DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
 
 /// Dialect identifier embedded in Net Flow CSV export headers.
-pub const CSV_DIALECT_IDENTIFIER: &str = "netflow-diagnostics-v1";
+pub(crate) const CSV_DIALECT_IDENTIFIER: &str = "netflow-diagnostics-v1";
 
 /// CPU architecture of the binary generating the diagnostic report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,36 +81,7 @@ impl SemanticHealth {
     }
 }
 
-/// Wi-Fi generation classification derived from 802.11 PHY indicators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum WifiGeneration {
-    #[default]
-    #[serde(rename = "unknown")]
-    Unknown,
-    #[serde(rename = "wifi_4")]
-    Wifi4,
-    #[serde(rename = "wifi_5")]
-    Wifi5,
-    #[serde(rename = "wifi_6")]
-    Wifi6,
-    #[serde(rename = "wifi_6e")]
-    Wifi6E,
-    #[serde(rename = "wifi_7")]
-    Wifi7,
-}
-
-impl WifiGeneration {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Wifi4 => "wifi_4",
-            Self::Wifi5 => "wifi_5",
-            Self::Wifi6 => "wifi_6",
-            Self::Wifi6E => "wifi_6e",
-            Self::Wifi7 => "wifi_7",
-        }
-    }
-}
+pub use crate::backend::WifiGeneration;
 
 /// Structured machine-readable privacy disclosure flags.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

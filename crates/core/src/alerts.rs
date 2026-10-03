@@ -96,20 +96,21 @@ impl BandwidthAlertConfig {
         self.upload_cooldown_secs.unwrap_or(self.cooldown_secs)
     }
 
-    pub fn normalized(mut self) -> Self {
-        self.threshold_bps = self.threshold_bps.max(1);
-        if let Some(up) = self.upload_threshold_bps {
-            self.upload_threshold_bps = Some(up.max(1));
+    pub fn normalized(&self) -> Self {
+        let mut result = self.clone();
+        result.threshold_bps = result.threshold_bps.max(1);
+        if let Some(up) = result.upload_threshold_bps {
+            result.upload_threshold_bps = Some(up.max(1));
         }
-        self.sustain_secs = self.sustain_secs.clamp(1, 3_600);
-        if let Some(up_sustain) = self.upload_sustain_secs {
-            self.upload_sustain_secs = Some(up_sustain.clamp(1, 3_600));
+        result.sustain_secs = result.sustain_secs.clamp(1, 3_600);
+        if let Some(up_sustain) = result.upload_sustain_secs {
+            result.upload_sustain_secs = Some(up_sustain.clamp(1, 3_600));
         }
-        self.cooldown_secs = self.cooldown_secs.clamp(1, 86_400);
-        if let Some(up_cooldown) = self.upload_cooldown_secs {
-            self.upload_cooldown_secs = Some(up_cooldown.clamp(1, 86_400));
+        result.cooldown_secs = result.cooldown_secs.clamp(1, 86_400);
+        if let Some(up_cooldown) = result.upload_cooldown_secs {
+            result.upload_cooldown_secs = Some(up_cooldown.clamp(1, 86_400));
         }
-        self
+        result
     }
 }
 
@@ -124,13 +125,13 @@ pub fn load_alert_config() -> BandwidthAlertConfig {
     std::fs::read_to_string(get_alert_config_path())
         .ok()
         .and_then(|json| serde_json::from_str(&json).ok())
-        .map(BandwidthAlertConfig::normalized)
+        .map(|c: BandwidthAlertConfig| c.normalized())
         .unwrap_or_default()
 }
 
 pub fn save_alert_config(config: &BandwidthAlertConfig) {
     let path = get_alert_config_path();
-    if let Ok(json) = serde_json::to_string_pretty(&config.clone().normalized()) {
+    if let Ok(json) = serde_json::to_string_pretty(&config.normalized()) {
         let _ = crate::backend::write_atomic(&path, json.as_bytes());
     }
 }
@@ -159,7 +160,7 @@ impl BandwidthAlertEngine {
         upload_bps: f64,
         now: Instant,
     ) -> Vec<AlertEvent> {
-        let config = config.clone().normalized();
+        let config = config.normalized();
         if !config.enabled {
             self.download_since = None;
             self.upload_since = None;

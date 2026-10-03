@@ -21,7 +21,8 @@ fn main() {
 
     args.extend(&[
         "--out",
-        "src/bindings.rs",
+        ".",
+        "--package",
         "--filter",
         "Microsoft.Windows.Widgets",
         "--implement",

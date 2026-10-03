@@ -36,6 +36,20 @@ impl SpeedUnit {
     }
 }
 
+impl std::fmt::Display for SpeedUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_str_value())
+    }
+}
+
+impl std::str::FromStr for SpeedUnit {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_str_value(s))
+    }
+}
+
 /// Formats bandwidth in bytes per second using auto-scaling (1024-based binary units).
 ///
 /// Keeps two decimal places for KB/s, MB/s, and GB/s, and zero decimals for raw B/s.
@@ -157,6 +171,8 @@ mod tests {
             SpeedUnit::Gigabytes,
         ] {
             assert_eq!(SpeedUnit::from_str_value(unit.to_str_value()), unit);
+            assert_eq!(unit.to_string(), unit.to_str_value());
+            assert_eq!(unit.to_str_value().parse::<SpeedUnit>().unwrap(), unit);
         }
     }
 }

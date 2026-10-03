@@ -134,6 +134,11 @@ pub fn is_leap_year(year: i32) -> bool {
 
 /// Returns the number of days in the specified month of a given year (1-12).
 pub fn days_in_month(year: i32, month: u32) -> u32 {
+    debug_assert!(
+        (1..=12).contains(&month),
+        "month out of range 1..=12: {month}"
+    );
+    let month = month.clamp(1, 12);
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -226,27 +231,12 @@ pub fn calculate_cycle_boundaries(
 
 /// Retrieves the current local calendar date (year, month, day) from the Windows operating system.
 pub fn current_local_ymd() -> (i32, u32, u32) {
-    #[repr(C)]
-    struct Win32SystemTime {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        milliseconds: u16,
-    }
-
-    unsafe {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetLocalTime(lpSystemTime: *mut Win32SystemTime);
-        }
-        let mut st = std::mem::zeroed();
-        GetLocalTime(&mut st);
-        (st.year as i32, st.month as u32, st.day as u32)
-    }
+    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let year = (st.wYear as i32).max(1970);
+    let month = (st.wMonth as u32).clamp(1, 12);
+    let max_days = days_in_month(year, month);
+    let day = (st.wDay as u32).clamp(1, max_days);
+    (year, month, day)
 }
 
 /// Evaluates usage against configured data budget for the given date.
@@ -341,7 +331,7 @@ pub fn calculate_budget_snapshot(
 ///
 /// Guaranteed to always return non-negative widths, even when `usage_pct > 100`.
 pub fn budget_progress_width(usage_pct: u16) -> (u8, u8) {
-    let used = (usage_pct as u8).min(100);
+    let used = usage_pct.min(100) as u8;
     let remaining = 100 - used;
     (used, remaining)
 }
