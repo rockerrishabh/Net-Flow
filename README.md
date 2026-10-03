@@ -11,7 +11,7 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/Version-0.8.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20(x64%20%2F%20ARM64)-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
 
@@ -32,6 +32,8 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 
 ## ✨ Highlights
 
+- **🪟 Native Win32 Tray Flyout Companion (<5 MB RAM)**: Ultra-lightweight popup companion summoned instantly by left-clicking the notification area icon (`WM_LBUTTONUP`). Powered by pure GDI double-buffering with zero XAML/WinUI runtime overhead, displaying live metric cards, sparklines, latency diagnostics, quota gauges, and top active network consumers.
+- **🦾 Windows on ARM64 Tier-1 Support**: Native binary compilation for `aarch64-pc-windows-msvc` alongside `x86_64`, delivering fluid performance and extreme battery efficiency on Snapdragon X Elite and Copilot+ PCs.
 - **🪟 Native Windows 11 Widgets Board Integration**: First-class widget integration (<kbd>Win</kbd> + <kbd>W</kbd>) with native Adaptive Cards v1.6 support across **Small**, **Medium**, and **Large** card dimensions, powered by modern **Windows App SDK 2.x**.
 - **💳 Data Budgeting, Quotas & Rolling History**: User-configurable monthly data cap allowance (GB), custom renewal days with automatic month-end and leap-year clamping, multi-tier crossing warning toasts (80%, 90%, 100%), and 90-day bounded atomic JSON history.
 - **⚡ Dual-Stack IPv6 & IPv4 Latency Engine**: True dual-stack ICMP telemetry with automatic IPv6 preference and seamless IPv4 fallback using native Win32 `Icmp6SendEcho2` and `IcmpSendEcho2`, probing gateway or public internet with ping jitter spread (`18 ms · ±2 ms`).
@@ -53,11 +55,29 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 
 ---
 
+## 🪟 Native Win32 Tray Flyout Companion
+
+Net Flow v0.8.0 introduces an ultra-lightweight companion flyout summoned instantly by **left-clicking the system tray icon**:
+
+- **⚡ Near-Zero Overhead (<4 MB RAM)**: Pure Win32 GDI double-buffered rendering (`CreateCompatibleDC` + `CreateCompatibleBitmap`) blitted on `WM_PAINT`. Operates without loading XAML, WinUI, or DirectComposition runtimes.
+- **📍 Precision Taskbar Positioning**: Queries `Shell_NotifyIconGetRect` for exact notification icon coordinates, dynamically calculates orientation across bottom, top, left, or right taskbars, and clamps against multi-monitor work areas (`GetMonitorInfoW`).
+- **🎯 Non-Blocking Presentation Isolation**: The UI thread strictly renders from an immutable `FlyoutSnapshot` prepared by the background telemetry worker—never blocking on network sockets, WLAN, or IP Helper queries.
+- **🎨 Windows 11 Chrome & Per-Monitor DPI**: Automatically adapts to Windows dark/light mode (`DWMWA_USE_IMMERSIVE_DARK_MODE`) with rounded corners (`DWMWCP_ROUND`). Dynamically resizes typography and backbuffers on `WM_DPICHANGED`.
+- **📊 Live Dashboard Components**:
+  - **Metric Cards**: Prominent download (emerald) and upload (blue) current rate displays.
+  - **Latency Diagnostics**: Real-time ping latency, jitter spread, packet loss %, and semantic health status pill.
+  - **Dual Sparkline Waveform**: 30-sample rolling timeline visualizing download and upload rails.
+  - **Data Quota Gauge**: Color-coded progress bar tracking current monthly allowance and billing cycle.
+  - **Top Network Consumers**: Live process attribution displaying the top 3 active bandwidth-consuming applications.
+  - **Quick Controls**: Interactive "Reset Session" and "Close" buttons with mouse hover tracking and click hit-testing.
+
+---
+
 ## 📥 Installation
 
 ### 1. Microsoft Store (Recommended)
 
-Net Flow is available directly through the Microsoft Store with seamless background updates:
+Net Flow is available directly through the Microsoft Store with seamless background updates for both **x64** and **ARM64** devices:
 
 <a href="https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_install">
   <picture>
@@ -69,31 +89,48 @@ Net Flow is available directly through the Microsoft Store with seamless backgro
 
 👉 _Or launch directly in the Windows Store app via protocol:_ [`ms-windows-store://pdp/?productid=9PCR54NGJ94J`](ms-windows-store://pdp/?productid=9PCR54NGJ94J)
 
-### 2. Local Developer Sideloading
+### 2. Sideload Pre-built Release Archive
 
-If building from source or testing modifications locally:
+Download the matching archive for your CPU architecture from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases/latest):
+
+| Architecture | Package Archive | Target Devices |
+| :--- | :--- | :--- |
+| **x64 (Intel / AMD)** | `net-flow-windows-x64.zip` | 64-bit Windows 11 PCs |
+| **ARM64 (Qualcomm / Snapdragon)** | `net-flow-windows-arm64.zip` | Snapdragon X Elite / Copilot+ PCs |
+
+1. Extract the downloaded zip archive.
+2. Run `.\install.ps1` in PowerShell (or right-click `install.ps1` → **Run with PowerShell**).
+3. The installer trusts the package signing certificate in **Local Computer → Trusted People**, registers the MSIX package into Windows 11, and refreshes the Widgets Board.
+
+### 3. Developer Source Build & Sideloading
+
+If building from source or testing local modifications:
 
 ```powershell
 # Clone the repository
 git clone https://github.com/rockerrishabh/net-flow.git
 cd net-flow
 
-# One-command build, packaging, self-signing, and sideload registration
+# Fast install (uses existing built package if available)
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+
+# Force fresh recompilation and repackaging from source
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Rebuild
 ```
 
-Once installed:
+#### Installer Options (`scripts/install.ps1`)
 
-1. Press <kbd>Win</kbd> + <kbd>W</kbd> to open the **Windows Widgets Board**.
-2. Click **+** (**Add Widgets**) in the top-right corner.
-3. Select **Net Flow** and pin your preferred size (Small, Medium, or Large).
+| Parameter | Description |
+| :--- | :--- |
+| *(default)* | Installs existing valid MSIX package if present; packages if missing. |
+| `-Rebuild` | Forces clean Cargo compilation (`cargo build --release`), repacks MSIX, and signs with a local certificate. |
+| `-MsixPath <path>` | Installs an explicitly specified external `.msix` package. |
+| `-Status` | Displays current installation, binary, manifest, and background process status. |
+| `-Uninstall` | Safely unregisters the widget package (`NetFlow.Widget`) and sweeps dev certificates. |
+| `-RestartWidgets` | Best-effort refresh of Windows 11 Widgets Board host processes. |
 
-### 3. Sideload Release Bundle
-
-1. Download `net-flow-windows-x64.zip` from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases).
-2. Extract the archive.
-3. Run `.\install.ps1` in PowerShell (or right-click `install.ps1` → **Run with PowerShell**).
-   The installer automatically provisions a local signing certificate, packages `NetFlow.msix`, and registers the widget package into Windows 11. To uninstall, run `.\install.ps1 -Uninstall`.
+> [!NOTE]
+> Local MSIX sideloading requires **Developer Mode** enabled in Windows Settings (*Settings → System → For developers → Developer Mode*) and trusts the self-signed package in `Local Computer\TrustedPeople`.
 
 ---
 
@@ -101,18 +138,20 @@ Once installed:
 
 Net Flow is engineered from the ground up for zero distraction, extreme reliability, and minimal system impact:
 
-| Metric / Component         | Implementation                                                              | Impact                                                      |
-| :------------------------- | :-------------------------------------------------------------------------- | :---------------------------------------------------------- |
-| **Release Binary Size**    | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`)  | **Compact standalone executable** (LTO stripped)            |
-| **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing                    | **< 0.1% CPU** during active monitoring                     |
-| **Idle CPU Overhead**      | Precomputed `OnceLock` idle chart cache bypassing rasterizer                | **0.024% of 1 core** (55x speedup; 120 µs idle bypass)      |
-| **Memory Footprint**       | Bounded ring buffers (240 samples) & in-memory rasterization                | **< 15 MB** working set                                     |
-| **Telemetry Cadence**      | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication             | High-resolution waveforms with zero system scheduler jitter |
-| **Process Attribution**    | Decoupled 1.0s process inspection with 256-entry bounded icon cache         | Per-app network tracking without UI thread blocking         |
-| **Chart Peak Tracking**    | Incremental O(1) running maximum tracking                                   | Eliminates O(N) buffer scans on every render tick           |
-| **COM Lifetime**           | Automatic idle detection with 30s grace period and `CoRevokeClassObject`    | **Zero zombie background processes** when unpinned          |
-| **Lock Poison-Safety**     | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"`                      |
-| **Log Management**         | Thread-safe 1MB rotating logger in `%TEMP%`                                 | Prevents disk bloat; quiet by default                       |
+| Metric / Component | Implementation | Impact |
+| :--- | :--- | :--- |
+| **Release Binary Size** | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`) | **Compact standalone executable** (LTO stripped) |
+| **Tray Flyout Working Set** | Pure Win32 GDI double-buffering (zero XAML/WinUI runtime overhead) | **< 4 MB RAM** companion window |
+| **Platform Target Support** | Dual native Tier-1 targets (`x86_64-pc-windows-msvc` & `aarch64-pc-windows-msvc`) | **Native x64 and ARM64** execution |
+| **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing | **< 0.1% CPU** during active monitoring |
+| **Idle CPU Overhead** | Precomputed `OnceLock` idle chart cache bypassing rasterizer | **0.024% of 1 core** (55x speedup; 120 µs idle bypass) |
+| **Memory Footprint** | Bounded ring buffers (240 samples) & in-memory rasterization | **< 15 MB** working set |
+| **Telemetry Cadence** | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication | High-resolution waveforms with zero system scheduler jitter |
+| **Process Attribution** | Decoupled 1.0s process inspection with 256-entry bounded icon cache | Per-app network tracking without UI thread blocking |
+| **Chart Peak Tracking** | Incremental O(1) running maximum tracking | Eliminates O(N) buffer scans on every render tick |
+| **COM Lifetime** | Automatic idle detection with 30s grace period and `CoRevokeClassObject` | **Zero zombie background processes** when unpinned |
+| **Lock Poison-Safety** | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"` |
+| **Log Management** | Thread-safe 1MB rotating logger in `%TEMP%` | Prevents disk bloat; quiet by default |
 
 ---
 
@@ -144,8 +183,8 @@ Net Flow is structured as a modular, high-performance Rust workspace:
 net-flow/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                     # Continuous integration & MSIX packaging validation
-│       └── release.yml                # Unified GitHub Release & Microsoft Store publishing pipeline
+│       ├── ci.yml                     # Continuous integration & dual-architecture validation
+│       └── release.yml                # Unified GitHub Release & Microsoft Store bundle publishing
 ├── crates/
 │   └── core/                          # net-flow-core (pure Rust core logic)
 │       ├── src/
@@ -155,8 +194,9 @@ net-flow/
 │       │   ├── chart.rs               # In-memory dual-stream waveform rasteriser
 │       │   ├── format.rs              # Bandwidth scaling & humanized unit formatting
 │       │   ├── icons.rs               # Embedded vector glyphs (PNG data URIs)
+│       │   ├── lib.rs                 # Compile-time constants, ARCH target detection & module exports
 │       │   └── process.rs             # Active process network attribution & bounded icon cache
-├── widget/                            # net-flow (Windows App SDK COM widget provider)
+├── widget/                            # net-flow (Windows App SDK COM widget provider & Win32 tray host)
 │   ├── Assets/                        # Master branding, high-DPI logos, app.ico, and favicon pack
 │   │   ├── MasterLogo.png             # 816x816 high-res squircle master logo
 │   │   ├── Square150x150Logo.png      # 300x300 Windows tile logo
@@ -169,10 +209,11 @@ net-flow/
 │   └── src/
 │       ├── bindings.rs                # Windows App SDK WinMD bindings
 │       ├── factory.rs                 # Out-of-proc COM ClassFactory implementation
+│       ├── flyout.rs                  # Native Win32 companion flyout, GDI double-buffering & DPI scaling
 │       ├── main.rs                    # WinMain entry point, COM lifecycle & idle shutdown
 │       ├── provider.rs                # IWidgetProvider2 handler with poison-resilient locks
 │       ├── toast.rs                   # Packaged-app bandwidth alert toast delivery
-│       └── tray.rs                    # Notification-area tray icon, tooltip & context menu
+│       └── tray.rs                    # Notification-area tray icon, tooltip, context menu & left-click flyout trigger
 ├── scripts/
 │   └── install.ps1                    # Sideload packaging, certificate provisioning & registration
 ├── Cargo.toml                         # Workspace manifest & LTO release profile
@@ -189,7 +230,7 @@ net-flow/
 
 ## 🧪 Testing & Verification
 
-Run all 102 workspace unit tests:
+Run all **142 workspace unit tests**:
 
 ```powershell
 cargo test --workspace
@@ -213,22 +254,22 @@ cargo build --release --workspace
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request. Validates formatting, executes all 132 automated unit tests, and verifies MSIX layout packaging.
-2. **`release.yml`**: Triggered on Git tags (e.g. `v0.1.1`) or manual workflow dispatch. Builds the optimized binary, packages both public sideload MSIX and Microsoft Store MSIX, generates SHA256 checksums, extracts sanitized release notes from `CHANGELOG.md`, publishes the **GitHub Release**, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** via Partner Center.
+1. **`ci.yml`**: Runs on every push and pull request across both `x86_64` and `aarch64` targets. Validates code formatting, executes all **142 automated unit tests**, and verifies MSIX layout packaging.
+2. **`release.yml`**: Triggered on Git tags (e.g. `v0.8.0`) or manual workflow dispatch. Builds optimized binaries for both x64 and ARM64, packages public sideload archives (`net-flow-windows-x64.zip` and `net-flow-windows-arm64.zip`) with SHA256 checksums, bundles both architectures into a unified Microsoft Store package (`NetFlow_Store.msixbundle`), performs pre-submission integrity validation, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** catalog via Partner Center.
 
 ---
 
 ## 🗺️ Roadmap to v1.0.0
 
-Net Flow follows a focused, four-stage incremental path towards production-ready General Availability (v1.0.0):
+Net Flow follows a focused, incremental path towards production-ready General Availability (v1.0.0):
 
 | Milestone | Theme | Key Capabilities | Status |
 | :--- | :--- | :--- | :---: |
 | **v0.5.0** | **Modern Runtime & Polish** | Windows App SDK 2.x, ICMP jitter variance, and expanded tray host controls | ✅ Released |
 | **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | ✅ Released |
 | **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | ✅ Released |
-| **v0.8.0** | **Tray Flyout & ARM64** | Native Win32 click-from-tray companion flyout (<5 MB RAM) and native Windows on ARM64 (`aarch64-pc-windows-msvc`) | ✅ Released (2026-10-03) |
-| **v1.0.0** | **General Availability (GA)** | Multi-arch Store MSIX bundle, one-click CSV/JSON diagnostic export, multi-language localization (i18n), and 72h stress hardening | 🌟 Planned |
+| **v0.8.0** | **Tray Flyout & ARM64 Hardening** | Native Win32 GDI companion flyout (<4 MB RAM), Tier-1 Windows on ARM64, and unified Store msixbundle | ✅ Released (2026-10-03) |
+| **v1.0.0** | **General Availability (GA)** | One-click CSV/JSON diagnostic telemetry export, multi-language localization (i18n), and 72h stress hardening | 🌟 Planned |
 
 ---
 
