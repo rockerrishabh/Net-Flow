@@ -299,6 +299,7 @@ jobs:
       PARTNER_CENTER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
       PARTNER_CENTER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
       STORE_PRODUCT_ID: ${{ secrets.STORE_PRODUCT_ID }}
+      ARM64_EXE: ""
 
     steps:
       - name: Checkout repository
@@ -361,6 +362,7 @@ jobs:
           output-path: target/NetFlow_Store_x64.msix
 
       - name: Discover ARM64 Binary
+        id: discover_arm64
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         shell: pwsh
         run: |
@@ -368,16 +370,18 @@ jobs:
           if ($armExe) {
             Write-Host "Found ARM64 binary at: $($armExe.FullName)"
             echo "ARM64_EXE=$($armExe.FullName)" >> $env:GITHUB_ENV
+            echo "ARM64_EXE=$($armExe.FullName)" >> $env:GITHUB_OUTPUT
           } else {
             Write-Host "ARM64 binary not found in store assets."
+            echo "ARM64_EXE=" >> $env:GITHUB_OUTPUT
           }
 
       - name: Prepare Store Manifest (ARM64)
-        if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
+        if: steps.check_creds.outputs.CONFIGURED == 'true' && steps.discover_arm64.outputs.ARM64_EXE != ''
         uses: ./.github/actions/prepare-manifest
         with:
           layout-dir: target/msix_store_arm64
-          exe-path: ${{ env.ARM64_EXE }}
+          exe-path: ${{ steps.discover_arm64.outputs.ARM64_EXE }}
           version: ${{ needs.release.outputs.version }}
           package-identity-name: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
           publisher-id: ${{ secrets.STORE_PUBLISHER_ID }}
@@ -385,7 +389,7 @@ jobs:
           processor-architecture: arm64
 
       - name: Copy Resources PRI into Store Layout (ARM64)
-        if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
+        if: steps.check_creds.outputs.CONFIGURED == 'true' && steps.discover_arm64.outputs.ARM64_EXE != ''
         shell: pwsh
         run: |
           # resources.pri contains indexed asset metadata (app logo, tray icons, visual assets)
@@ -398,7 +402,7 @@ jobs:
           Write-Host "Copied architecture-neutral resources.pri ($($priFile.Length) bytes) into ARM64 store layout."
 
       - name: Pack Store MSIX (ARM64)
-        if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
+        if: steps.check_creds.outputs.CONFIGURED == 'true' && steps.discover_arm64.outputs.ARM64_EXE != ''
         uses: ./.github/actions/pack-msix
         with:
           layout-dir: target/msix_store_arm64
