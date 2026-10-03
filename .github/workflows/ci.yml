@@ -31,6 +31,9 @@ jobs:
         with:
           wasdk-version: ${{ env.WASDK_VERSION }}
 
+      - name: Setup Rust Targets
+        run: rustup target add aarch64-pc-windows-msvc
+
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
@@ -40,5 +43,14 @@ jobs:
       - name: Run Tests
         run: cargo test --workspace --verbose
 
-      - name: Build Release Check
-        run: cargo build --release --workspace
+      - name: Target Check (x64)
+        run: cargo check --target x86_64-pc-windows-msvc --workspace
+
+      - name: Target Check (ARM64)
+        run: cargo check --target aarch64-pc-windows-msvc --workspace
+
+      - name: Build Release (x64)
+        run: cargo build --release --target x86_64-pc-windows-msvc --workspace
+
+      - name: Build Release (ARM64)
+        run: cargo build --release --target aarch64-pc-windows-msvc --workspace

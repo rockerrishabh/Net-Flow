@@ -11,6 +11,7 @@
 )]
 mod bindings;
 mod factory;
+pub mod flyout;
 mod provider;
 mod toast;
 mod tray;

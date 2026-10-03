@@ -175,6 +175,9 @@ pub struct TrayState {
     pub latest_snapshot: Arc<RwLock<NetworkSnapshot>>,
     pub alert_config: Arc<Mutex<BandwidthAlertConfig>>,
     pub ui_dirty: Arc<AtomicBool>,
+    pub flyout_snapshot: Arc<RwLock<crate::flyout::FlyoutSnapshot>>,
+    pub flyout_lifecycle: Arc<RwLock<crate::flyout::FlyoutLifecycleState>>,
+    pub flyout_hwnd: Arc<std::sync::atomic::AtomicIsize>,
 }
 
 /// Per-window context stashed in `GWLP_USERDATA` for the window proc.
@@ -205,12 +208,18 @@ pub fn run_tray_host() -> windows_core::Result<()> {
     let alert_config = Arc::new(Mutex::new(net_flow_core::load_alert_config()));
     let ui_dirty = Arc::new(AtomicBool::new(false));
     let running = Arc::new(AtomicBool::new(true));
+    let flyout_snapshot = Arc::new(RwLock::new(crate::flyout::FlyoutSnapshot::default()));
+    let flyout_lifecycle = Arc::new(RwLock::new(crate::flyout::FlyoutLifecycleState::Hidden));
+    let flyout_hwnd = Arc::new(std::sync::atomic::AtomicIsize::new(0));
 
     let state = Arc::new(TrayState {
         backend: Arc::clone(&backend),
         latest_snapshot: Arc::clone(&latest_snapshot),
         alert_config: Arc::clone(&alert_config),
         ui_dirty: Arc::clone(&ui_dirty),
+        flyout_snapshot,
+        flyout_lifecycle,
+        flyout_hwnd,
     });
 
     // 2. Spawn dedicated telemetry, latency probe, and alert worker
@@ -352,6 +361,90 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
             let _ = crate::toast::show_budget_alert(milestone);
         }
 
+        // 5. Update Flyout Snapshot for Presentation Surface
+        let is_flyout_active = {
+            let lifecycle = *state.flyout_lifecycle.read_safe();
+            lifecycle == crate::flyout::FlyoutLifecycleState::Visible
+                || lifecycle == crate::flyout::FlyoutLifecycleState::Opening
+        };
+
+        if is_flyout_active || state.ui_dirty.load(Ordering::SeqCst) {
+            let user_cfg = load_user_config();
+            let sparkline: Vec<(f32, f32)> = {
+                let window = snapshot.history.iter().rev().take(30).collect::<Vec<_>>();
+                let mut peak = 1024.0_f32;
+                for s in &window {
+                    peak = peak.max(s.rx_bps as f32).max(s.tx_bps as f32);
+                }
+                window
+                    .into_iter()
+                    .rev()
+                    .map(|s| {
+                        (
+                            (s.rx_bps as f32 / peak).clamp(0.0, 1.0),
+                            (s.tx_bps as f32 / peak).clamp(0.0, 1.0),
+                        )
+                    })
+                    .collect()
+            };
+
+            let (apps, _) = net_flow_core::query_active_apps();
+            let active_apps = apps
+                .into_iter()
+                .take(3)
+                .map(|a| crate::flyout::FlyoutAppItem {
+                    name: a.name,
+                    rx_bps: a.rx_bps as u64,
+                    tx_bps: a.tx_bps as u64,
+                })
+                .collect();
+
+            let flyout_snap = crate::flyout::FlyoutSnapshot {
+                rx_bps: snapshot.rx_bps,
+                tx_bps: snapshot.tx_bps,
+                latency_ms: snapshot.latency.latency_ms,
+                jitter_ms: snapshot.latency.jitter_ms,
+                packet_loss_pct: snapshot.latency.packet_loss_pct.unwrap_or(0) as f32,
+                latency_health: snapshot.latency.health,
+                latency_target_label: user_cfg.latency_target.label().to_string(),
+                primary_medium: snapshot.primary_medium,
+                physical_link_summary: snapshot
+                    .physical_link
+                    .as_ref()
+                    .map(|l| l.display_summary())
+                    .filter(|s| !s.is_empty()),
+                session_rx_bytes: snapshot.session_rx,
+                session_tx_bytes: snapshot.session_tx,
+                session_duration_secs: snapshot.session_duration_secs,
+                budget_usage_pct: snapshot.budget.as_ref().map(|b| b.usage_pct),
+                budget_days_left: snapshot.budget.as_ref().map(|b| b.days_remaining),
+                budget_cap_bytes: snapshot.budget.as_ref().map(|b| b.cap_bytes).unwrap_or(0),
+                budget_used_bytes: snapshot
+                    .budget
+                    .as_ref()
+                    .map(|b| b.consumed_bytes)
+                    .unwrap_or(0),
+                active_apps,
+                sparkline_history: sparkline,
+            };
+
+            *state.flyout_snapshot.write_safe() = flyout_snap;
+
+            if is_flyout_active {
+                let hwnd_val = state.flyout_hwnd.load(Ordering::SeqCst);
+                if hwnd_val != 0 {
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(HWND(hwnd_val as *mut c_void)),
+                            crate::flyout::WM_FLYOUT_SNAPSHOT_UPDATED,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            }
+        }
+
         next_sample = started + sample_period;
     }
 }
@@ -373,7 +466,10 @@ fn run_tray_ui(state: Arc<TrayState>, quit: Arc<AtomicBool>, tx: mpsc::Sender<is
             return;
         }
 
-        let ctx = Box::new(TrayContext { state, quit });
+        let ctx = Box::new(TrayContext {
+            state: Arc::clone(&state),
+            quit,
+        });
         let ctx_ptr = Box::into_raw(ctx) as *const c_void;
 
         let hwnd_result = CreateWindowExW(
@@ -399,6 +495,22 @@ fn run_tray_ui(state: Arc<TrayState>, quit: Arc<AtomicBool>, tx: mpsc::Sender<is
                 return;
             }
         };
+
+        // Create companion flyout window
+        let reset_state = Arc::clone(&state);
+        let on_reset = Arc::new(move || {
+            reset_session(&reset_state);
+        });
+        if let Ok(flyout_hwnd) = crate::flyout::create_flyout_window(
+            hinstance,
+            Arc::clone(&state.flyout_snapshot),
+            Arc::clone(&state.flyout_lifecycle),
+            on_reset,
+        ) {
+            state
+                .flyout_hwnd
+                .store(flyout_hwnd.0 as isize, Ordering::SeqCst);
+        }
 
         let _ = tx.send(hwnd.0 as isize);
 
@@ -632,6 +744,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     WM_RBUTTONUP => show_menu(hwnd),
                     WM_LBUTTONUP => {
                         update_tooltip(hwnd);
+                        if let Some(ctx) = context(hwnd) {
+                            let hwnd_val = ctx.state.flyout_hwnd.load(Ordering::SeqCst);
+                            if hwnd_val != 0 {
+                                crate::flyout::toggle_flyout(
+                                    HWND(hwnd_val as *mut c_void),
+                                    hwnd,
+                                    TRAY_GUID,
+                                );
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -640,6 +762,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             WM_TIMER => {
                 if wparam.0 == TOOLTIP_TIMER_ID {
                     update_tooltip(hwnd);
+                    if let Some(ctx) = context(hwnd) {
+                        let hwnd_val = ctx.state.flyout_hwnd.load(Ordering::SeqCst);
+                        if hwnd_val != 0 {
+                            let lifecycle = *ctx.state.flyout_lifecycle.read_safe();
+                            if lifecycle == crate::flyout::FlyoutLifecycleState::Visible {
+                                let _ = PostMessageW(
+                                    Some(HWND(hwnd_val as *mut c_void)),
+                                    crate::flyout::WM_FLYOUT_SNAPSHOT_UPDATED,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                    }
                 }
                 LRESULT(0)
             }
@@ -695,6 +831,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 remove_icon(hwnd);
                 let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
                 if ptr != 0 {
+                    let ctx = &*(ptr as *const TrayContext);
+                    let hwnd_val = ctx.state.flyout_hwnd.load(Ordering::SeqCst);
+                    if hwnd_val != 0 {
+                        let _ = DestroyWindow(HWND(hwnd_val as *mut c_void));
+                    }
                     drop(Box::from_raw(ptr as *mut TrayContext));
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 }

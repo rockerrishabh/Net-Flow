@@ -32,6 +32,10 @@ inputs:
     description: Path to the widget Assets directory
     required: false
     default: widget/Assets
+  processor-architecture:
+    description: Target processor architecture (x64 or arm64)
+    required: false
+    default: "x64"
 
 runs:
   using: composite
@@ -47,6 +51,7 @@ runs:
         STORE_PUBLISHER_DISPLAY_NAME: ${{ inputs.publisher-display-name }}
         EXE_PATH: ${{ inputs.exe-path }}
         ASSETS_DIR: ${{ inputs.assets-dir }}
+        TARGET_ARCH: ${{ inputs.processor-architecture }}
       run: |
         $sdkBin = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
         $makepri = Join-Path $sdkBin "makepri.exe"
@@ -85,6 +90,9 @@ runs:
         }
         if ($env:STORE_PUBLISHER_DISPLAY_NAME) {
           $manifestContent = $manifestContent -replace '(?<=<PublisherDisplayName>)[^<]+', $env:STORE_PUBLISHER_DISPLAY_NAME
+        }
+        if ($env:TARGET_ARCH) {
+          $manifestContent = $manifestContent -replace '(?<=<Identity\b[^>]*?\sProcessorArchitecture=")[^"]+', $env:TARGET_ARCH
         }
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText("$env:LAYOUT_DIR/AppxManifest.xml", $manifestContent, $utf8NoBom)

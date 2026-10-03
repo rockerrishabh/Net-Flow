@@ -79,40 +79,78 @@ jobs:
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
           echo "TAG_NAME=$tagName" >> $env:GITHUB_OUTPUT
 
-      - name: Build Release Binary
-        run: cargo build --release --workspace
+      - name: Setup Rust Targets
+        run: rustup target add aarch64-pc-windows-msvc
 
-      - name: Prepare Manifest & Resources
+      - name: Build Release Binaries (x64 & ARM64)
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc --workspace
+          cargo build --release --target aarch64-pc-windows-msvc --workspace
+
+      - name: Prepare Manifest & Resources (x64)
         uses: ./.github/actions/prepare-manifest
         with:
-          layout-dir: target/layout
-          exe-path: target/release/net-flow.exe
+          layout-dir: target/layout_x64
+          exe-path: target/x86_64-pc-windows-msvc/release/net-flow.exe
           version: ${{ steps.get_version.outputs.VERSION }}
           package-identity-name: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
           publisher-id: ${{ secrets.STORE_PUBLISHER_ID }}
           publisher-display-name: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
+          processor-architecture: x64
 
-      - name: Create Release Zip Package
+      - name: Prepare Manifest & Resources (ARM64)
+        uses: ./.github/actions/prepare-manifest
+        with:
+          layout-dir: target/layout_arm64
+          exe-path: target/aarch64-pc-windows-msvc/release/net-flow.exe
+          version: ${{ steps.get_version.outputs.VERSION }}
+          package-identity-name: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
+          publisher-id: ${{ secrets.STORE_PUBLISHER_ID }}
+          publisher-display-name: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
+          processor-architecture: arm64
+
+      - name: Create Release Zip Packages (x64 & ARM64)
         shell: pwsh
         run: |
-          $zipStage = "target/portable"
-          if (Test-Path $zipStage) { Remove-Item $zipStage -Recurse -Force }
-          New-Item -ItemType Directory -Force -Path $zipStage | Out-Null
+          # Package x64 Portable
+          $zipStageX64 = "target/portable_x64"
+          if (Test-Path $zipStageX64) { Remove-Item $zipStageX64 -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $zipStageX64 | Out-Null
 
-          Copy-Item "target/release/net-flow.exe" (Join-Path $zipStage "net-flow.exe") -Force
-          Copy-Item "target/layout/AppxManifest.xml" (Join-Path $zipStage "AppxManifest.xml") -Force
-          Copy-Item "target/layout/resources.pri" (Join-Path $zipStage "resources.pri") -Force
-          Copy-Item "widget/Assets" (Join-Path $zipStage "Assets") -Recurse -Force
-          Copy-Item "scripts/install.ps1" (Join-Path $zipStage "install.ps1") -Force
-          Copy-Item "README.md" (Join-Path $zipStage "README.md") -Force
-          Copy-Item "LICENSE-MIT" (Join-Path $zipStage "LICENSE-MIT") -Force
-          Copy-Item "LICENSE-APACHE" (Join-Path $zipStage "LICENSE-APACHE") -Force
+          Copy-Item "target/x86_64-pc-windows-msvc/release/net-flow.exe" (Join-Path $zipStageX64 "net-flow.exe") -Force
+          Copy-Item "target/layout_x64/AppxManifest.xml" (Join-Path $zipStageX64 "AppxManifest.xml") -Force
+          Copy-Item "target/layout_x64/resources.pri" (Join-Path $zipStageX64 "resources.pri") -Force
+          Copy-Item "widget/Assets" (Join-Path $zipStageX64 "Assets") -Recurse -Force
+          Copy-Item "scripts/install.ps1" (Join-Path $zipStageX64 "install.ps1") -Force
+          Copy-Item "README.md" (Join-Path $zipStageX64 "README.md") -Force
+          Copy-Item "LICENSE-MIT" (Join-Path $zipStageX64 "LICENSE-MIT") -Force
+          Copy-Item "LICENSE-APACHE" (Join-Path $zipStageX64 "LICENSE-APACHE") -Force
 
-          $zipPath = "target/net-flow-windows-x64.zip"
-          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Path (Join-Path $zipStage "*") -DestinationPath $zipPath -Force
-          Remove-Item $zipStage -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "Created release archive: $zipPath"
+          $zipPathX64 = "target/net-flow-windows-x64.zip"
+          if (Test-Path $zipPathX64) { Remove-Item $zipPathX64 -Force }
+          Compress-Archive -Path (Join-Path $zipStageX64 "*") -DestinationPath $zipPathX64 -Force
+          Remove-Item $zipStageX64 -Recurse -Force -ErrorAction SilentlyContinue
+
+          # Package ARM64 Portable
+          $zipStageArm = "target/portable_arm64"
+          if (Test-Path $zipStageArm) { Remove-Item $zipStageArm -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $zipStageArm | Out-Null
+
+          Copy-Item "target/aarch64-pc-windows-msvc/release/net-flow.exe" (Join-Path $zipStageArm "net-flow.exe") -Force
+          Copy-Item "target/layout_arm64/AppxManifest.xml" (Join-Path $zipStageArm "AppxManifest.xml") -Force
+          Copy-Item "target/layout_arm64/resources.pri" (Join-Path $zipStageArm "resources.pri") -Force
+          Copy-Item "widget/Assets" (Join-Path $zipStageArm "Assets") -Recurse -Force
+          Copy-Item "scripts/install.ps1" (Join-Path $zipStageArm "install.ps1") -Force
+          Copy-Item "README.md" (Join-Path $zipStageArm "README.md") -Force
+          Copy-Item "LICENSE-MIT" (Join-Path $zipStageArm "LICENSE-MIT") -Force
+          Copy-Item "LICENSE-APACHE" (Join-Path $zipStageArm "LICENSE-APACHE") -Force
+
+          $zipPathArm = "target/net-flow-windows-arm64.zip"
+          if (Test-Path $zipPathArm) { Remove-Item $zipPathArm -Force }
+          Compress-Archive -Path (Join-Path $zipStageArm "*") -DestinationPath $zipPathArm -Force
+          Remove-Item $zipStageArm -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Created release archives: $zipPathX64 and $zipPathArm"
 
       - name: Extract Release Notes from CHANGELOG
         shell: pwsh
@@ -205,7 +243,10 @@ jobs:
       - name: Generate Checksums
         shell: pwsh
         run: |
-          $files = @("target/net-flow-windows-x64.zip")
+          $files = @(
+            "target/net-flow-windows-x64.zip",
+            "target/net-flow-windows-arm64.zip"
+          )
           $sums = @()
           foreach ($file in $files) {
             if (Test-Path $file) {
@@ -224,6 +265,7 @@ jobs:
           tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
           files: |
             target/net-flow-windows-x64.zip
+            target/net-flow-windows-arm64.zip
             target/SHA256SUMS.txt
           body_path: target/RELEASE_NOTES.md
           draft: ${{ github.event.inputs.draft_release == 'true' }}
@@ -236,8 +278,9 @@ jobs:
         with:
           name: store-build-assets
           path: |
-            target/release/net-flow.exe
-            target/layout/resources.pri
+            target/x86_64-pc-windows-msvc/release/net-flow.exe
+            target/aarch64-pc-windows-msvc/release/net-flow.exe
+            target/layout_x64/resources.pri
             target/STORE_RELEASE_NOTES.txt
             target/STORE_DESCRIPTION.txt
           if-no-files-found: warn
@@ -280,32 +323,74 @@ jobs:
           name: store-build-assets
           path: target/store_input
 
-      - name: Prepare Store Manifest
+      - name: Prepare Store Manifest (x64)
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         uses: ./.github/actions/prepare-manifest
         with:
-          layout-dir: target/msix_store
-          exe-path: target/store_input/release/net-flow.exe
+          layout-dir: target/msix_store_x64
+          exe-path: target/store_input/x86_64-pc-windows-msvc/release/net-flow.exe
           version: ${{ needs.release.outputs.version }}
           package-identity-name: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
           publisher-id: ${{ secrets.STORE_PUBLISHER_ID }}
           publisher-display-name: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
+          processor-architecture: x64
 
-      - name: Copy Resources PRI into Store Layout
+      - name: Copy Resources PRI into Store Layout (x64)
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         shell: pwsh
         run: |
           $priFile = Get-ChildItem "target/store_input" -Recurse -Filter "resources.pri" | Select-Object -First 1
           if (-not $priFile) { throw "resources.pri not found in downloaded build assets!" }
-          Copy-Item $priFile.FullName "target/msix_store/resources.pri" -Force
-          Write-Host "Copied resources.pri into store layout."
+          Copy-Item $priFile.FullName "target/msix_store_x64/resources.pri" -Force
+          Write-Host "Copied resources.pri into x64 store layout."
 
-      - name: Pack Store MSIX
+      - name: Pack Store MSIX (x64)
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         uses: ./.github/actions/pack-msix
         with:
-          layout-dir: target/msix_store
-          output-path: target/NetFlow_Store.msix
+          layout-dir: target/msix_store_x64
+          output-path: target/NetFlow_Store_x64.msix
+
+      - name: Discover ARM64 Binary
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        shell: pwsh
+        run: |
+          $armExe = Get-ChildItem "target/store_input" -Recurse -Filter "net-flow.exe" | Where-Object { $_.FullName -match 'aarch64' } | Select-Object -First 1
+          if ($armExe) {
+            Write-Host "Found ARM64 binary at: $($armExe.FullName)"
+            echo "ARM64_EXE=$($armExe.FullName)" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "ARM64 binary not found in store assets."
+          }
+
+      - name: Prepare Store Manifest (ARM64)
+        if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
+        uses: ./.github/actions/prepare-manifest
+        with:
+          layout-dir: target/msix_store_arm64
+          exe-path: ${{ env.ARM64_EXE }}
+          version: ${{ needs.release.outputs.version }}
+          package-identity-name: ${{ secrets.STORE_PACKAGE_IDENTITY_NAME }}
+          publisher-id: ${{ secrets.STORE_PUBLISHER_ID }}
+          publisher-display-name: ${{ secrets.STORE_PUBLISHER_DISPLAY_NAME }}
+          processor-architecture: arm64
+
+      - name: Copy Resources PRI into Store Layout (ARM64)
+        if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
+        shell: pwsh
+        run: |
+          $priFile = Get-ChildItem "target/store_input" -Recurse -Filter "resources.pri" | Select-Object -First 1
+          if ($priFile) {
+            Copy-Item $priFile.FullName "target/msix_store_arm64/resources.pri" -Force
+            Write-Host "Copied resources.pri into ARM64 store layout."
+          }
+
+      - name: Pack Store MSIX (ARM64)
+        if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
+        uses: ./.github/actions/pack-msix
+        with:
+          layout-dir: target/msix_store_arm64
+          output-path: target/NetFlow_Store_arm64.msix
 
       - name: Setup Microsoft Store Developer CLI
         if: steps.check_creds.outputs.CONFIGURED == 'true'
@@ -348,8 +433,14 @@ jobs:
           $storeNotes = if ($notesFile -and (Test-Path $notesFile)) { (Get-Content $notesFile -Raw).Trim() } else { "" }
           Write-Host "Loaded $( $storeNotes.Length ) characters of Store release notes."
 
-          Write-Host "Uploading package as draft submission (noCommit) for Product ID $env:STORE_PRODUCT_ID..."
-          msstore publish -v "target/NetFlow_Store.msix" --appId "$env:STORE_PRODUCT_ID" --noCommit
+          Write-Host "Uploading packages as draft submission (noCommit) for Product ID $env:STORE_PRODUCT_ID..."
+          $storePackages = @()
+          if (Test-Path "target/NetFlow_Store_x64.msix") { $storePackages += "target/NetFlow_Store_x64.msix" }
+          if (Test-Path "target/NetFlow_Store_arm64.msix") { $storePackages += "target/NetFlow_Store_arm64.msix" }
+          foreach ($pkg in $storePackages) {
+            Write-Host "Publishing Store package: $pkg"
+            msstore publish -v "$pkg" --appId "$env:STORE_PRODUCT_ID" --noCommit
+          }
 
           # Update submission metadata with What's New release notes and Description
           if ($storeNotes -or $storeDescription) {

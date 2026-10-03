@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-03
+
+### Added
+
+- **Native Win32 Tray Flyout Companion (<5 MB RAM)**:
+  - Ultra-lightweight native Win32 popup companion window (`WS_POPUP`, `WS_EX_TOPMOST | WS_EX_TOOLWINDOW`) toggled by left-clicking the notification area icon (`WM_LBUTTONUP`).
+  - Pure GDI double-buffered rendering engine (`CreateCompatibleDC` + `CreateCompatibleBitmap` blitted to screen DC on `WM_PAINT`) with zero XAML, WinUI, or DirectComposition runtime overhead (<4 MB working set).
+  - Strict Presentation Surface isolation: UI thread never queries `IpHlpApi`, `Ndis`, `ICMP`, WLAN, or process APIs; it renders strictly from an immutable `FlyoutSnapshot` prepared by `TrayWorker`.
+  - Robust state machine lifecycle: explicit `Hidden -> Opening -> Visible -> Closing -> Hidden` transitions eliminating race conditions between tray clicks, window activation, and focus loss.
+  - Blur & click-away dismissal: auto-dismissal on `WM_ACTIVATE` (`WA_INACTIVE`) and `WM_KILLFOCUS` with debounce protection against premature dismissal on opening.
+  - Precision taskbar positioning hierarchy: primary query via `Shell_NotifyIconGetRect` for exact notification icon bounding rectangle, with `SHAppBarMessage(ABM_GETTASKBARPOS)` fallback and work area clamping via `GetMonitorInfoW(rcWork)` across multi-monitor setups.
+  - Modern Windows 11 DWM chrome: clean abstraction `apply_window_chrome` setting `DWMWA_USE_IMMERSIVE_DARK_MODE` (20) and `DWMWA_WINDOW_CORNER_PREFERENCE` (33) with `DWMWCP_ROUND` (2).
+  - Per-monitor DPI awareness: logical DIPs (`FLYOUT_WIDTH_DIP = 328`, `FLYOUT_HEIGHT_DIP = 456`) scaled dynamically via `GetDpiForWindow`, handling `WM_DPICHANGED` by resizing backbuffers and typography.
+  - Rich companion telemetry dashboard:
+    - Branded header with active medium and link summary badge (e.g. Ethernet / Wi-Fi).
+    - Large download and upload metric cards with distinct emerald and blue accents.
+    - Latency, jitter, packet loss percentage, and health status pill with colored indicators.
+    - Live 30-sample GDI sparkline line chart visualizing download and upload traffic rails.
+    - Session bandwidth totals with compact duration formatting.
+    - Data budget quota status and proportional progress bar with threshold color coding.
+    - Top 3 active network-consuming applications with live download/upload throughput attribution.
+    - Interactive quick-action buttons ("Reset Session" and "Close") with mouse hover tracking and click hit-testing.
+- **Windows on ARM64 Platform Hardening**:
+  - Full Tier-1 native target support for `aarch64-pc-windows-msvc`.
+  - Compile-time architecture constant `ARCH` (`x64` / `arm64`) with unit testing.
+  - Parameterized `AppxManifest.xml` generation supporting dynamic processor architecture injection.
+  - Multi-tier CI: pull request validation across both `x86_64` and `aarch64`, release builds, and manifest validation.
+  - Dual release packaging: automated generation of `net-flow-windows-x64.zip` and `net-flow-windows-arm64.zip` with SHA256 checksums and dual MSIX Store submission pipeline.
+- **Comprehensive Test Suite**:
+  - Flyout geometry calculation unit tests covering bottom, top, left, and right taskbars.
+  - Secondary monitor screen-edge work-area clamping tests.
+  - DPI DIP-to-physical scaling tests.
+  - Short duration and rate formatting tests.
+  - Button hit-testing tests.
+  - State machine lifecycle transition tests.
+  - 100-cycle snapshot memory stability test verifying zero monotonic heap accumulation.
+
+---
+
 ## [0.7.1] - 2026-09-29
 
 ### Fixed

@@ -8,6 +8,17 @@ pub const UPDATE_INTERVAL_MS: u64 = 500;
 /// Maximum rolling history buffer duration in seconds.
 pub const MAX_CHART_WINDOW_SECS: u32 = 60;
 
+/// Compile-time Windows processor architecture identifier (x64 / arm64).
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+pub const ARCH: &str = "x64";
+#[cfg(all(target_arch = "aarch64", target_os = "windows"))]
+pub const ARCH: &str = "arm64";
+#[cfg(not(any(
+    all(target_arch = "x86_64", target_os = "windows"),
+    all(target_arch = "aarch64", target_os = "windows")
+)))]
+pub const ARCH: &str = "unknown";
+
 /// Calculates how many telemetry samples fit into a given chart window duration.
 pub fn history_samples_for_secs(secs: u32) -> usize {
     let secs = u64::from(secs.max(1));
@@ -83,5 +94,14 @@ mod tests {
             HISTORY_CAPACITY
         );
         assert_eq!(HISTORY_CAPACITY, 240);
+    }
+
+    #[test]
+    fn test_arch_constant_defined() {
+        assert!(!ARCH.is_empty());
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(ARCH, "x64");
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(ARCH, "arm64");
     }
 }

@@ -9,7 +9,7 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.7.1-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.8.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -227,7 +227,7 @@ Net Flow follows a focused, four-stage incremental path towards production-ready
 | **v0.5.0** | **Modern Runtime & Polish** | Windows App SDK 2.x, ICMP jitter variance, and expanded tray host controls | ✅ Released |
 | **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | ✅ Released |
 | **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | ✅ Released |
-| **v0.8.0** | **Tray Flyout & ARM64** | Native Win32 click-from-tray companion flyout (<5 MB RAM) and native Windows on ARM64 (`aarch64-pc-windows-msvc`) | 📅 Planned |
+| **v0.8.0** | **Tray Flyout & ARM64** | Native Win32 click-from-tray companion flyout (<5 MB RAM) and native Windows on ARM64 (`aarch64-pc-windows-msvc`) | ✅ Released (2026-10-03) |
 | **v1.0.0** | **General Availability (GA)** | Multi-arch Store MSIX bundle, one-click CSV/JSON diagnostic export, multi-language localization (i18n), and 72h stress hardening | 🌟 Planned |
 
 ---
