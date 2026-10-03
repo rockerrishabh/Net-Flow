@@ -308,11 +308,18 @@ jobs:
         id: check_creds
         shell: pwsh
         run: |
-          if (-not $env:PARTNER_CENTER_CLIENT_ID -or -not $env:STORE_PRODUCT_ID) {
-            Write-Host "::warning::Microsoft Partner Center secrets (PARTNER_CENTER_CLIENT_ID / STORE_PRODUCT_ID) are not configured. Skipping Microsoft Store submission."
+          $missingCreds = @()
+          if (-not $env:PARTNER_CENTER_TENANT_ID) { $missingCreds += "PARTNER_CENTER_TENANT_ID" }
+          if (-not $env:PARTNER_CENTER_SELLER_ID) { $missingCreds += "PARTNER_CENTER_SELLER_ID" }
+          if (-not $env:PARTNER_CENTER_CLIENT_ID) { $missingCreds += "PARTNER_CENTER_CLIENT_ID" }
+          if (-not $env:PARTNER_CENTER_CLIENT_SECRET) { $missingCreds += "PARTNER_CENTER_CLIENT_SECRET" }
+          if (-not $env:STORE_PRODUCT_ID) { $missingCreds += "STORE_PRODUCT_ID" }
+
+          if ($missingCreds.Count -gt 0) {
+            Write-Host "::warning::The following required Microsoft Partner Center secrets are missing: $($missingCreds -join ', '). Skipping Microsoft Store submission."
             echo "CONFIGURED=false" >> $env:GITHUB_OUTPUT
           } else {
-            Write-Host "Partner Center credentials detected. Proceeding with Microsoft Store submission."
+            Write-Host "All Partner Center credentials verified successfully. Proceeding with Microsoft Store submission."
             echo "CONFIGURED=true" >> $env:GITHUB_OUTPUT
           }
 
@@ -339,10 +346,12 @@ jobs:
         if: steps.check_creds.outputs.CONFIGURED == 'true'
         shell: pwsh
         run: |
+          # resources.pri contains indexed asset metadata (app logo, tray icons, visual assets)
+          # which is architecture-neutral across x64 and ARM64 packages.
           $priFile = Get-ChildItem "target/store_input" -Recurse -Filter "resources.pri" | Select-Object -First 1
-          if (-not $priFile) { throw "resources.pri not found in downloaded build assets!" }
+          if (-not $priFile -or $priFile.Length -eq 0) { throw "Valid resources.pri not found in downloaded build assets!" }
           Copy-Item $priFile.FullName "target/msix_store_x64/resources.pri" -Force
-          Write-Host "Copied resources.pri into x64 store layout."
+          Write-Host "Copied architecture-neutral resources.pri ($($priFile.Length) bytes) into x64 store layout."
 
       - name: Pack Store MSIX (x64)
         if: steps.check_creds.outputs.CONFIGURED == 'true'
@@ -379,11 +388,14 @@ jobs:
         if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
         shell: pwsh
         run: |
+          # resources.pri contains indexed asset metadata (app logo, tray icons, visual assets)
+          # which is architecture-neutral across x64 and ARM64 packages.
           $priFile = Get-ChildItem "target/store_input" -Recurse -Filter "resources.pri" | Select-Object -First 1
-          if ($priFile) {
-            Copy-Item $priFile.FullName "target/msix_store_arm64/resources.pri" -Force
-            Write-Host "Copied resources.pri into ARM64 store layout."
+          if (-not $priFile -or $priFile.Length -eq 0) {
+            throw "Valid resources.pri not found in downloaded build assets!"
           }
+          Copy-Item $priFile.FullName "target/msix_store_arm64/resources.pri" -Force
+          Write-Host "Copied architecture-neutral resources.pri ($($priFile.Length) bytes) into ARM64 store layout."
 
       - name: Pack Store MSIX (ARM64)
         if: steps.check_creds.outputs.CONFIGURED == 'true' && env.ARM64_EXE != ''
@@ -427,6 +439,31 @@ jobs:
             target/NetFlow_Store_arm64.msix
             target/NetFlow_Store.msixbundle
           if-no-files-found: warn
+
+      - name: Validate Store Packages & Bundle
+        if: steps.check_creds.outputs.CONFIGURED == 'true'
+        shell: pwsh
+        run: |
+          $requiredPackages = @(
+            "target/NetFlow_Store_x64.msix",
+            "target/NetFlow_Store.msixbundle"
+          )
+          if ($env:ARM64_EXE) {
+            $requiredPackages += "target/NetFlow_Store_arm64.msix"
+          }
+
+          Write-Host "Validating generated Store packages before submission..."
+          foreach ($pkg in $requiredPackages) {
+            if (-not (Test-Path $pkg)) {
+              throw "Required Store package missing: $pkg"
+            }
+            $item = Get-Item $pkg
+            if ($item.Length -eq 0) {
+              throw "Store package is 0 bytes: $pkg"
+            }
+            $hash = (Get-FileHash -Path $pkg -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Host "Verified Store package: $($item.FullName) ($($item.Length) bytes, SHA-256: $hash)"
+          }
 
       - name: Setup Microsoft Store Developer CLI
         if: steps.check_creds.outputs.CONFIGURED == 'true'
@@ -520,7 +557,7 @@ jobs:
 
                 $updatedPayload = $subObj | ConvertTo-Json -Depth 100 -Compress
                 Write-Host "Updating submission metadata with Store description & What's New notes..."
-                msstore submission updateMetadata "$env:STORE_PRODUCT_ID" $updatedPayload
+                msstore submission update "$env:STORE_PRODUCT_ID" $updatedPayload
                 Write-Host "Submission metadata successfully updated!"
               } else {
                 Write-Warning "No listings property found in submission JSON. Skipping metadata update."
