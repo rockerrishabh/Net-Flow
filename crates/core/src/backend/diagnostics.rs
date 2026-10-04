@@ -124,7 +124,7 @@ pub fn build_diagnostics_snapshot(
         timezone: local_timezone_id(),
         start_date,
         end_date,
-        days: 90,
+        days: history_records.len() as u32,
     };
 
     let privacy = crate::export::PrivacyMetadata::default();
@@ -143,6 +143,19 @@ pub fn build_diagnostics_snapshot(
         today_ymd,
     );
 
+    let (budget_cap, budget_consumed, budget_pct, budget_days) = if backend.budget_config.enabled
+        && backend.budget_config.monthly_cap_bytes.unwrap_or(0) > 0
+    {
+        (
+            backend.budget_config.monthly_cap_bytes,
+            budget_snap.consumed_bytes,
+            budget_snap.usage_pct,
+            budget_snap.days_remaining,
+        )
+    } else {
+        (None, 0, 0, 0)
+    };
+
     let session = crate::export::SessionDiagnostics {
         session_start_utc,
         duration_seconds,
@@ -151,10 +164,10 @@ pub fn build_diagnostics_snapshot(
         bytes_total,
         peak_download_bps: backend.peak_rx.round() as u64,
         peak_upload_bps: backend.peak_tx.round() as u64,
-        budget_cap_bytes: backend.budget_config.monthly_cap_bytes,
-        budget_consumed_bytes: budget_snap.consumed_bytes,
-        budget_usage_pct: budget_snap.usage_pct,
-        budget_days_remaining: budget_snap.days_remaining,
+        budget_cap_bytes: budget_cap,
+        budget_consumed_bytes: budget_consumed,
+        budget_usage_pct: budget_pct,
+        budget_days_remaining: budget_days,
     };
 
     let latencies = backend.packet_loss_tracker.latencies_ms();
@@ -189,12 +202,13 @@ pub fn build_diagnostics_snapshot(
     };
 
     let mut processes = Vec::new();
-    for app in &backend.cached_raw_apps.0 {
+    for app in &backend.cached_apps.0 {
         processes.push(crate::export::ProcessAttributionRecord {
             process_name: app.process_name.clone(),
             download_bps: app.rx_bps.round() as u64,
             upload_bps: app.tx_bps.round() as u64,
             socket_count: app.connection_count as u32,
+            is_estimate: true,
         });
     }
 

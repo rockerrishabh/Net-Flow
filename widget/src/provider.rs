@@ -543,6 +543,10 @@ impl IWidgetProvider_Impl for NetFlowWidgetProvider_Impl {
                     *state.alert_config.lock_safe() = alert_prefs.clone();
                     save_alert_config(&alert_prefs);
                     net_flow_core::card::save_user_config(&new_config);
+                    state
+                        .backend
+                        .lock_safe()
+                        .update_budget_config(new_config.budget.clone());
                     state.ui_dirty.store(true, Ordering::SeqCst);
                     if let Some(worker) = &state.worker {
                         worker.shutdown.1.notify_all();
@@ -1171,7 +1175,7 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         .get("chart_window")
         .and_then(|v| {
             if let Some(n) = v.as_u64() {
-                Some(n as u32)
+                Some(n.min(u32::MAX as u64) as u32)
             } else if let Some(s) = v.as_str() {
                 s.parse::<u32>().ok()
             } else {
@@ -1235,22 +1239,23 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
     // Independent download alert fields (with legacy fallback)
     if let Some(dl_enabled) = parse_bool_field(parsed.get("alerts_download_enabled")) {
         alerts.download_enabled = dl_enabled;
-        alerts.enabled = dl_enabled;
     } else if let Some(legacy_enabled) = parse_bool_field(parsed.get("alerts_enabled")) {
         alerts.download_enabled = legacy_enabled;
-        alerts.enabled = legacy_enabled;
     }
 
     if let Some(dl_mbps) = parse_number_field(parsed.get("alert_download_threshold_mbps")) {
-        alerts.threshold_bps = (dl_mbps.max(1) as u64) * 1024 * 1024;
+        alerts.threshold_bps = (dl_mbps.clamp(1, 100_000) as u64) * 1024 * 1024;
     } else if let Some(legacy_mbps) = parse_number_field(parsed.get("alert_threshold_mbps")) {
-        alerts.threshold_bps = (legacy_mbps.max(1) as u64) * 1024 * 1024;
+        alerts.threshold_bps = (legacy_mbps.clamp(1, 100_000) as u64) * 1024 * 1024;
     }
 
     if let Some(dl_secs) = parse_number_field(parsed.get("alert_download_sustain_secs")) {
-        alerts.sustain_secs = dl_secs.max(1) as u32;
+        alerts.sustain_secs = dl_secs.clamp(1, 3600) as u32;
     } else if let Some(legacy_secs) = parse_number_field(parsed.get("alert_sustain_secs")) {
-        alerts.sustain_secs = legacy_secs.max(1) as u32;
+        alerts.sustain_secs = legacy_secs.clamp(1, 3600) as u32;
+    }
+    if let Some(dl_cooldown) = parse_number_field(parsed.get("alert_download_cooldown_secs")) {
+        alerts.cooldown_secs = dl_cooldown.clamp(1, 86_400) as u32;
     }
 
     // Independent upload alert fields
@@ -1258,12 +1263,16 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         alerts.upload_enabled = ul_enabled;
     }
     if let Some(ul_mbps) = parse_number_field(parsed.get("alert_upload_threshold_mbps")) {
-        alerts.upload_threshold_bps = Some((ul_mbps.max(1) as u64) * 1024 * 1024);
+        alerts.upload_threshold_bps = Some((ul_mbps.clamp(1, 100_000) as u64) * 1024 * 1024);
     }
     if let Some(ul_secs) = parse_number_field(parsed.get("alert_upload_sustain_secs")) {
-        alerts.upload_sustain_secs = Some(ul_secs.max(1) as u32);
+        alerts.upload_sustain_secs = Some(ul_secs.clamp(1, 3600) as u32);
+    }
+    if let Some(ul_cooldown) = parse_number_field(parsed.get("alert_upload_cooldown_secs")) {
+        alerts.upload_cooldown_secs = Some(ul_cooldown.clamp(1, 86_400) as u32);
     }
 
+    alerts.enabled = alerts.download_enabled || alerts.upload_enabled;
     let alerts = alerts.normalized();
 
     // Data budget preferences
@@ -1272,16 +1281,25 @@ fn parse_settings_form(data_json: &str, current_config: &WidgetConfig) -> Widget
         budget.enabled = b_enabled;
     }
     if let Some(b_cap_gb) = parse_number_field(parsed.get("budget_cap_gb")) {
-        budget.monthly_cap_bytes = Some((b_cap_gb.max(1) as u64) * 1024 * 1024 * 1024);
+        budget.monthly_cap_bytes = Some((b_cap_gb.clamp(1, 100_000) as u64) * 1024 * 1024 * 1024);
     }
     if let Some(b_renewal) = parse_number_field(parsed.get("budget_renewal_day")) {
-        budget.renewal_day = (b_renewal as u8).clamp(1, 31);
+        budget.renewal_day = b_renewal.clamp(1, 31) as u8;
     }
     if let Some(b_scope_str) = parsed.get("budget_scope").and_then(|v| v.as_str()) {
         budget.scope = match b_scope_str {
             "download_only" => net_flow_core::budget::BudgetScope::DownloadOnly,
             _ => net_flow_core::budget::BudgetScope::Combined,
         };
+    }
+    if let Some(value) = parse_bool_field(parsed.get("budget_notify_80")) {
+        budget.notify_80 = value;
+    }
+    if let Some(value) = parse_bool_field(parsed.get("budget_notify_90")) {
+        budget.notify_90 = value;
+    }
+    if let Some(value) = parse_bool_field(parsed.get("budget_notify_100")) {
+        budget.notify_100 = value;
     }
     let budget = budget.normalized();
 
@@ -1367,6 +1385,7 @@ fn worker_loop(
     let mut last_generation_at = Instant::now();
     let mut last_persist = Instant::now();
     let mut last_latency_probe = Instant::now() - Duration::from_secs(10);
+    let mut last_settings_reload = Instant::now();
     let mut alert_engine = BandwidthAlertEngine::default();
 
     loop {
@@ -1383,6 +1402,12 @@ fn worker_loop(
 
         let started = Instant::now();
         _last_sampled_at = started;
+        if last_settings_reload.elapsed() >= Duration::from_secs(1) {
+            let user_config = net_flow_core::load_user_config();
+            backend.lock_safe().update_budget_config(user_config.budget);
+            *alert_config.lock_safe() = load_alert_config();
+            last_settings_reload = Instant::now();
+        }
         {
             let mut b = backend.lock_safe();
             let gen_changed = b.sync_from_persisted_session();
@@ -1417,14 +1442,16 @@ fn worker_loop(
         let force_ui = ui_dirty.swap(false, Ordering::SeqCst);
         let snapshot = snapshot_ref.read_safe().clone();
         let alert_preferences = alert_config.lock_safe().clone();
-        for event in alert_engine.evaluate(
-            &alert_preferences,
-            snapshot.rx_bps,
-            snapshot.tx_bps,
-            Instant::now(),
-        ) {
-            if let Err(error) = crate::toast::show_bandwidth_alert(event) {
-                log_widget(&format!("Bandwidth toast failed: {error}"));
+        if !crate::is_tray_running() {
+            for event in alert_engine.evaluate(
+                &alert_preferences,
+                snapshot.rx_bps,
+                snapshot.tx_bps,
+                Instant::now(),
+            ) {
+                if let Err(error) = crate::toast::show_bandwidth_alert(event) {
+                    log_widget(&format!("Bandwidth toast failed: {error}"));
+                }
             }
         }
         let adaptive_interval = compute_adaptive_ui_interval(snapshot.rx_bps, snapshot.tx_bps);

@@ -338,6 +338,15 @@ pub fn probe_latency_ipv4(target_ip: std::net::Ipv4Addr, timeout_ms: u32) -> Pro
 
 /// Probes round-trip latency to the given IPv6 target using asynchronous Win32 `Icmp6SendEcho2`.
 pub fn probe_latency_ipv6(target_ip: std::net::Ipv6Addr, timeout_ms: u32) -> ProbeResult {
+    probe_latency_ipv6_scoped(target_ip, 0, timeout_ms)
+}
+
+/// Probes IPv6 with an explicit interface scope for link-local gateway addresses.
+fn probe_latency_ipv6_scoped(
+    target_ip: std::net::Ipv6Addr,
+    scope_id: u32,
+    timeout_ms: u32,
+) -> ProbeResult {
     use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::NetworkManagement::IpHelper::{
         ICMPV6_ECHO_REPLY_LH, Icmp6CreateFile, Icmp6ParseReplies, Icmp6SendEcho2, IcmpCloseHandle,
@@ -365,6 +374,7 @@ pub fn probe_latency_ipv6(target_ip: std::net::Ipv6Addr, timeout_ms: u32) -> Pro
 
         let mut dest: SOCKADDR_IN6 = std::mem::zeroed();
         dest.sin6_family = AF_INET6;
+        dest.Anonymous.sin6_scope_id = scope_id;
         dest.sin6_addr = IN6_ADDR {
             u: windows::Win32::Networking::WinSock::IN6_ADDR_0 {
                 Byte: target_ip.octets(),
@@ -443,21 +453,23 @@ pub fn sample_latency_snapshot_dual_stack(
     let ipv6_route = query_ipv6_route(None);
     let ipv4_gateway = query_ipv4_gateway_address(None);
 
-    let (target, primary_ipv6, fallback_ipv4) = match mode {
+    let (target, primary_ipv6, fallback_ipv4, ipv6_scope_id) = match mode {
         LatencyTargetMode::Internet => (
             LatencyTarget::Internet,
             Some(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
                 0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111,
             ))),
             Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))),
+            0,
         ),
         LatencyTargetMode::Gateway => {
+            let scope_id = ipv6_route.as_ref().map_or(0, |route| route.interface_index);
             let gw_v6 = ipv6_route
                 .as_ref()
                 .and_then(|r| r.gateway)
                 .map(std::net::IpAddr::V6);
             let gw_v4 = ipv4_gateway.map(std::net::IpAddr::V4);
-            (LatencyTarget::Gateway, gw_v6, gw_v4)
+            (LatencyTarget::Gateway, gw_v6, gw_v4, scope_id)
         }
         LatencyTargetMode::Auto => {
             if let Some(gw_v6) = ipv6_route.as_ref().and_then(|r| r.gateway) {
@@ -465,12 +477,14 @@ pub fn sample_latency_snapshot_dual_stack(
                     LatencyTarget::Gateway,
                     Some(std::net::IpAddr::V6(gw_v6)),
                     ipv4_gateway.map(std::net::IpAddr::V4),
+                    ipv6_route.as_ref().map_or(0, |route| route.interface_index),
                 )
             } else if let Some(gw_v4) = ipv4_gateway {
                 (
                     LatencyTarget::Gateway,
                     None,
                     Some(std::net::IpAddr::V4(gw_v4)),
+                    0,
                 )
             } else {
                 (
@@ -479,6 +493,7 @@ pub fn sample_latency_snapshot_dual_stack(
                         0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111,
                     ))),
                     Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))),
+                    0,
                 )
             }
         }
@@ -486,7 +501,10 @@ pub fn sample_latency_snapshot_dual_stack(
 
     // 1. Try IPv6 first if route / target is available
     if let Some(ip6) = primary_ipv6 {
-        let res = probe_latency(ip6, timeout_ms);
+        let res = match ip6 {
+            std::net::IpAddr::V6(ip6) => probe_latency_ipv6_scoped(ip6, ipv6_scope_id, timeout_ms),
+            std::net::IpAddr::V4(ip4) => probe_latency_ipv4(ip4, timeout_ms),
+        };
         match res {
             ProbeResult::Success { latency } => {
                 let ms = latency.as_millis() as u32;

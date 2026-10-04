@@ -2,7 +2,7 @@ use super::phy::{
     WLAN_CONNECTION_ATTRIBUTES, WLAN_INTERFACE_INFO_LIST, WLAN_INTF_OPCODE_CHANNEL_NUMBER,
     WLAN_INTF_OPCODE_CURRENT_CONNECTION, WLAN_INTF_OPCODE_REALTIME_CONNECTION_QUALITY,
     WLAN_REALTIME_CONNECTION_QUALITY, WlanCloseHandle, WlanEnumInterfaces, WlanFreeMemory,
-    WlanOpenHandle, WlanQueryInterface,
+    WlanOpenHandle, WlanQueryInterface, luid_for_wifi_guid,
 };
 use super::types::{
     InterfaceCategory, InterfaceInfo, InterfaceMedium, signal_quality_to_rssi_dbm, wifi_band,
@@ -520,8 +520,9 @@ pub fn query_raw_adapters() -> Vec<RawAdapterInfo> {
             u32::MAX
         };
 
+        let interface_luid = unsafe { curr.Luid.Value };
         let wifi = if interface_type == crate::export::InterfaceType::Wifi && is_up {
-            query_active_wifi_diagnostics()
+            query_active_wifi_diagnostics_for_luid(Some(interface_luid))
         } else {
             None
         };
@@ -553,6 +554,12 @@ pub fn query_raw_adapters() -> Vec<RawAdapterInfo> {
 }
 
 pub fn query_active_wifi_diagnostics() -> Option<crate::export::WifiDiagnostics> {
+    query_active_wifi_diagnostics_for_luid(None)
+}
+
+pub fn query_active_wifi_diagnostics_for_luid(
+    target_luid: Option<u64>,
+) -> Option<crate::export::WifiDiagnostics> {
     unsafe {
         let mut negotiated = 0u32;
         let mut handle = 0isize;
@@ -574,7 +581,11 @@ pub fn query_active_wifi_diagnostics() -> Option<crate::export::WifiDiagnostics>
             let interfaces =
                 std::slice::from_raw_parts((*list_ptr).InterfaceInfo.as_ptr(), count as usize);
             for iface in interfaces {
-                if iface.isState == 1 {
+                if iface.isState == 1
+                    && target_luid.is_none_or(|target| {
+                        luid_for_wifi_guid(&iface.InterfaceGuid) == Some(target)
+                    })
+                {
                     let mut data_size = 0u32;
                     let mut data_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
 
@@ -687,7 +698,7 @@ pub fn query_active_wifi_diagnostics() -> Option<crate::export::WifiDiagnostics>
                             bssid,
                             generation: wifi_gen,
                             band_ghz: band.as_str().to_string(),
-                            channel: if freq_mhz > 0 { freq_mhz } else { 0 },
+                            channel: crate::backend::wifi_channel_number(freq_mhz).unwrap_or(0),
                             channel_width_mhz: ch_width,
                             rssi_dbm,
                             transmit_rate_bps: tx_bps,

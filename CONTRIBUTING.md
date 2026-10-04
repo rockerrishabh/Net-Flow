@@ -95,8 +95,8 @@ When proposing changes, keep the following core design principles in mind:
    - Static caches (such as `ICON_CACHE` in `process.rs`) must be capped (maximum 256 entries) to prevent unbounded memory growth during multi-day sessions.
 6. **Single Source of Truth for Versions**:
    - The project version is defined strictly in [`Cargo.toml`](Cargo.toml). [`scripts/install.ps1`](scripts/install.ps1) and CI workflows automatically propagate this version to [`Package.appxmanifest`](widget/Package.appxmanifest).
-7. **100% Offline & Private**:
-   - Do not add outbound network telemetry, analytics, or external tracking libraries. All telemetry processing must remain entirely local.
+7. **No Telemetry Uploads**:
+   - Do not add outbound telemetry, analytics, or external tracking libraries. The optional latency feature may send ICMP echo probes to its configured endpoint; keep those probes limited to connection-quality checks and process all diagnostic data locally.
 
 ---
 

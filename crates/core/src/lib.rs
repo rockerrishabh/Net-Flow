@@ -56,10 +56,12 @@ pub use backend::{
     PhysicalLinkInfo, ProbeResult, RateAccumulator, RollingRateWindow, SessionState, WifiBand,
     WifiGeneration, WifiPhyMetrics, classify_interface, compute_delta, counter_delta,
     load_persisted_session_state, probe_latency, probe_latency_ipv4, probe_latency_ipv6,
-    query_active_ethernet_metrics, query_active_wifi_metrics, query_cached_wifi_phy,
-    query_interfaces, query_ipv4_gateway_address, query_ipv6_route, query_physical_link_info,
-    sample_latency_snapshot, sample_latency_snapshot_dual_stack, save_persisted_session_state,
-    signal_quality_to_rssi_dbm, wifi_band, wifi_generation, wifi_generation_with_band,
+    query_active_ethernet_metrics, query_active_ethernet_metrics_for_luid,
+    query_active_wifi_metrics, query_active_wifi_metrics_for_luid, query_cached_wifi_phy,
+    query_cached_wifi_phy_for_luid, query_interfaces, query_ipv4_gateway_address, query_ipv6_route,
+    query_physical_link_info, query_physical_link_info_for_luid, sample_latency_snapshot,
+    sample_latency_snapshot_dual_stack, save_persisted_session_state, signal_quality_to_rssi_dbm,
+    wifi_band, wifi_channel_number, wifi_generation, wifi_generation_with_band,
 };
 pub use budget::{
     BudgetMilestone, BudgetScope, BudgetSnapshot, DataBudgetConfig, MilestoneTier,
@@ -74,8 +76,9 @@ pub use card::{
     get_user_config_path, load_user_config, save_user_config,
 };
 pub use chart::{
-    GraphStyle, Palette, ResolvedTheme, ThemeMode, Track, detect_windows_light_theme,
-    query_windows_light_theme, render_chart_data_uris, render_chart_png,
+    FLYOUT_SPARKLINE_SAMPLES, GraphStyle, Palette, ResolvedTheme, ThemeMode, Track,
+    detect_windows_light_theme, query_windows_light_theme, render_chart_data_uris,
+    render_chart_png, update_flyout_sparkline,
 };
 pub use daily_usage::{
     DailyUsageEntry, DailyUsageStore, MAX_DAILY_ENTRIES, MilestoneState, get_daily_usage_path,

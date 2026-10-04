@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use super::adapter::{query_adapter_diagnostics, query_interfaces};
 use super::diagnostics::build_diagnostics_snapshot;
 use super::latency::{PacketLossTracker, sample_latency_snapshot_dual_stack};
-use super::phy::{query_cached_wifi_ssid, query_physical_link_info};
+use super::phy::{query_cached_wifi_phy_for_luid, query_physical_link_info_for_luid};
 use super::rate::{RateAccumulator, RollingRateWindow, counter_delta};
 use super::session::{SessionState, load_persisted_session_state, save_persisted_session_state};
 use super::types::{
@@ -20,6 +20,12 @@ pub struct InterfaceCounterState {
     pub tx_bytes: u64,
 }
 
+#[derive(Default)]
+struct InterfaceChartHistory {
+    accumulator: RateAccumulator,
+    samples: VecDeque<HistorySample>,
+}
+
 /// Core telemetry backend that queries Windows network adapters, computes bandwidth, and tracks apps.
 pub struct NetworkBackend {
     pub mode: AggregateMode,
@@ -33,17 +39,19 @@ pub struct NetworkBackend {
     pub session_start_unix: u64,
     /// Rolling FIFO buffer of fixed-duration bandwidth samples.
     pub(crate) history: VecDeque<HistorySample>,
+    /// Fixed-duration histories used when the widget is filtered to one adapter.
+    per_interface_chart_history: HashMap<InterfaceLuid, InterfaceChartHistory>,
     /// Tracked chart peak download rate across current history buffer.
     pub(crate) chart_peak_rx: u64,
     /// Tracked chart peak upload rate across current history buffer.
     pub(crate) chart_peak_tx: u64,
-    /// Tracks per-process network and disk I/O rates.
+    /// Tracks processes that own active network sockets.
     pub process_tracker: crate::process::ProcessTracker,
     /// Last time the process table was refreshed (throttled to 1s).
     last_process_sample: Option<Instant>,
-    /// Cached un-reconciled apps from the last process tracker pass.
-    pub(crate) cached_raw_apps: (Vec<crate::process::ActiveAppInfo>, usize),
-    /// Sub-sample bucket accumulator for fixed 500ms chart slices.
+    /// Cached socket owners with their latest socket-count-based traffic estimates.
+    pub(crate) cached_apps: (Vec<crate::process::ActiveAppInfo>, usize),
+    /// Sub-sample bucket accumulator for fixed 250ms chart slices.
     pub accumulator: RateAccumulator,
     /// Rolling 1-second window for smooth UI headline rates.
     pub rolling_window: RollingRateWindow,
@@ -93,11 +101,12 @@ impl NetworkBackend {
             session_tx: 0,
             session_start_unix: now_unix,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            per_interface_chart_history: HashMap::new(),
             chart_peak_rx: 0,
             chart_peak_tx: 0,
             process_tracker: crate::process::ProcessTracker::new(),
             last_process_sample: None,
-            cached_raw_apps: (Vec::new(), 0),
+            cached_apps: (Vec::new(), 0),
             accumulator: RateAccumulator::new(),
             rolling_window: RollingRateWindow::new(1_000_000_000),
             latency: LatencySnapshot::default(),
@@ -133,11 +142,12 @@ impl NetworkBackend {
                 now_unix
             },
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            per_interface_chart_history: HashMap::new(),
             chart_peak_rx: 0,
             chart_peak_tx: 0,
             process_tracker: crate::process::ProcessTracker::new(),
             last_process_sample: None,
-            cached_raw_apps: (Vec::new(), 0),
+            cached_apps: (Vec::new(), 0),
             accumulator: RateAccumulator::new(),
             rolling_window: RollingRateWindow::new(1_000_000_000),
             latency: persisted.latency,
@@ -237,13 +247,13 @@ impl NetworkBackend {
             .unwrap_or(0);
         self.session_start_unix = now_unix;
         self.history.clear();
+        self.per_interface_chart_history.clear();
         self.chart_peak_rx = 0;
         self.chart_peak_tx = 0;
         self.accumulator.reset();
         self.rolling_window.reset();
-        self.process_tracker.reset();
         self.last_process_sample = None;
-        self.cached_raw_apps = (Vec::new(), 0);
+        self.cached_apps = (Vec::new(), 0);
         save_persisted_session_state(&SessionState {
             generation: self.generation,
             session_rx: 0,
@@ -271,13 +281,13 @@ impl NetworkBackend {
             self.session_tx = persisted.session_tx;
             self.session_start_unix = persisted.session_start_unix;
             self.history.clear();
+            self.per_interface_chart_history.clear();
             self.chart_peak_rx = 0;
             self.chart_peak_tx = 0;
             self.accumulator.reset();
             self.rolling_window.reset();
-            self.process_tracker.reset();
             self.last_process_sample = None;
-            self.cached_raw_apps = (Vec::new(), 0);
+            self.cached_apps = (Vec::new(), 0);
         } else {
             if persisted.session_rx > self.session_rx {
                 self.session_rx = persisted.session_rx;
@@ -305,7 +315,10 @@ impl NetworkBackend {
         let interfaces = query_interfaces()?;
         let now = Instant::now();
         let mut snapshot = self.sample_from_interfaces(&interfaces, now);
-        self.physical_link = query_physical_link_info(snapshot.primary_medium);
+        self.physical_link = query_physical_link_info_for_luid(
+            snapshot.primary_medium,
+            snapshot.primary_interface_luid(),
+        );
         snapshot.physical_link = self.physical_link.clone();
 
         let need_process_sample = match self.last_process_sample {
@@ -314,14 +327,19 @@ impl NetworkBackend {
         };
 
         if need_process_sample {
-            self.cached_raw_apps = self.process_tracker.sample(now);
+            self.cached_apps = self.process_tracker.sample(now);
             self.last_process_sample = Some(now);
         }
 
         // Always clone the pre-reconciliation raw output and reconcile fresh
         // against this tick's network totals, avoiding directional-mismatch distortion!
-        let (mut active_apps, active_conns) = self.cached_raw_apps.clone();
-        crate::process::reconcile_app_bandwidth(&mut active_apps, snapshot.rx_bps, snapshot.tx_bps);
+        let (mut active_apps, active_conns) = self.cached_apps.clone();
+        crate::process::estimate_app_bandwidth_by_sockets(
+            &mut active_apps,
+            snapshot.rx_bps,
+            snapshot.tx_bps,
+        );
+        self.cached_apps = (active_apps.clone(), active_conns);
         snapshot.active_apps = active_apps;
         snapshot.active_connections_count = active_conns;
 
@@ -359,6 +377,7 @@ impl NetworkBackend {
         let mut total_delta_out = 0u64;
 
         let mut per_interface = Vec::new();
+        let mut per_interface_deltas = Vec::new();
 
         for iface in interfaces {
             seen_luids.insert(iface.luid);
@@ -397,6 +416,7 @@ impl NetworkBackend {
 
             total_delta_in += delta_in;
             total_delta_out += delta_out;
+            per_interface_deltas.push((iface.luid, delta_in, delta_out));
 
             let iface_rx_bps = if elapsed_secs > 0.0 {
                 delta_in as f64 / elapsed_secs
@@ -427,6 +447,9 @@ impl NetworkBackend {
                 .partial_cmp(&sum_a)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        let active_luids: HashSet<_> = per_interface.iter().map(|i| i.luid).collect();
+        self.per_interface_chart_history
+            .retain(|luid, _| active_luids.contains(luid));
 
         // Count active interfaces: those with non-zero traffic (> 10 B/s) OR if none, the connected physical adapters
         let active_traffic_count = per_interface
@@ -460,13 +483,13 @@ impl NetworkBackend {
             })
             .or_else(|| per_interface.first());
 
-        let (primary_medium, mut primary_name) = match primary {
-            Some(p) => (p.medium, p.name.clone()),
-            None => (InterfaceMedium::Other, "Network".to_string()),
+        let (primary_medium, primary_luid, mut primary_name) = match primary {
+            Some(p) => (p.medium, Some(p.luid), p.name.clone()),
+            None => (InterfaceMedium::Other, None, "Network".to_string()),
         };
 
         if primary_medium == InterfaceMedium::Wifi
-            && let Some(ssid) = query_cached_wifi_ssid()
+            && let Some(ssid) = query_cached_wifi_phy_for_luid(primary_luid).map(|w| w.ssid)
         {
             primary_name = ssid;
         }
@@ -517,6 +540,7 @@ impl NetworkBackend {
         let slot_ns = crate::SAMPLING_INTERVAL_MS * 1_000_000;
         if elapsed_ns > 5_000_000_000 {
             self.history.clear();
+            self.per_interface_chart_history.clear();
             self.chart_peak_rx = 0;
             self.chart_peak_tx = 0;
             self.accumulator.reset();
@@ -553,6 +577,18 @@ impl NetworkBackend {
                 self.chart_peak_rx = self.chart_peak_rx.max(bucket.rx_bps);
                 self.chart_peak_tx = self.chart_peak_tx.max(bucket.tx_bps);
             }
+            for (luid, delta_rx, delta_tx) in per_interface_deltas {
+                let interface_history = self.per_interface_chart_history.entry(luid).or_default();
+                for bucket in interface_history
+                    .accumulator
+                    .push_sample(elapsed_ns, delta_rx, delta_tx, slot_ns)
+                {
+                    if interface_history.samples.len() >= HISTORY_CAPACITY {
+                        interface_history.samples.pop_front();
+                    }
+                    interface_history.samples.push_back(bucket);
+                }
+            }
             self.rolling_window
                 .record_sample(now, self.session_rx, self.session_tx);
         } else {
@@ -562,8 +598,8 @@ impl NetworkBackend {
         }
 
         let (rx_bps, tx_bps) = self.rolling_window.current_rate(now);
-        let rx_bps_500ms = self.history.back().map(|s| s.rx_bps).unwrap_or(0);
-        let tx_bps_500ms = self.history.back().map(|s| s.tx_bps).unwrap_or(0);
+        let rx_bps_250ms = self.history.back().map(|s| s.rx_bps).unwrap_or(0);
+        let tx_bps_250ms = self.history.back().map(|s| s.tx_bps).unwrap_or(0);
 
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -571,18 +607,23 @@ impl NetworkBackend {
             .unwrap_or(0);
         let session_duration_secs = now_unix.saturating_sub(self.session_start_unix);
 
+        let milestones_before = self.daily_usage.notified_milestones.clone();
         let budget_snap = crate::budget::calculate_budget_snapshot(
             &self.budget_config,
             &mut self.daily_usage,
             today_ymd,
         );
+        if self.daily_usage.notified_milestones != milestones_before {
+            self.daily_dirty
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
 
         NetworkSnapshot {
             generation: self.generation,
             rx_bps,
             tx_bps,
-            rx_bps_500ms,
-            tx_bps_500ms,
+            rx_bps_250ms,
+            tx_bps_250ms,
             instant_rx_bps,
             instant_tx_bps,
             session_rx: self.session_rx,
@@ -595,6 +636,11 @@ impl NetworkBackend {
             session_peak_tx_bps: self.peak_tx,
             timestamp: now,
             per_interface,
+            per_interface_history: self
+                .per_interface_chart_history
+                .iter()
+                .map(|(luid, history)| (*luid, history.samples.iter().copied().collect()))
+                .collect(),
             history: self.history.iter().copied().collect(),
             primary_medium,
             primary_name,
@@ -607,9 +653,7 @@ impl NetworkBackend {
     }
 
     pub fn collect_diagnostics_snapshot(&mut self) -> crate::export::DiagnosticsSnapshot {
-        if self.cached_raw_apps.0.is_empty() {
-            self.cached_raw_apps = self.process_tracker.sample(Instant::now());
-        }
+        let _ = self.sample();
 
         if self.latency.latency_ms.is_none() && self.latency.state == LatencyState::Unavailable {
             let (snap, res) = sample_latency_snapshot_dual_stack(

@@ -192,13 +192,23 @@ pub struct DailyUsageRecord {
     pub total_bytes: u64,
 }
 
-/// Realtime active application network attribution record.
+/// Estimated active-application traffic attribution based on open socket counts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessAttributionRecord {
     pub process_name: String,
+    /// Estimated download rate in bytes per second.
     pub download_bps: u64,
+    /// Estimated upload rate in bytes per second.
     pub upload_bps: u64,
+    /// Number of active sockets assigned to this application.
     pub socket_count: u32,
+    /// True because the platform APIs used here expose socket ownership, not per-process byte totals.
+    #[serde(default = "process_attribution_is_estimated")]
+    pub is_estimate: bool,
+}
+
+const fn process_attribution_is_estimated() -> bool {
+    true
 }
 
 /// Canonical root diagnostic snapshot model (`schema_version = 1`).
@@ -261,7 +271,8 @@ fn parse_date_str(s: &str) -> Option<(i32, u32, u32)> {
 
 /// Pads a 90-day daily usage history window with zero-byte records for missing dates.
 ///
-/// Returns exactly `count` continuous chronological records ending on `end_date`.
+/// Returns exactly `count` continuous chronological records ending on `end_date`,
+/// including leading zero-usage days when the history is new or sparse.
 pub fn zero_fill_history(
     entries: &[DailyUsageEntry],
     end_date: &str,
@@ -285,12 +296,6 @@ pub fn zero_fill_history(
         d = pd;
     }
 
-    // Earliest start date is the last element of dates_rev
-    let start_date = dates_rev
-        .last()
-        .cloned()
-        .unwrap_or_else(|| end_date.to_string());
-
     // Reverse to chronological order (earliest -> newest)
     for date in dates_rev.into_iter().rev() {
         let (rx, tx) = map.get(date.as_str()).copied().unwrap_or((0, 0));
@@ -301,6 +306,11 @@ pub fn zero_fill_history(
             total_bytes: rx.saturating_add(tx),
         });
     }
+
+    let start_date = records
+        .first()
+        .map(|r| r.date.clone())
+        .unwrap_or_else(|| end_date.to_string());
 
     (records, start_date)
 }
@@ -347,7 +357,7 @@ pub fn export_to_csv(snapshot: &DiagnosticsSnapshot) -> String {
         snapshot.history_metadata.timezone
     ));
     out.push_str(&format!(
-        "# Privacy: Network Identifiers = {}, Wi-Fi Identifiers = {}, Process Names = {}\r\n",
+        "# Privacy: Network Identifiers = {}; Wi-Fi Identifiers = {}; Process Names = {}\r\n",
         snapshot.privacy.contains_network_identifiers,
         snapshot.privacy.contains_wifi_identifiers,
         snapshot.privacy.contains_process_names
@@ -370,9 +380,9 @@ pub fn export_to_csv(snapshot: &DiagnosticsSnapshot) -> String {
         ));
         out.push_str(&format!(
             "# IP: {} | Gateway: {} | DNS: {}\r\n",
-            adapter.ipv4_addresses.join(", "),
-            adapter.default_gateways.join(", "),
-            adapter.dns_servers.join(", ")
+            adapter.ipv4_addresses.join("; "),
+            adapter.default_gateways.join("; "),
+            adapter.dns_servers.join("; ")
         ));
     } else {
         out.push_str("# Active Adapter: None (Offline / No default gateway)\r\n");
@@ -400,9 +410,21 @@ pub fn export_to_csv(snapshot: &DiagnosticsSnapshot) -> String {
         format_bytes(snapshot.session.bytes_total)
     ));
 
+    if let Some(cap) = snapshot.session.budget_cap_bytes
+        && cap > 0
+    {
+        out.push_str(&format!(
+            "# Budget: {} / {} ({}%) | {} days remaining\r\n",
+            format_bytes(snapshot.session.budget_consumed_bytes),
+            format_bytes(cap),
+            snapshot.session.budget_usage_pct,
+            snapshot.session.budget_days_remaining
+        ));
+    }
+
     // Tabular Section: RFC 4180 Table
     out.push_str(
-        "Date,Download_Bytes,Upload_Bytes,Total_Bytes,Download_Human,Upload_Human,Total_Human\r\n",
+        "Date (YYYY-MM-DD),Download_Bytes,Upload_Bytes,Total_Bytes,Download_Human,Upload_Human,Total_Human\r\n",
     );
 
     for record in &snapshot.history {
@@ -432,7 +454,7 @@ mod tests {
     fn sample_snapshot() -> DiagnosticsSnapshot {
         DiagnosticsSnapshot {
             schema_version: DIAGNOSTICS_SCHEMA_VERSION,
-            app_version: "0.9.0".to_string(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             architecture: Architecture::X64,
             snapshot_timestamp_utc: "2026-10-03T08:30:00Z".to_string(),
             export_generated_at_utc: "2026-10-03T08:30:05Z".to_string(),
@@ -519,6 +541,7 @@ mod tests {
                 download_bps: 15_000_000,
                 upload_bps: 1_200_000,
                 socket_count: 14,
+                is_estimate: true,
             }],
         }
     }
@@ -556,7 +579,8 @@ mod tests {
         let csv = export_to_csv(&snap);
         assert!(csv.starts_with("# CSV Dialect: netflow-diagnostics-v1\r\n"));
         assert!(csv.contains("# Net Flow Diagnostic Report - schema_version: 1\r\n"));
-        assert!(csv.contains("# Privacy: Network Identifiers = true, Wi-Fi Identifiers = true, Process Names = true\r\n"));
+        assert!(csv.contains("# Privacy: Network Identifiers = true; Wi-Fi Identifiers = true; Process Names = true\r\n"));
+        assert!(csv.contains("Date (YYYY-MM-DD),Download_Bytes,Upload_Bytes,Total_Bytes,Download_Human,Upload_Human,Total_Human\r\n"));
     }
 
     #[test]
@@ -617,27 +641,49 @@ mod tests {
         ];
 
         let (records, start_date) = zero_fill_history(&entries, "2026-10-03", 5);
+        // The requested window remains fully zero-filled before the first active day.
         assert_eq!(records.len(), 5);
         assert_eq!(records[0].date, "2026-09-29");
         assert_eq!(records[0].total_bytes, 0);
-
         assert_eq!(records[1].date, "2026-09-30");
         assert_eq!(records[1].total_bytes, 0);
-
         assert_eq!(records[2].date, "2026-10-01");
         assert_eq!(records[2].download_bytes, 100);
         assert_eq!(records[2].upload_bytes, 50);
         assert_eq!(records[2].total_bytes, 150);
-
         assert_eq!(records[3].date, "2026-10-02");
         assert_eq!(records[3].total_bytes, 0);
-
         assert_eq!(records[4].date, "2026-10-03");
         assert_eq!(records[4].download_bytes, 500);
         assert_eq!(records[4].upload_bytes, 200);
         assert_eq!(records[4].total_bytes, 700);
 
         assert_eq!(start_date, "2026-09-29");
+
+        // Edge case: all zero entries
+        let empty_entries = vec![];
+        let (empty_records, empty_start) = zero_fill_history(&empty_entries, "2026-10-03", 5);
+        assert_eq!(empty_records.len(), 5);
+        assert_eq!(empty_records[0].date, "2026-09-29");
+        assert_eq!(empty_records[4].date, "2026-10-03");
+        assert_eq!(empty_start, "2026-09-29");
+    }
+
+    #[test]
+    fn test_csv_budget_active_and_disabled() {
+        let mut snap = sample_snapshot();
+        snap.session.budget_cap_bytes = None;
+        let csv_unmetered = export_to_csv(&snap);
+        assert!(!csv_unmetered.contains("# Budget:"));
+
+        snap.session.budget_cap_bytes = Some(100_000_000_000);
+        snap.session.budget_consumed_bytes = 45_000_000_000;
+        snap.session.budget_usage_pct = 45;
+        snap.session.budget_days_remaining = 18;
+        let csv_metered = export_to_csv(&snap);
+        assert!(
+            csv_metered.contains("# Budget: 41.91 GB / 93.13 GB (45%) | 18 days remaining\r\n")
+        );
     }
 
     #[test]

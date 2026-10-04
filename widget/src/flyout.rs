@@ -66,8 +66,11 @@ pub struct FlyoutAppItem {
     pub tx_bps: u64,
 }
 
+/// Number of 250 ms samples rendered in the companion flyout (30 seconds).
+pub const SPARKLINE_SAMPLES: usize = net_flow_core::FLYOUT_SPARKLINE_SAMPLES;
+
 /// Immutable telemetry snapshot prepared on the TrayWorker thread for presentation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FlyoutSnapshot {
     pub rx_bps: f64,
     pub tx_bps: f64,
@@ -86,7 +89,34 @@ pub struct FlyoutSnapshot {
     pub budget_cap_bytes: u64,
     pub budget_used_bytes: u64,
     pub active_apps: Vec<FlyoutAppItem>,
-    pub sparkline_history: Vec<(f32, f32)>,
+    pub sparkline_history: [(f32, f32); SPARKLINE_SAMPLES],
+    pub sparkline_count: usize,
+}
+
+impl Default for FlyoutSnapshot {
+    fn default() -> Self {
+        Self {
+            rx_bps: 0.0,
+            tx_bps: 0.0,
+            latency_ms: None,
+            jitter_ms: None,
+            packet_loss_pct: 0.0,
+            latency_health: net_flow_core::backend::LatencyHealth::default(),
+            latency_target_label: String::new(),
+            primary_medium: net_flow_core::backend::InterfaceMedium::default(),
+            physical_link_summary: None,
+            session_rx_bytes: 0,
+            session_tx_bytes: 0,
+            session_duration_secs: 0,
+            budget_usage_pct: None,
+            budget_days_left: None,
+            budget_cap_bytes: 0,
+            budget_used_bytes: 0,
+            active_apps: Vec::new(),
+            sparkline_history: [(0.0, 0.0); SPARKLINE_SAMPLES],
+            sparkline_count: 0,
+        }
+    }
 }
 
 /// Context stored in `GWLP_USERDATA` for the flyout window procedure.
@@ -94,7 +124,7 @@ struct FlyoutContext {
     snapshot: Arc<RwLock<FlyoutSnapshot>>,
     lifecycle: Arc<RwLock<FlyoutLifecycleState>>,
     on_reset: Arc<dyn Fn() + Send + Sync>,
-    on_export: Arc<dyn Fn(HWND) + Send + Sync>,
+    on_export: Arc<dyn Fn(HWND, crate::export_controller::ExportFormat) + Send + Sync>,
     dpi: AtomicU32,
     open_time: Mutex<Instant>,
     hover_button: AtomicU32, // 0 = none, 1 = export, 2 = reset, 3 = close
@@ -330,7 +360,7 @@ pub fn create_flyout_window(
     snapshot: Arc<RwLock<FlyoutSnapshot>>,
     lifecycle: Arc<RwLock<FlyoutLifecycleState>>,
     on_reset: Arc<dyn Fn() + Send + Sync>,
-    on_export: Arc<dyn Fn(HWND) + Send + Sync>,
+    on_export: Arc<dyn Fn(HWND, crate::export_controller::ExportFormat) + Send + Sync>,
 ) -> Result<HWND> {
     unsafe {
         let wc = WNDCLASSEXW {
@@ -804,28 +834,28 @@ fn render_flyout(
         SelectObject(hdc, prev_grid);
         let _ = DeleteObject(grid_pen.into());
 
-        if !snapshot.sparkline_history.is_empty() {
-            let n = snapshot.sparkline_history.len();
-            let mut rx_pts: Vec<POINT> = Vec::with_capacity(n);
-            let mut tx_pts: Vec<POINT> = Vec::with_capacity(n);
+        if snapshot.sparkline_count > 0 {
+            let n = snapshot.sparkline_count.min(SPARKLINE_SAMPLES);
+            let mut rx_pts = [POINT { x: 0, y: 0 }; SPARKLINE_SAMPLES];
+            let mut tx_pts = [POINT { x: 0, y: 0 }; SPARKLINE_SAMPLES];
 
-            for (i, (rx_norm, tx_norm)) in snapshot.sparkline_history.iter().enumerate() {
-                let px = chart_l + ((i as i32 * chart_w) / (n.max(2) - 1) as i32);
-                let py_rx = chart_b - (*rx_norm * chart_ch as f32).round() as i32;
-                let py_tx = chart_b - (*tx_norm * chart_ch as f32).round() as i32;
-                rx_pts.push(POINT { x: px, y: py_rx });
-                tx_pts.push(POINT { x: px, y: py_tx });
+            for (i, &(rx_norm, tx_norm)) in snapshot.sparkline_history[..n].iter().enumerate() {
+                let px = chart_l + ((i as i32 * chart_w) / (SPARKLINE_SAMPLES - 1) as i32);
+                let py_rx = chart_b - (rx_norm * chart_ch as f32).round() as i32;
+                let py_tx = chart_b - (tx_norm * chart_ch as f32).round() as i32;
+                rx_pts[i] = POINT { x: px, y: py_rx };
+                tx_pts[i] = POINT { x: px, y: py_tx };
             }
 
             let rx_pen = CreatePen(PS_SOLID, 2, rx_green);
             let prev_rx = SelectObject(hdc, rx_pen.into());
-            let _ = Polyline(hdc, &rx_pts);
+            let _ = Polyline(hdc, &rx_pts[..n]);
             SelectObject(hdc, prev_rx);
             let _ = DeleteObject(rx_pen.into());
 
             let tx_pen = CreatePen(PS_SOLID, 1, tx_blue);
             let prev_tx = SelectObject(hdc, tx_pen.into());
-            let _ = Polyline(hdc, &tx_pts);
+            let _ = Polyline(hdc, &tx_pts[..n]);
             SelectObject(hdc, prev_tx);
             let _ = DeleteObject(tx_pen.into());
         }
@@ -864,7 +894,10 @@ fn render_flyout(
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
 
-        if let Some(pct) = snapshot.budget_usage_pct {
+        if let Some(pct) = snapshot
+            .budget_usage_pct
+            .filter(|_| snapshot.budget_cap_bytes > 0)
+        {
             let cap_str = net_flow_core::format::format_bytes(snapshot.budget_cap_bytes);
             let used_str = net_flow_core::format::format_bytes(snapshot.budget_used_bytes);
             let days_str = snapshot
@@ -961,7 +994,7 @@ fn render_flyout(
         SetTextColor(hdc, text_muted);
         gdi_draw_text(
             hdc,
-            "TOP NETWORK CONSUMERS",
+            "APP TRAFFIC ESTIMATES",
             &mut app_lbl,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
@@ -976,7 +1009,7 @@ fn render_flyout(
             SetTextColor(hdc, text_secondary);
             gdi_draw_text(
                 hdc,
-                "No per-process network activity detected",
+                "No active socket owners detected",
                 &mut empty_rc,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
@@ -1360,7 +1393,33 @@ unsafe extern "system" fn flyout_wndproc(
                         .unwrap_or(false);
 
                     if export_clicked {
-                        (ctx.on_export)(hwnd);
+                        let export_rc = ctx.export_rect.lock().map(|r| *r).unwrap_or_default();
+                        let mut menu_pt = POINT {
+                            x: export_rc.left,
+                            y: export_rc.top,
+                        };
+                        let _ = ClientToScreen(hwnd, &mut menu_pt);
+
+                        if let Ok(hmenu) = CreatePopupMenu() {
+                            let _ = AppendMenuW(hmenu, MF_STRING, 1, w!("Export as CSV (.csv)..."));
+                            let _ =
+                                AppendMenuW(hmenu, MF_STRING, 2, w!("Export as JSON (.json)..."));
+                            let cmd = TrackPopupMenuEx(
+                                hmenu,
+                                (TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD).0,
+                                menu_pt.x,
+                                menu_pt.y,
+                                hwnd,
+                                None,
+                            );
+                            let _ = DestroyMenu(hmenu);
+
+                            if cmd.0 == 1 {
+                                (ctx.on_export)(hwnd, crate::export_controller::ExportFormat::Csv);
+                            } else if cmd.0 == 2 {
+                                (ctx.on_export)(hwnd, crate::export_controller::ExportFormat::Json);
+                            }
+                        }
                     } else if reset_clicked {
                         (ctx.on_reset)();
                         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1601,7 +1660,8 @@ mod tests {
                     rx_bps: 1000,
                     tx_bps: 500,
                 }],
-                sparkline_history: vec![(0.5, 0.2); 30],
+                sparkline_history: [(0.5, 0.2); SPARKLINE_SAMPLES],
+                sparkline_count: SPARKLINE_SAMPLES,
             };
             *snapshot_store.write_safe() = snap;
         }
@@ -1609,6 +1669,15 @@ mod tests {
         let final_snap = snapshot_store.read_safe();
         assert_eq!(final_snap.session_duration_secs, 99);
         assert_eq!(final_snap.active_apps.len(), 1);
-        assert_eq!(final_snap.sparkline_history.len(), 30);
+        assert_eq!(final_snap.sparkline_count, SPARKLINE_SAMPLES);
+    }
+
+    #[test]
+    fn test_flyout_snapshot_unmetered_budget_omitted() {
+        let snap = FlyoutSnapshot::default();
+        assert_eq!(snap.budget_usage_pct, None);
+        assert_eq!(snap.budget_cap_bytes, 0);
+        let active_budget = snap.budget_usage_pct.filter(|_| snap.budget_cap_bytes > 0);
+        assert!(active_budget.is_none());
     }
 }

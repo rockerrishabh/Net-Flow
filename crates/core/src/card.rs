@@ -1,10 +1,9 @@
 use crate::alerts::BandwidthAlertConfig;
 use crate::backend::{
-    InterfaceMedium, InterfaceSample, LatencySnapshot, NetworkSnapshot, PhysicalLinkInfo,
+    HistorySample, InterfaceMedium, InterfaceSample, LatencySnapshot, NetworkSnapshot,
+    PhysicalLinkInfo,
 };
-use crate::chart::{
-    GraphStyle, ThemeMode, render_idle_unified_chart_data_uri, render_unified_chart_data_uri,
-};
+use crate::chart::{GraphStyle, ThemeMode, render_unified_chart_data_uri};
 use crate::format::{SpeedUnit, format_bandwidth, format_bandwidth_with_unit, format_bytes};
 use crate::icons;
 use serde::{Deserialize, Serialize};
@@ -114,6 +113,17 @@ fn selected_adapter<'a>(
             .iter()
             .find(|iface| iface.luid == luid)
     })
+}
+
+fn chart_history<'a>(snapshot: &'a NetworkSnapshot, config: &WidgetConfig) -> &'a [HistorySample] {
+    match selected_adapter(snapshot, config) {
+        Some(iface) => snapshot
+            .per_interface_history
+            .get(&iface.luid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        None => &snapshot.history,
+    }
 }
 
 /// Visual layout budget and typography sizing for each widget form factor (Small, Medium, Large).
@@ -493,13 +503,16 @@ pub fn format_card_latency_header(latency: &LatencySnapshot, size: &str) -> Stri
 }
 
 /// Header: medium glyph, interface name, live latency + connection count, and settings button.
-fn header_row(snapshot: &NetworkSnapshot, size: &str) -> Value {
+fn header_row(snapshot: &NetworkSnapshot, config: &WidgetConfig, size: &str) -> Value {
     let active_count = if snapshot.active_connections_count > 0 {
         snapshot.active_connections_count
     } else {
         snapshot.active_apps.len()
     };
 
+    let selected = selected_adapter(snapshot, config);
+    let medium = selected.map_or(snapshot.primary_medium, |iface| iface.medium);
+    let name = selected.map_or(snapshot.primary_name.as_str(), |iface| iface.name.as_str());
     let latency_text = format_card_latency_header(&snapshot.latency, size);
     let status_text = format!("{} • {} conns", latency_text, active_count);
 
@@ -508,9 +521,9 @@ fn header_row(snapshot: &NetworkSnapshot, size: &str) -> Value {
         "spacing": "None",
         "columns": [
             glyph_column(
-                medium_glyph(snapshot.primary_medium),
+                medium_glyph(medium),
                 16,
-                snapshot.primary_medium.label(),
+                medium.label(),
                 "None"
             ),
             {
@@ -521,7 +534,7 @@ fn header_row(snapshot: &NetworkSnapshot, size: &str) -> Value {
                 "items": [
                     {
                         "type": "TextBlock",
-                        "text": truncate_name(&snapshot.primary_name, 22),
+                        "text": truncate_name(name, 22),
                         "size": "Default",
                         "weight": "Bolder",
                         "wrap": false
@@ -645,13 +658,12 @@ fn metrics_row(snapshot: &NetworkSnapshot, config: &WidgetConfig, value_size: &s
     let display_tx_bps = selected.map_or(snapshot.tx_bps, |iface| iface.tx_bps);
 
     let window_samples = crate::history_samples_for_secs(config.chart_window);
-    // The chart history is aggregate traffic. For an adapter view, show the current
-    // adapter rate as its peak rather than incorrectly labeling the aggregate peak.
-    let (window_peak_rx, window_peak_tx) = if selected.is_some() {
-        (display_rx_bps, display_tx_bps)
-    } else {
-        snapshot.chart_window_peak(window_samples)
-    };
+    let (window_peak_rx, window_peak_tx) = snapshot.chart_window_peak_for(
+        chart_history(snapshot, config),
+        window_samples,
+        display_rx_bps,
+        display_tx_bps,
+    );
 
     json!({
         "type": "ColumnSet",
@@ -686,28 +698,13 @@ fn chart_element(
     let resolved_theme = config.theme.resolve();
     let graph_style = config.graph_style;
 
-    // O(1) idle bypass: if both incremental peaks across the entire history buffer are 0,
-    // and there is no latency to draw, we are guaranteed that every sample in any chart
-    // window is empty. Directly fetch the precomputed idle chart from the immutable OnceLock cache.
-    let uri = if snapshot.peak_rx_bps == 0.0
-        && snapshot.peak_tx_bps == 0.0
-        && snapshot.latency.latency_ms.is_none()
-    {
-        render_idle_unified_chart_data_uri(
-            chart_size,
-            config.chart_window,
-            resolved_theme,
-            graph_style,
-        )
-    } else {
-        render_unified_chart_data_uri(
-            &snapshot.history,
-            chart_size,
-            config.chart_window,
-            resolved_theme,
-            graph_style,
-        )
-    };
+    let uri = render_unified_chart_data_uri(
+        chart_history(snapshot, config),
+        chart_size,
+        config.chart_window,
+        resolved_theme,
+        graph_style,
+    );
     if uri.is_empty() {
         return Vec::new();
     }
@@ -790,6 +787,13 @@ fn apps_section(snapshot: &NetworkSnapshot, config: &WidgetConfig, layout: &Layo
                     "text": "Active apps",
                     "size": "Small",
                     "weight": "Bolder",
+                    "wrap": false
+                },
+                {
+                    "type": "TextBlock",
+                    "text": "Rates estimated by open socket counts",
+                    "size": "Small",
+                    "isSubtle": true,
                     "wrap": false
                 }
             ]
@@ -1005,7 +1009,7 @@ fn session_row(snapshot: &NetworkSnapshot) -> Value {
 
 fn build_card(snapshot: &NetworkSnapshot, config: &WidgetConfig, layout: &Layout) -> Value {
     let mut body: Vec<Value> = vec![
-        header_row(snapshot, layout.chart_size),
+        header_row(snapshot, config, layout.chart_size),
         metrics_row(snapshot, config, layout.value_size),
     ];
 
@@ -1426,6 +1430,13 @@ pub fn build_adaptive_card_template(size: &str) -> String {
                                     "size": "Default",
                                     "weight": "Bolder",
                                     "wrap": false
+                                },
+                                {
+                                    "type": "TextBlock",
+                                    "text": "Rates estimated by open socket counts",
+                                    "size": "Small",
+                                    "isSubtle": true,
+                                    "wrap": false
                                 }
                             ]
                         },
@@ -1590,35 +1601,22 @@ pub fn build_adaptive_card_data(
     let display_name = selected.map_or(snapshot.primary_name.as_str(), |iface| iface.name.as_str());
 
     let window_samples = crate::history_samples_for_secs(config.chart_window);
-    // The chart history is aggregate traffic. For an adapter view, show the current
-    // adapter rate as its peak rather than incorrectly labeling the aggregate peak.
-    let (window_peak_rx, window_peak_tx) = if selected.is_some() {
-        (display_rx_bps, display_tx_bps)
-    } else {
-        snapshot.chart_window_peak(window_samples)
-    };
+    let (window_peak_rx, window_peak_tx) = snapshot.chart_window_peak_for(
+        chart_history(snapshot, config),
+        window_samples,
+        display_rx_bps,
+        display_tx_bps,
+    );
 
     let resolved_theme = config.theme.resolve();
     let graph_style = config.graph_style;
-    let chart_url = if snapshot.peak_rx_bps == 0.0
-        && snapshot.peak_tx_bps == 0.0
-        && snapshot.latency.latency_ms.is_none()
-    {
-        render_idle_unified_chart_data_uri(
-            layout.chart_size,
-            config.chart_window,
-            resolved_theme,
-            graph_style,
-        )
-    } else {
-        render_unified_chart_data_uri(
-            &snapshot.history,
-            layout.chart_size,
-            config.chart_window,
-            resolved_theme,
-            graph_style,
-        )
-    };
+    let chart_url = render_unified_chart_data_uri(
+        chart_history(snapshot, config),
+        layout.chart_size,
+        config.chart_window,
+        resolved_theme,
+        graph_style,
+    );
 
     let total_apps = snapshot.active_apps.len();
     let has_active_apps = total_apps > 0 && layout.apps_collapsed > 0;
@@ -1901,15 +1899,13 @@ pub fn build_settings_card(current_config: &WidgetConfig) -> String {
     build_settings_card_for_size(current_config, "Medium", 0, &NetworkSnapshot::default())
 }
 
-/// Builds a size-optimized settings card template.
-///
-/// Small widgets receive a simplified 2-column layout to remain accessible within 160px height,
-/// while Medium and Large widgets provide full speed unit and chart window controls.
+/// Builds a settings card for the active widget size. The settings flyout uses a
+/// single-column layout for Small widgets so controls remain usable in the narrow host.
 pub fn build_settings_card_for_size(
     current_config: &WidgetConfig,
-    _size: &str,
+    size: &str,
     _session_duration_secs: u64,
-    _snapshot: &NetworkSnapshot,
+    snapshot: &NetworkSnapshot,
 ) -> String {
     let header = json!({
         "type": "ColumnSet",
@@ -1995,6 +1991,33 @@ pub fn build_settings_card_for_size(
         ]
     }));
 
+    let selected_adapter = current_config
+        .selected_adapter_luid
+        .map(|luid| luid.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+    let mut adapter_choices = vec![json!({ "title": "All adapters", "value": "auto" })];
+    for iface in &snapshot.per_interface {
+        let value = iface.luid.to_string();
+        if !adapter_choices
+            .iter()
+            .any(|choice| choice["value"].as_str() == Some(value.as_str()))
+        {
+            adapter_choices.push(json!({
+                "title": format!("{} · {}", iface.name, iface.medium.label()),
+                "value": value
+            }));
+        }
+    }
+    body.push(json!({
+        "type": "Input.ChoiceSet",
+        "id": "adapter_luid",
+        "label": "Network adapter",
+        "style": "compact",
+        "spacing": "Small",
+        "value": selected_adapter,
+        "choices": adapter_choices
+    }));
+
     // Row 2: Graph style and Latency target (2 columns)
     body.push(json!({
         "type": "ColumnSet",
@@ -2018,8 +2041,8 @@ pub fn build_settings_card_for_size(
                         "spacing": "Small",
                         "value": current_config.graph_style.to_str_value(),
                         "choices": [
-                            { "title": "Area (Waveform)", "value": "area" },
-                            { "title": "Bar (Columns)", "value": "bar" }
+                            { "title": "Area", "value": "area" },
+                            { "title": "Bars", "value": "bar" }
                         ]
                     }
                 ]
@@ -2043,9 +2066,9 @@ pub fn build_settings_card_for_size(
                         "spacing": "Small",
                         "value": current_config.latency_target.to_str_value(),
                         "choices": [
-                            { "title": "Auto (Internet/LAN)", "value": "auto" },
-                            { "title": "Internet (1.1.1.1)", "value": "internet" },
-                            { "title": "Gateway (Router)", "value": "gateway" }
+                            { "title": "Auto", "value": "auto" },
+                            { "title": "Internet", "value": "internet" },
+                            { "title": "Gateway", "value": "gateway" }
                         ]
                     }
                 ]
@@ -2053,7 +2076,8 @@ pub fn build_settings_card_for_size(
         ]
     }));
 
-    // Section 3: Bandwidth alerts (3-column inline layout)
+    // Section 3: Bandwidth alerts. Keep all three numeric settings on each
+    // direction row so the form stays short enough for the customization pane.
     body.push(json!({
         "type": "ColumnSet",
         "spacing": "Small",
@@ -2090,7 +2114,20 @@ pub fn build_settings_card_for_size(
                 "items": [
                     {
                         "type": "TextBlock",
-                        "text": "Sustain (s)",
+                        "text": "Sustain",
+                        "size": "Small",
+                        "color": "Subtle",
+                        "wrap": false
+                    }
+                ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [
+                    {
+                        "type": "TextBlock",
+                        "text": "Cool (s)",
                         "size": "Small",
                         "color": "Subtle",
                         "wrap": false
@@ -2112,7 +2149,7 @@ pub fn build_settings_card_for_size(
                     {
                         "type": "Input.Toggle",
                         "id": "alerts_download_enabled",
-                        "title": "Download alert",
+                        "title": "Download",
                         "value": if current_config.alerts.download_enabled && current_config.alerts.enabled { "true" } else { "false" },
                         "valueOn": "true",
                         "valueOff": "false"
@@ -2146,6 +2183,18 @@ pub fn build_settings_card_for_size(
                         "placeholder": "Secs"
                     }
                 ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [{
+                    "type": "Input.Number",
+                    "id": "alert_download_cooldown_secs",
+                    "min": 1,
+                    "max": 86400,
+                    "value": current_config.alerts.download_cooldown(),
+                    "placeholder": "Secs"
+                }]
             }
         ]
     }));
@@ -2162,7 +2211,7 @@ pub fn build_settings_card_for_size(
                     {
                         "type": "Input.Toggle",
                         "id": "alerts_upload_enabled",
-                        "title": "Upload alert",
+                        "title": "Upload",
                         "value": if current_config.alerts.upload_enabled && current_config.alerts.enabled { "true" } else { "false" },
                         "valueOn": "true",
                         "valueOff": "false"
@@ -2196,11 +2245,23 @@ pub fn build_settings_card_for_size(
                         "placeholder": "Secs"
                     }
                 ]
+            },
+            {
+                "type": "Column",
+                "width": 1,
+                "items": [{
+                    "type": "Input.Number",
+                    "id": "alert_upload_cooldown_secs",
+                    "min": 1,
+                    "max": 86400,
+                    "value": current_config.alerts.upload_cooldown(),
+                    "placeholder": "Secs"
+                }]
             }
         ]
     }));
 
-    // Section 4: Data budget & monthly quota (3-column inline layout)
+    // Section 4: Data budget & monthly quota.
     let cap_gb = current_config
         .budget
         .monthly_cap_bytes
@@ -2303,6 +2364,60 @@ pub fn build_settings_card_for_size(
     }));
 
     body.push(json!({
+        "type": "ColumnSet",
+        "spacing": "Small",
+        "columns": [
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [{
+                    "type": "TextBlock",
+                    "text": "Warn at",
+                    "size": "Small",
+                    "color": "Subtle",
+                    "wrap": false
+                }]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [{
+                    "type": "Input.Toggle",
+                    "id": "budget_notify_80",
+                    "title": "80%",
+                    "value": if current_config.budget.notify_80 { "true" } else { "false" },
+                    "valueOn": "true",
+                    "valueOff": "false"
+                }]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [{
+                    "type": "Input.Toggle",
+                    "id": "budget_notify_90",
+                    "title": "90%",
+                    "value": if current_config.budget.notify_90 { "true" } else { "false" },
+                    "valueOn": "true",
+                    "valueOff": "false"
+                }]
+            },
+            {
+                "type": "Column",
+                "width": "stretch",
+                "items": [{
+                    "type": "Input.Toggle",
+                    "id": "budget_notify_100",
+                    "title": "100%",
+                    "value": if current_config.budget.notify_100 { "true" } else { "false" },
+                    "valueOn": "true",
+                    "valueOff": "false"
+                }]
+            }
+        ]
+    }));
+
+    body.push(json!({
         "type": "Input.ChoiceSet",
         "id": "budget_scope",
         "style": "compact",
@@ -2317,9 +2432,39 @@ pub fn build_settings_card_for_size(
         ]
     }));
 
-    body.push(json!({
-        "type": "ActionSet",
-        "spacing": "Medium",
+    // The customization pane has a short fixed height. Remove inter-row
+    // padding from the top-level form rows so controls fit above the card's
+    // top-level Save/Cancel action bar.
+    for element in &mut body {
+        if element["spacing"] == "Small" {
+            element["spacing"] = json!("None");
+        }
+    }
+
+    if size.eq_ignore_ascii_case("small") {
+        let mut compact_body = Vec::new();
+        for element in body {
+            if element["type"] == "ColumnSet" {
+                if let Some(columns) = element["columns"].as_array() {
+                    for column in columns {
+                        if let Some(items) = column["items"].as_array() {
+                            compact_body.extend(items.iter().cloned());
+                        }
+                    }
+                }
+            } else {
+                compact_body.push(element);
+            }
+        }
+        body = compact_body;
+    }
+
+    let card = json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.6",
+        "verticalContentAlignment": "top",
+        "body": body,
         "actions": [
             {
                 "type": "Action.Execute",
@@ -2334,13 +2479,6 @@ pub fn build_settings_card_for_size(
                 "associatedInputs": "none"
             }
         ]
-    }));
-
-    let card = json!({
-        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-        "type": "AdaptiveCard",
-        "version": "1.6",
-        "body": body
     });
 
     serde_json::to_string(&card).unwrap_or_else(|_| "{}".to_string())
@@ -2356,8 +2494,8 @@ mod tests {
         NetworkSnapshot {
             rx_bps: 10485760.0, // 10 MB/s
             tx_bps: 2097152.0,  // 2 MB/s
-            rx_bps_500ms: 10485760,
-            tx_bps_500ms: 2097152,
+            rx_bps_250ms: 10485760,
+            tx_bps_250ms: 2097152,
             instant_rx_bps: 10485760.0,
             instant_tx_bps: 2097152.0,
             session_rx: 104857600,
@@ -2370,12 +2508,13 @@ mod tests {
             session_peak_tx_bps: 5000000.0,
             timestamp: Instant::now(),
             per_interface: vec![],
+            per_interface_history: Default::default(),
             history: vec![
-                HistorySample::from_bps(1000, 500, 500_000_000),
-                HistorySample::from_bps(2000, 1000, 500_000_000),
-                HistorySample::from_bps(5000, 3000, 500_000_000),
-                HistorySample::from_bps(3000, 2000, 500_000_000),
-                HistorySample::from_bps(8000, 4000, 500_000_000),
+                HistorySample::from_bps(1000, 500, 250_000_000),
+                HistorySample::from_bps(2000, 1000, 250_000_000),
+                HistorySample::from_bps(5000, 3000, 250_000_000),
+                HistorySample::from_bps(3000, 2000, 250_000_000),
+                HistorySample::from_bps(8000, 4000, 250_000_000),
             ],
             primary_medium: crate::backend::InterfaceMedium::Wifi,
             primary_name: "Wi-Fi".to_string(),

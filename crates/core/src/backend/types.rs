@@ -115,7 +115,7 @@ pub struct InterfaceSample {
     pub tx_bps: f64,
 }
 
-/// A fixed-duration telemetry sample representing bandwidth across one bucket (e.g. 500ms).
+/// A fixed-duration telemetry sample representing bandwidth across one bucket (normally 250ms).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistorySample {
     /// Bytes received during this sample bucket.
@@ -124,7 +124,7 @@ pub struct HistorySample {
     /// Bytes transmitted during this sample bucket.
     #[serde(default)]
     pub tx_bytes: u64,
-    /// Duration of this bucket in nanoseconds (e.g. 500_000_000 ns for 500ms).
+    /// Duration of this bucket in nanoseconds (normally 250_000_000 ns for 250ms).
     #[serde(default)]
     pub duration_ns: u64,
     /// Average download speed in B/s over this interval.
@@ -180,7 +180,7 @@ impl HistorySample {
 /// User-configurable mode selecting the target endpoint for network latency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LatencyTargetMode {
-    /// Probe public internet (1.1.1.1) when route is available; fallback to Gateway.
+    /// Prefer the local gateway when available; otherwise probe the public internet.
     #[default]
     Auto,
     /// Probe public internet resolver (1.1.1.1).
@@ -411,6 +411,26 @@ pub fn wifi_band(freq_mhz: u32, channel: Option<u32>) -> WifiBand {
         }
     } else {
         WifiBand::Unknown
+    }
+}
+
+/// Converts a Wi-Fi channel center frequency in MHz to its IEEE channel number.
+/// Returns `None` when the frequency is not a recognized 2.4, 5, or 6 GHz channel center.
+pub fn wifi_channel_number(freq_mhz: u32) -> Option<u32> {
+    match freq_mhz {
+        // 2.4 GHz channels 1-13 and the special channel 14.
+        2412..=2472 if (freq_mhz - 2407).is_multiple_of(5) => Some((freq_mhz - 2407) / 5),
+        2484 => Some(14),
+        // 5 GHz WLAN channel centers use 5000 + 5 * channel MHz (channels 32-177).
+        5160..=5885 if (freq_mhz - 5000).is_multiple_of(5) => {
+            let channel = (freq_mhz - 5000) / 5;
+            (32..=177).contains(&channel).then_some(channel)
+        }
+        // 6 GHz uses channel 2 at 5935 MHz, then centers 5955 + 20 MHz steps.
+        // The 20 MHz spacing matters: not every 5 MHz value is a valid channel center.
+        5935 => Some(2),
+        5955..=7115 if (freq_mhz - 5955).is_multiple_of(20) => Some(1 + (freq_mhz - 5955) / 5),
+        _ => None,
     }
 }
 
@@ -679,10 +699,10 @@ pub struct NetworkSnapshot {
     pub rx_bps: f64,
     /// 1-second rolling upload speed in bytes/sec.
     pub tx_bps: f64,
-    /// Download speed of the most recently finished 500ms bucket.
-    pub rx_bps_500ms: u64,
-    /// Upload speed of the most recently finished 500ms bucket.
-    pub tx_bps_500ms: u64,
+    /// Download speed of the most recently finished 250ms bucket.
+    pub rx_bps_250ms: u64,
+    /// Upload speed of the most recently finished 250ms bucket.
+    pub tx_bps_250ms: u64,
     /// Instantaneous download rate over the last raw tick (used for app rate reconciliation).
     pub instant_rx_bps: f64,
     /// Instantaneous upload rate over the last raw tick (used for app rate reconciliation).
@@ -697,6 +717,8 @@ pub struct NetworkSnapshot {
     pub session_peak_tx_bps: f64,
     pub timestamp: Instant,
     pub per_interface: Vec<InterfaceSample>,
+    /// Per-adapter chart samples keyed by interface LUID.
+    pub per_interface_history: std::collections::HashMap<u64, Vec<HistorySample>>,
     pub history: Vec<HistorySample>,
     pub primary_medium: InterfaceMedium,
     pub primary_name: String,
@@ -708,14 +730,39 @@ pub struct NetworkSnapshot {
 }
 
 impl NetworkSnapshot {
+    /// Returns the LUID of the same physical adapter used as the primary display adapter.
+    pub fn primary_interface_luid(&self) -> Option<InterfaceLuid> {
+        self.per_interface
+            .iter()
+            .find(|i| (i.rx_bps + i.tx_bps) > 0.0 && i.category == InterfaceCategory::Physical)
+            .or_else(|| {
+                self.per_interface
+                    .iter()
+                    .find(|i| i.category == InterfaceCategory::Physical)
+            })
+            .or_else(|| self.per_interface.first())
+            .map(|iface| iface.luid)
+    }
+
     /// Returns the maximum download and upload rate observed across the last `sample_count` history samples.
     pub fn chart_window_peak(&self, sample_count: usize) -> (f64, f64) {
-        let count = sample_count.min(self.history.len());
-        let mut max_rx = self.rx_bps;
-        let mut max_tx = self.tx_bps;
+        self.chart_window_peak_for(&self.history, sample_count, self.rx_bps, self.tx_bps)
+    }
+
+    /// Returns the window peak for a supplied history and its current display rates.
+    pub fn chart_window_peak_for(
+        &self,
+        history: &[HistorySample],
+        sample_count: usize,
+        current_rx_bps: f64,
+        current_tx_bps: f64,
+    ) -> (f64, f64) {
+        let count = sample_count.min(history.len());
+        let mut max_rx = current_rx_bps;
+        let mut max_tx = current_tx_bps;
         if count > 0 {
-            let take_from = self.history.len().saturating_sub(count);
-            for s in &self.history[take_from..] {
+            let take_from = history.len().saturating_sub(count);
+            for s in &history[take_from..] {
                 let rx = s.rx_bps as f64;
                 let tx = s.tx_bps as f64;
                 if rx > max_rx {
@@ -736,8 +783,8 @@ impl Default for NetworkSnapshot {
             generation: 1,
             rx_bps: 0.0,
             tx_bps: 0.0,
-            rx_bps_500ms: 0,
-            tx_bps_500ms: 0,
+            rx_bps_250ms: 0,
+            tx_bps_250ms: 0,
             instant_rx_bps: 0.0,
             instant_tx_bps: 0.0,
             session_rx: 0,
@@ -750,6 +797,7 @@ impl Default for NetworkSnapshot {
             session_peak_tx_bps: 0.0,
             timestamp: Instant::now(),
             per_interface: Vec::new(),
+            per_interface_history: std::collections::HashMap::new(),
             history: Vec::new(),
             primary_medium: InterfaceMedium::Other,
             primary_name: "Network".to_string(),

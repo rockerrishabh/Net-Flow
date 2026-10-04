@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::types::HistorySample;
 
-/// Accumulates measurement intervals and slices them into discrete buckets (default 500ms).
+/// Accumulates measurement intervals and slices them into discrete buckets (normally 250ms).
 ///
 /// Because timer ticks on Windows can have minor jitter (e.g. 485ms or 515ms),
 /// this distributes bytes proportionally across bucket boundaries so chart points
@@ -265,11 +265,40 @@ pub fn compute_delta(prev: u64, curr: u64) -> u64 {
     curr.saturating_sub(prev)
 }
 
-/// Discontinuity-aware counter delta evaluation.
+/// Maximum plausible single-tick byte delta for rollover validation (~500 MB / ~4 Gbps in 1s).
+pub const MAX_ROLLOVER_DELTA: u64 = 500_000_000;
+
+/// Discontinuity- and rollover-aware counter delta evaluation.
 ///
-/// Returns None when `curr < prev` (indicating a counter reset, interface restart,
-/// driver reload, machine resume, or counter wrap). When None is returned, 0 bytes
-/// should be attributed to this tick rather than erroneously adding the current counter value.
+/// Returns:
+/// - `Some(delta)` when `curr >= prev` (normal increasing counter).
+/// - `Some(delta)` when `curr < prev` is a legitimate 32-bit or 64-bit modular rollover
+///   (i.e. `prev` was adjacent to `u32::MAX` or `u64::MAX` and the wrapped delta is within `MAX_ROLLOVER_DELTA`).
+/// - `None` when `curr < prev` represents a genuine counter reset to zero, interface restart,
+///   driver reload, or large backward jump. When `None` is returned, 0 bytes are attributed to
+///   this tick, avoiding massive false spikes, and `curr` establishes the new baseline.
 pub fn counter_delta(prev: u64, curr: u64) -> Option<u64> {
-    if curr < prev { None } else { Some(curr - prev) }
+    if curr >= prev {
+        Some(curr - prev)
+    } else {
+        // 1. Legitimate 32-bit counter rollover check
+        let u32_max = u32::MAX as u64;
+        if prev <= u32_max && prev >= u32_max.saturating_sub(MAX_ROLLOVER_DELTA) {
+            let wrap_delta = (u32_max - prev).saturating_add(curr).saturating_add(1);
+            if wrap_delta <= MAX_ROLLOVER_DELTA {
+                return Some(wrap_delta);
+            }
+        }
+
+        // 2. Legitimate 64-bit counter rollover check
+        if prev >= u64::MAX.saturating_sub(MAX_ROLLOVER_DELTA) {
+            let wrap_delta = (u64::MAX - prev).saturating_add(curr).saturating_add(1);
+            if wrap_delta <= MAX_ROLLOVER_DELTA {
+                return Some(wrap_delta);
+            }
+        }
+
+        // 3. Counter reset to zero, interface restart, adapter reload, or discontinuity
+        None
+    }
 }

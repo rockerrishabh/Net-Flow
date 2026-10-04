@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use net_flow_core::backend::{NetworkBackend, NetworkSnapshot};
 use net_flow_core::card::load_user_config;
 use net_flow_core::{
-    BandwidthAlertConfig, BandwidthAlertEngine, format_bandwidth, query_physical_link_info,
-    sample_latency_snapshot_dual_stack,
+    BandwidthAlertConfig, BandwidthAlertEngine, format_bandwidth,
+    query_physical_link_info_for_luid, sample_latency_snapshot_dual_stack,
 };
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WAIT_OBJECT_0, WPARAM,
@@ -290,6 +290,9 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
     let mut next_sample = Instant::now() + sample_period;
     let mut last_persist = Instant::now();
     let mut last_latency = Instant::now() - latency_period;
+    let mut last_settings_reload = Instant::now();
+    let mut smoothed_peak = 1024.0_f32;
+    let mut last_peak_update = Instant::now();
 
     while running.load(Ordering::SeqCst) {
         let now = Instant::now();
@@ -305,6 +308,8 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
                     b.reset_session();
                     let s = b.sample().unwrap_or_default();
                     *state.latest_snapshot.write_safe() = s;
+                    smoothed_peak = 1024.0_f32;
+                    last_peak_update = Instant::now();
                     state.ui_dirty.store(true, Ordering::SeqCst);
                 }
             }
@@ -316,16 +321,30 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
             break;
         }
 
+        if last_settings_reload.elapsed() >= Duration::from_secs(1) {
+            let user_cfg = load_user_config();
+            state
+                .backend
+                .lock_safe()
+                .update_budget_config(user_cfg.budget);
+            *state.alert_config.lock_safe() = net_flow_core::load_alert_config();
+            last_settings_reload = Instant::now();
+        }
+
         // 1. Dual-Stack Latency Probing & Physical Link every 2s
         if last_latency.elapsed() >= latency_period {
             let user_cfg = load_user_config();
-            let (prev_ms, primary_medium) = {
+            let (prev_ms, primary_medium, primary_luid) = {
                 let s = state.latest_snapshot.read_safe();
-                (s.latency.latency_ms, s.primary_medium)
+                (
+                    s.latency.latency_ms,
+                    s.primary_medium,
+                    s.primary_interface_luid(),
+                )
             };
             let (snap, probe_res) =
                 sample_latency_snapshot_dual_stack(user_cfg.latency_target, 0, 1000, prev_ms);
-            let phy_link = query_physical_link_info(primary_medium);
+            let phy_link = query_physical_link_info_for_luid(primary_medium, primary_luid);
             {
                 let mut b = state.backend.lock_safe();
                 b.update_latency_probe(snap, probe_res);
@@ -373,32 +392,24 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
 
         if is_flyout_active || state.ui_dirty.load(Ordering::SeqCst) {
             let user_cfg = load_user_config();
-            let sparkline: Vec<(f32, f32)> = {
-                let window = snapshot.history.iter().rev().take(30).collect::<Vec<_>>();
-                let mut peak = 1024.0_f32;
-                for s in &window {
-                    peak = peak.max(s.rx_bps as f32).max(s.tx_bps as f32);
-                }
-                window
-                    .into_iter()
-                    .rev()
-                    .map(|s| {
-                        (
-                            (s.rx_bps as f32 / peak).clamp(0.0, 1.0),
-                            (s.tx_bps as f32 / peak).clamp(0.0, 1.0),
-                        )
-                    })
-                    .collect()
-            };
+            let mut sparkline_history = [(0.0_f32, 0.0_f32); crate::flyout::SPARKLINE_SAMPLES];
+            let elapsed_scale_secs = last_peak_update.elapsed().as_secs_f32();
+            last_peak_update = Instant::now();
+            net_flow_core::update_flyout_sparkline(
+                &snapshot.history,
+                &mut sparkline_history,
+                &mut smoothed_peak,
+                elapsed_scale_secs,
+            );
 
-            let (apps, _) = net_flow_core::query_active_apps();
-            let active_apps = apps
-                .into_iter()
+            let active_apps = snapshot
+                .active_apps
+                .iter()
                 .take(3)
                 .map(|a| crate::flyout::FlyoutAppItem {
-                    name: a.name,
-                    rx_bps: a.rx_bps as u64,
-                    tx_bps: a.tx_bps as u64,
+                    name: a.name.clone(),
+                    rx_bps: a.rx_bps.round() as u64,
+                    tx_bps: a.tx_bps.round() as u64,
                 })
                 .collect();
 
@@ -419,16 +430,30 @@ fn run_tray_worker(running: Arc<AtomicBool>, state: Arc<TrayState>) {
                 session_rx_bytes: snapshot.session_rx,
                 session_tx_bytes: snapshot.session_tx,
                 session_duration_secs: snapshot.session_duration_secs,
-                budget_usage_pct: snapshot.budget.as_ref().map(|b| b.usage_pct),
-                budget_days_left: snapshot.budget.as_ref().map(|b| b.days_remaining),
-                budget_cap_bytes: snapshot.budget.as_ref().map(|b| b.cap_bytes).unwrap_or(0),
+                budget_usage_pct: snapshot
+                    .budget
+                    .as_ref()
+                    .filter(|b| user_cfg.budget.enabled && b.cap_bytes > 0)
+                    .map(|b| b.usage_pct),
+                budget_days_left: snapshot
+                    .budget
+                    .as_ref()
+                    .filter(|b| user_cfg.budget.enabled && b.cap_bytes > 0)
+                    .map(|b| b.days_remaining),
+                budget_cap_bytes: snapshot
+                    .budget
+                    .as_ref()
+                    .filter(|_| user_cfg.budget.enabled)
+                    .map(|b| b.cap_bytes)
+                    .unwrap_or(0),
                 budget_used_bytes: snapshot
                     .budget
                     .as_ref()
                     .map(|b| b.consumed_bytes)
                     .unwrap_or(0),
                 active_apps,
-                sparkline_history: sparkline,
+                sparkline_history,
+                sparkline_count: crate::flyout::SPARKLINE_SAMPLES,
             };
 
             *state.flyout_snapshot.write_safe() = flyout_snap;
@@ -505,13 +530,9 @@ fn run_tray_ui(state: Arc<TrayState>, quit: Arc<AtomicBool>, tx: mpsc::Sender<is
             reset_session(&reset_state);
         });
         let export_state = Arc::clone(&state);
-        let on_export = Arc::new(move |flyout_hwnd| {
+        let on_export = Arc::new(move |flyout_hwnd, format| {
             let mut b = export_state.backend.lock_safe();
-            crate::export_controller::handle_export_dialog(
-                flyout_hwnd,
-                crate::export_controller::ExportFormat::Csv,
-                &mut b,
-            );
+            crate::export_controller::handle_export_dialog(flyout_hwnd, format, &mut b);
         });
         if let Ok(flyout_hwnd) = crate::flyout::create_flyout_window(
             hinstance,
@@ -605,7 +626,9 @@ unsafe fn update_tooltip(hwnd: HWND) {
             format_bandwidth(tx_bps),
             latency.detailed_display_text(),
         );
-        if let Some(b) = &budget
+        let user_cfg = load_user_config();
+        if user_cfg.budget.enabled
+            && let Some(b) = &budget
             && b.cap_bytes > 0
         {
             let budget_str = format!("Quota: {}% ({}d left)", b.usage_pct, b.days_remaining);

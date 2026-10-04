@@ -6,20 +6,21 @@ permalink: /privacy/
 
 # Privacy Policy for Net Flow
 
-**Last Updated**: September 17, 2026  
+**Last Updated**: October 4, 2026
+
 **Author / Maintainer**: Rishabh Kumar ([admin@rockerrishabh.me](mailto:admin@rockerrishabh.me))
 
 Net Flow is an open-source, non-commercial, individual-maintained network telemetry monitor and native Windows 11 widget. This Privacy Policy outlines how Net Flow operates and explains our strict commitment to user privacy, data minimization, and transparency.
 
 ---
 
-## 1. Summary: 100% Offline & Zero Data Collection
+## 1. Summary: Local Processing & No Telemetry Uploads
 
-Net Flow adheres to a strict **zero-telemetry, zero-collection** policy:
+Net Flow does not upload telemetry or analytics. It reads local network and process metadata to provide monitoring and diagnostics:
 
-- **No Outbound Network Requests**: Net Flow does not send telemetry, analytics, crash reports, or diagnostics over the internet. It makes **zero outbound network connections**.
-- **No Personal Data Collection**: Net Flow does not collect, log, store, or transmit personal identifiers, browsing history, DNS queries, packet contents, IP addresses, or location data.
-- **Local-Only Processing**: All bandwidth computations, telemetry waveform rendering, and process attribution occur exclusively in-memory on your local machine.
+- **No Telemetry Uploads**: Net Flow does not send analytics, crash reports, or diagnostic reports to a server. Its latency monitor sends ICMP echo probes with the fixed payload `NetFlow` to the selected gateway or Cloudflare resolver (`1.1.1.1` / `2606:4700:4700::1111`). An Internet endpoint can observe your public IP address and probe timing; the probes contain no user or application traffic.
+- **Local Network Details**: To display and export diagnostics, Net Flow reads local adapter details such as IP addresses, DNS servers, gateways, Wi-Fi identifiers, and active process names. These are processed and stored locally; diagnostic exports can contain them. Net Flow does not inspect browsing history or packet contents and does not send these details to a server.
+- **Local-Only Processing**: Bandwidth computations, telemetry waveform rendering, and socket-owner estimates occur on your local machine. The app estimates per-app rates by dividing adapter throughput among processes according to their open socket counts; it does not read packet contents.
 
 ---
 
@@ -35,7 +36,7 @@ When running Net Flow on Windows 11, Windows may show Net Flow under **Settings 
 ### Our Guarantee
 - Net Flow **does not track or estimate your geographic location**.
 - Net Flow contains **no GPS code, no geolocation libraries, and no reverse-geocoding calls**.
-- The SSID is read solely to render the human-readable text label in the widget header and is never written to disk or sent anywhere.
+- The SSID is used for the human-readable widget label and physical-link diagnostics. Wi-Fi physical-link data may be saved with local session state. It is not sent to a server; an export may include Wi-Fi identifiers.
 
 ### Running Without Location Permission
 If you prefer not to grant location access:
@@ -49,11 +50,11 @@ If you prefer not to grant location access:
 
 Net Flow persists minimal state locally on your computer to support its widget capabilities:
 
-- **Widget Configuration**: User preferences configured in the card settings (selected speed unit, chart timeframe, and interface filters) are saved locally using standard Windows App SDK widget state storage.
+- **Widget Configuration**: User preferences configured in the card settings (selected speed unit, chart timeframe, selected adapter, alert thresholds and cooldowns, and data budget settings) are saved locally in the Net Flow configuration file under `%LocalAppData%`.
 - **Cumulative Session Counters**: Total bytes sent and received during the current session are saved locally in `%LocalAppData%` so your cumulative totals persist across system reboots or widget reloads.
 - **Diagnostic Logging**: A lightweight, thread-safe diagnostic log (`%TEMP%\netflow_widget.log`) records widget lifecycle events (initialization, activation, shutdown). It is capped at 1 MB, automatically rotates to `.old`, is never transmitted off your machine, and can be deleted at any time.
 - **Inline Reset**: You can clear cumulative session totals at any time by clicking the inline **Reset** button directly on the widget card.
-- **Data Deletion**: Uninstalling the Net Flow package completely removes all associated local settings and session data from your machine.
+- **Data Deletion**: Configuration, session history, and diagnostics logs are stored in local app-data or temporary folders and may remain after uninstall. To remove them, delete `%LocalAppData%\NetFlow` and `%TEMP%\netflow_widget.log` (and its rotated `.old` file).
 
 ---
 

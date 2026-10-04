@@ -6,6 +6,7 @@
 param(
     [switch]$Install,
     [switch]$Uninstall,
+    [switch]$PurgeData,
     [switch]$RemoveCert,
     [switch]$Rebuild,
     [switch]$Status,
@@ -18,6 +19,9 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ExePath = Join-Path $ScriptDir "net-flow.exe"
 $ManifestPath = Join-Path $ScriptDir "AppxManifest.xml"
 $DefaultMsix = Join-Path $ScriptDir "NetFlow.msix"
+$InstallerStatePath = Join-Path (Join-Path $env:LOCALAPPDATA "NetFlow") "installer-trusted-cert-thumbprints.txt"
+$script:GeneratedMsixPath = $null
+$script:GeneratedSigningCertificate = $null
 
 function Show-Header {
     Write-Host "=================================================" -ForegroundColor Cyan
@@ -35,15 +39,15 @@ function Find-SdkTools {
     $sdkBase = "C:\Program Files (x86)\Windows Kits\10\bin"
     if (Test-Path $sdkBase) {
         $sdkDirs = Get-ChildItem $sdkBase -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
-            Sort-Object { [version]$_.Name } -Descending
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+        Sort-Object { [version]$_.Name } -Descending
 
         foreach ($sdkDir in $sdkDirs) {
             $x64Path = Join-Path $sdkDir.FullName "x64"
             if (Test-Path (Join-Path $x64Path "makeappx.exe")) {
                 $tools.MakeAppx = Join-Path $x64Path "makeappx.exe"
                 $tools.SignTool = Join-Path $x64Path "signtool.exe"
-                $tools.MakePri  = Join-Path $x64Path "makepri.exe"
+                $tools.MakePri = Join-Path $x64Path "makepri.exe"
                 break
             }
         }
@@ -99,6 +103,126 @@ function Get-PackagePublisher {
     return "CN=Development"
 }
 
+function Read-XmlFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $settings = New-Object System.Xml.XmlReaderSettings
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $reader = [System.Xml.XmlReader]::Create($Path, $settings)
+    try {
+        $document = New-Object System.Xml.XmlDocument
+        $document.XmlResolver = $null
+        $document.Load($reader)
+        return $document
+    }
+    finally { $reader.Dispose() }
+}
+
+function Get-MsixMetadata {
+    param([Parameter(Mandatory)][string]$Path)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entry = $archive.GetEntry("AppxManifest.xml")
+        if (-not $entry) { throw "The package does not contain a root AppxManifest.xml." }
+        $stream = $entry.Open()
+        try {
+            $reader = [System.Xml.XmlReader]::Create($stream, (New-Object System.Xml.XmlReaderSettings))
+            try {
+                $document = New-Object System.Xml.XmlDocument
+                $document.XmlResolver = $null
+                $document.Load($reader)
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { $stream.Dispose() }
+        $identity = $document.SelectSingleNode("//*[local-name()='Identity']")
+        if (-not $identity) { throw "The package manifest has no Identity element." }
+        return [pscustomobject]@{
+            Name = $identity.GetAttribute("Name")
+            Publisher = $identity.GetAttribute("Publisher")
+            Architecture = $identity.GetAttribute("ProcessorArchitecture")
+        }
+    }
+    finally { $archive.Dispose() }
+}
+
+function Get-PeArchitecture {
+    param([Parameter(Mandatory)][string]$Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $reader = New-Object System.IO.BinaryReader($stream)
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        $stream.Position = $peOffset + 4
+        switch ($reader.ReadUInt16()) {
+            0x8664 { return "x64" }
+            0xAA64 { return "arm64" }
+            0x014c { return "x86" }
+            default { throw "Unsupported executable architecture in $Path." }
+        }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-TrackedCertThumbprints {
+    if (Test-Path $InstallerStatePath) {
+        return @(Get-Content $InstallerStatePath -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Trim().ToUpperInvariant() } | Where-Object { $_ -match '^[A-F0-9]{40}$' } | Select-Object -Unique)
+    }
+    return @()
+}
+
+function Save-TrackedCertThumbprint {
+    param([Parameter(Mandatory)][string]$Thumbprint)
+    $thumbs = @(Get-TrackedCertThumbprints) + $Thumbprint.ToUpperInvariant()
+    $directory = Split-Path -Parent $InstallerStatePath
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $thumbs | Select-Object -Unique | Set-Content -Path $InstallerStatePath -Encoding ascii
+}
+
+function Remove-TrackedCertThumbprints {
+    param([string[]]$Thumbprints = @())
+    $Thumbprints = @($Thumbprints | ForEach-Object { $_.ToUpperInvariant() } | Where-Object { $_ -match '^[A-F0-9]{40}$' } | Select-Object -Unique)
+    if ($Thumbprints.Count -eq 0) { return }
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $scriptText = '$thumbs = @(' + (($Thumbprints | ForEach-Object { "'$_'" }) -join ',') + '); Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue | Where-Object { $thumbs -contains $_.Thumbprint.ToUpperInvariant() } | Remove-Item -Force -ErrorAction Stop'
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($scriptText))
+    if ($isAdmin) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded
+        if ($LASTEXITCODE -ne 0) { throw "Could not remove installer-managed certificates (exit code $LASTEXITCODE)." }
+    }
+    else {
+        $proc = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encoded)
+        if ($proc.ExitCode -ne 0) { throw "Administrator approval did not remove installer-managed certificates (exit code $($proc.ExitCode))." }
+    }
+}
+
+function Invoke-MsixSignatureVerification {
+    param(
+        [Parameter(Mandatory)][string]$SignToolPath,
+        [Parameter(Mandatory)][string]$PackagePath
+    )
+    $logStem = Join-Path $env:TEMP ("netflow_signtool_" + [guid]::NewGuid().ToString("N"))
+    $stdoutPath = "$logStem.out"
+    $stderrPath = "$logStem.err"
+    try {
+        & $SignToolPath verify /pa /v $PackagePath 1> $stdoutPath 2> $stderrPath
+        $exitCode = $LASTEXITCODE
+        $stdoutText = if (Test-Path $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { "" }
+        $stderrText = if (Test-Path $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { "" }
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            StandardOutput = $stdoutText
+            StandardError = $stderrText
+            Text = ($stdoutText + [Environment]::NewLine + $stderrText).Trim()
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Find-ExistingBinary {
     $candidates = @(
         $ExePath,
@@ -113,10 +237,6 @@ function Find-ExistingBinary {
 }
 
 function Find-ExistingMsix {
-    if ($MsixPath -and (Test-Path $MsixPath)) {
-        return (Resolve-Path $MsixPath).Path
-    }
-
     $candidates = @(
         $DefaultMsix,
         (Join-Path $ScriptDir "target\NetFlow.msix"),
@@ -129,62 +249,53 @@ function Find-ExistingMsix {
         }
     }
 
-    $anyMsix = Get-ChildItem -Path $ScriptDir -Filter "*.msix" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($anyMsix) {
-        return $anyMsix.FullName
-    }
-
     return $null
 }
 
 function Install-SideloadCert {
     param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
 
-    if (-not $Certificate) { return }
+    if (-not $Certificate) { throw "The package signing certificate is missing." }
     $thumb = $Certificate.Thumbprint
 
     # Device trust for MSIX package sideloading must be in LocalMachine\TrustedPeople
     $inLocalTrusted = Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue |
-        Where-Object { $_.Thumbprint -eq $thumb }
+    Where-Object { $_.Thumbprint -eq $thumb }
 
     if (-not $inLocalTrusted) {
         $tempCer = Join-Path $env:TEMP ("netflow_cert_" + $thumb + ".cer")
         [System.IO.File]::WriteAllBytes($tempCer, $Certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
 
-        # Try direct import into LocalMachine\TrustedPeople (succeeds if running elevated)
+        $imported = $false
         try {
             Import-Certificate -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -FilePath $tempCer -ErrorAction Stop | Out-Null
-            Write-Host "Package signing certificate installed to LocalMachine\TrustedPeople." -ForegroundColor Green
-        } catch {
-            Write-Host "Sideloading requires trusting the package certificate in LocalMachine\TrustedPeople." -ForegroundColor Yellow
+            $imported = $true
+        }
+        catch {
             Write-Host "Prompting for administrator approval to trust certificate..." -ForegroundColor Cyan
-            try {
-                $argList = "-NoProfile -ExecutionPolicy Bypass -Command `"Import-Certificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' -FilePath '$tempCer' -ErrorAction Stop | Out-Null`""
-                $proc = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList $argList
-                if ($proc.ExitCode -eq 0) {
-                    Write-Host "Certificate installed to LocalMachine\TrustedPeople successfully." -ForegroundColor Green
-                } else {
-                    Write-Warning "Elevation returned exit code $($proc.ExitCode)."
-                }
-            } catch {
-                Write-Warning "Could not elevate to install certificate. If installation fails, right-click install.ps1 -> Run with PowerShell as Administrator."
-            }
-        } finally {
+            $path64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($tempCer))
+            $command = '$p = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String("' + $path64 + '")); Import-Certificate -CertStoreLocation Cert:\LocalMachine\TrustedPeople -FilePath $p -ErrorAction Stop | Out-Null'
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+            $proc = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") -Verb RunAs -Wait -PassThru -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encoded)
+            if ($proc.ExitCode -ne 0) { throw "Administrator approval failed to trust the package certificate (exit code $($proc.ExitCode))." }
+            $imported = $true
+        }
+        finally {
             Remove-Item $tempCer -Force -ErrorAction SilentlyContinue
         }
-    } else {
+        $verified = Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $thumb }
+        if (-not $verified) { throw "The package certificate was not added to LocalMachine\TrustedPeople." }
         Write-Host "Package signing certificate is trusted in LocalMachine\TrustedPeople." -ForegroundColor Green
     }
+    else {
+        Write-Host "Package signing certificate is trusted in LocalMachine\TrustedPeople." -ForegroundColor Green
+    }
+    return [bool]$imported
 }
 
 function New-MsixPackage {
     $tools = Find-SdkTools
     if (-not $tools.MakeAppx -or -not $tools.SignTool) {
-        $existing = Find-ExistingMsix
-        if ($existing) {
-            Write-Host "Windows SDK tools (makeappx/signtool) not found; falling back to existing MSIX: $existing" -ForegroundColor Yellow
-            return $existing
-        }
         if (-not $tools.MakeAppx) {
             throw "makeappx.exe was not found. Please install the Windows 10/11 SDK or add makeappx.exe to PATH to package the MSIX."
         }
@@ -229,16 +340,21 @@ function New-MsixPackage {
         throw "AppxManifest.xml not found! Expected at $ManifestPath or widget/Package.appxmanifest"
     }
 
-    # Read manifest content to resolve Publisher and Identity
-    $manifestContent = Get-Content $manifest -Raw
+    # Read and adapt the manifest to the architecture of the executable being packaged.
+    $manifestXml = Read-XmlFile -Path $manifest
+    $identityNode = $manifestXml.SelectSingleNode("//*[local-name()='Identity']")
+    if (-not $identityNode) { throw "Package manifest has no Identity element: $manifest" }
+    $architecture = Get-PeArchitecture -Path $binExe
+    $identityNode.SetAttribute("ProcessorArchitecture", $architecture)
+    $manifestContent = $manifestXml.OuterXml
     $publisher = Get-PackagePublisher
 
     # Generate or reuse non-expired certificate in Cert:\CurrentUser\My
     $now = Get-Date
     $cert = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
-        Where-Object { $_.Subject -eq $publisher -and $_.HasPrivateKey -and $_.NotAfter -gt $now } |
-        Sort-Object NotAfter -Descending |
-        Select-Object -First 1
+    Where-Object { $_.Subject -eq $publisher -and $_.HasPrivateKey -and $_.NotAfter -gt $now } |
+    Sort-Object NotAfter -Descending |
+    Select-Object -First 1
 
     if (-not $cert) {
         Write-Host "Generating local signing certificate for $publisher..." -ForegroundColor Cyan
@@ -246,15 +362,13 @@ function New-MsixPackage {
             -Type Custom `
             -Subject $publisher `
             -KeyUsage DigitalSignature `
-            -FriendlyName "Net Flow Sideload Signing" `
+            -FriendlyName "Net Flow Local Sideload Signing" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-    } else {
+    }
+    else {
         Write-Host "Reusing active local signing certificate (Expires: $($cert.NotAfter.ToShortDateString()))." -ForegroundColor Green
     }
-
-    # Trust certificate in LocalMachine\TrustedPeople
-    Install-SideloadCert -Certificate $cert
 
     # Prepare temporary layout
     $tempLayout = Join-Path $env:TEMP ("netflow_layout_" + [guid]::NewGuid().ToString("N"))
@@ -282,16 +396,19 @@ function New-MsixPackage {
         }
         if (Test-Path $priSrc) {
             Copy-Item $priSrc (Join-Path $tempLayout "resources.pri") -Force
-        } elseif ($tools.MakePri) {
+        }
+        elseif ($tools.MakePri) {
             $priConfig = Join-Path $tempLayout "priconfig.xml"
             & $tools.MakePri createconfig /cf $priConfig /dq "en-US" /pv "10.0.0" /o | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "makepri.exe createconfig failed with exit code $LASTEXITCODE" }
             & $tools.MakePri new /pr $tempLayout /cf $priConfig /of (Join-Path $tempLayout "resources.pri") /o | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "makepri.exe new failed with exit code $LASTEXITCODE" }
             Remove-Item $priConfig -Force -ErrorAction SilentlyContinue
         }
+        else { throw "resources.pri and makepri.exe are both unavailable; cannot build a complete package." }
 
         # Pack MSIX
-        $outputMsix = $DefaultMsix
-        if (Test-Path $outputMsix) { Remove-Item $outputMsix -Force -ErrorAction SilentlyContinue }
+        $outputMsix = Join-Path $env:TEMP ("NetFlow_" + [guid]::NewGuid().ToString("N") + ".msix")
 
         Write-Host "Packing MSIX container to $outputMsix..." -ForegroundColor Cyan
         & $tools.MakeAppx pack /d $tempLayout /p $outputMsix /o | Out-Null
@@ -307,8 +424,11 @@ function New-MsixPackage {
         }
 
         Write-Host "MSIX packaged and signed successfully: $outputMsix" -ForegroundColor Green
+        $script:GeneratedMsixPath = (Resolve-Path $outputMsix).Path
+        $script:GeneratedSigningCertificate = $cert
         return $outputMsix
-    } finally {
+    }
+    finally {
         if (Test-Path $tempLayout) {
             Remove-Item $tempLayout -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -319,11 +439,17 @@ function Get-Status {
     Show-Header
     Write-Host "Location        : $ScriptDir"
 
+    $identityName = Get-PackageIdentity
+    $appx = Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue
     $msix = Find-ExistingMsix
     if ($msix) {
         $msixSize = [math]::Round(((Get-Item $msix).Length / 1MB), 2)
         Write-Host "MSIX Package    : [FOUND] $msix ($msixSize MB)" -ForegroundColor Green
-    } else {
+    }
+    elseif ($appx) {
+        Write-Host "MSIX Package    : [NO LOCAL FILE] (installed package is registered with Windows)" -ForegroundColor Gray
+    }
+    else {
         Write-Host "MSIX Package    : [NOT FOUND]" -ForegroundColor Yellow
     }
 
@@ -333,12 +459,11 @@ function Get-Status {
     $manifest = Get-PackageManifestPath
     Write-Host "Manifest Found  : $(if ($manifest) { '[YES] ' + $manifest } else { '[NO]' })" -ForegroundColor $(if ($manifest) { 'Green' } else { 'Gray' })
 
-    $identityName = Get-PackageIdentity
-    $appx = Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue
     if ($appx) {
         Write-Host "Widget Package  : [INSTALLED] $($appx.PackageFullName)" -ForegroundColor Green
         Write-Host "Install Location: $($appx.InstallLocation)" -ForegroundColor Gray
-    } else {
+    }
+    else {
         Write-Host "Widget Package  : [NOT INSTALLED] (Identity: $identityName)" -ForegroundColor Yellow
     }
 
@@ -352,10 +477,12 @@ function Install-Package {
 
     $msixToInstall = $null
 
-    if ($MsixPath -and (Test-Path $MsixPath)) {
+    if ($MsixPath) {
+        if (-not (Test-Path -LiteralPath $MsixPath -PathType Leaf)) { throw "The explicitly specified MSIX does not exist: $MsixPath" }
         Write-Host "Using explicitly specified MSIX: $MsixPath" -ForegroundColor Green
         $msixToInstall = (Resolve-Path $MsixPath).Path
-    } elseif (-not $Rebuild) {
+    }
+    elseif (-not $Rebuild) {
         $existing = Find-ExistingMsix
         if ($existing) {
             Write-Host "Found existing package: $existing" -ForegroundColor Green
@@ -375,12 +502,60 @@ function Install-Package {
         throw "Failed to locate or build NetFlow.msix for installation!"
     }
 
-    # Verify signature and ensure signer certificate is trusted in LocalMachine\TrustedPeople
-    $sig = Get-AuthenticodeSignature -FilePath $msixToInstall -ErrorAction SilentlyContinue
-    if ($sig -and $sig.SignerCertificate) {
-        Write-Host "Package signed by: $($sig.SignerCertificate.Subject)" -ForegroundColor Cyan
-        Install-SideloadCert -Certificate $sig.SignerCertificate
+    $metadata = Get-MsixMetadata -Path $msixToInstall
+    $expectedIdentity = Get-PackageIdentity
+    $expectedPublisher = Get-PackagePublisher
+    if ($metadata.Name -ne $expectedIdentity) { throw "Package identity mismatch. Expected '$expectedIdentity', found '$($metadata.Name)'." }
+    if ($metadata.Publisher -ne $expectedPublisher) { throw "Package publisher mismatch. Expected '$expectedPublisher', found '$($metadata.Publisher)'." }
+
+    # Reject unsigned, damaged, expired, or unexpected packages before trusting any signer.
+    $sig = Get-AuthenticodeSignature -FilePath $msixToInstall -ErrorAction Stop
+    $signatureStatus = [string]$sig.Status
+    $signingCertificate = $sig.SignerCertificate
+    if (-not $signingCertificate -and $script:GeneratedSigningCertificate) {
+        $signingCertificate = $script:GeneratedSigningCertificate
     }
+    if ($signatureStatus -notin @("Valid", "NotTrusted", "UnknownError") -or -not $signingCertificate) {
+        throw "Package signature validation failed (status: $($sig.Status))."
+    }
+    if ($signingCertificate.Subject -ne $metadata.Publisher) { throw "Package signer does not match its manifest publisher." }
+    $now = Get-Date
+    if ($signingCertificate.NotBefore -gt $now -or $signingCertificate.NotAfter -lt $now) { throw "Package signing certificate is outside its validity period." }
+    $sdkTools = Find-SdkTools
+    if (-not $sdkTools.SignTool) { throw "signtool.exe is required to verify an MSIX package. Install the Windows SDK or add signtool.exe to PATH." }
+    if ($signatureStatus -eq "UnknownError") {
+        Write-Host "Package signer: $($signingCertificate.Subject) (PowerShell cannot classify MSIX signature; checking with SignTool)" -ForegroundColor Cyan
+    }
+    else {
+        Write-Host "Package signer: $($signingCertificate.Subject) (PowerShell status: $signatureStatus)" -ForegroundColor Cyan
+    }
+
+    # Verify package integrity before adding machine trust. A first-use self-signed
+    # certificate may produce exactly one SignTool chain-trust error; no other error
+    # is safe to waive before the certificate is trusted.
+    $preverification = Invoke-MsixSignatureVerification -SignToolPath $sdkTools.SignTool -PackagePath $msixToInstall
+    $preverifyExitCode = $preverification.ExitCode
+    if ($preverifyExitCode -ne 0) {
+        $preverifyText = $preverification.Text
+        $normalizedPreverifyText = [regex]::Replace($preverifyText, '\s+', ' ')
+        $expectedThumbprint = $signingCertificate.Thumbprint.Replace(" ", "").ToUpperInvariant()
+        $hasExpectedSigner = $preverifyText.Replace(" ", "").ToUpperInvariant().Contains($expectedThumbprint)
+        $isOnlyUntrustedChain = $normalizedPreverifyText -match '(?i)SignTool Error: A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider' -and
+            $normalizedPreverifyText -match '(?i)Number of errors: 1\b'
+        if (-not ($hasExpectedSigner -and $isOnlyUntrustedChain)) {
+            throw "SignTool could not verify the package before certificate trust was added (exit code $preverifyExitCode):`n$preverifyText"
+        }
+    }
+
+    $newlyTrusted = Install-SideloadCert -Certificate $signingCertificate
+    $verification = Invoke-MsixSignatureVerification -SignToolPath $sdkTools.SignTool -PackagePath $msixToInstall
+    $verifyExitCode = $verification.ExitCode
+    if ($verifyExitCode -ne 0) {
+        if ($newlyTrusted) { Remove-TrackedCertThumbprints -Thumbprints @($signingCertificate.Thumbprint) }
+        throw "SignTool could not verify the MSIX package (exit code $verifyExitCode):`n$($verification.Text)"
+    }
+    Write-Host "MSIX signature verified by SignTool." -ForegroundColor Green
+    if ($newlyTrusted) { Save-TrackedCertThumbprint -Thumbprint $signingCertificate.Thumbprint }
 
     Write-Host "Installing Net Flow MSIX package: $msixToInstall" -ForegroundColor Cyan
 
@@ -389,21 +564,18 @@ function Install-Package {
     Stop-Process -Name "net-flow" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
 
-    # Remove previous package registration specifically by identity name
-    $identityName = Get-PackageIdentity
-    $existingAppx = Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue
-    if ($existingAppx) {
-        Write-Host "Removing previous package registration ($($existingAppx.PackageFullName))..." -ForegroundColor Cyan
-        Remove-AppxPackage -Package $existingAppx.PackageFullName -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 400
-    }
-
-    # Install package via Add-AppxPackage -Path
+    # Add-AppxPackage performs an in-place package update when the identity matches.
     Write-Host "Installing Net Flow package into Windows..." -ForegroundColor Cyan
     try {
         Add-AppxPackage -Path $msixToInstall -ForceApplicationShutdown
         Write-Host "Net Flow package installed successfully!" -ForegroundColor Green
-    } catch {
+        if ($script:GeneratedMsixPath -and (Test-Path -LiteralPath $script:GeneratedMsixPath)) {
+            Remove-Item -LiteralPath $script:GeneratedMsixPath -Force -ErrorAction Stop
+            Write-Host "Removed the MSIX generated for this installation." -ForegroundColor Gray
+            $script:GeneratedMsixPath = $null
+        }
+    }
+    catch {
         Write-Host "Installation failed: $_" -ForegroundColor Red
         Write-Host ""
         Write-Host "Widget sideloading failed. For local development:" -ForegroundColor Yellow
@@ -418,38 +590,15 @@ function Install-Package {
 }
 
 function Remove-SideloadCert {
-    param([string]$Subject = "")
-
-    if (-not $Subject) {
-        $Subject = Get-PackagePublisher
+    $thumbprints = @(Get-TrackedCertThumbprints)
+    if ($thumbprints.Count -eq 0) {
+        Write-Host "No installer-managed machine certificates are recorded; leaving other certificates untouched." -ForegroundColor Gray
+        return
     }
-
-    Write-Host "Removing Net Flow signing certificates ($Subject)..." -ForegroundColor Yellow
-
-    # CurrentUser stores
-    Get-ChildItem Cert:\CurrentUser\My, Cert:\CurrentUser\TrustedPeople -ErrorAction SilentlyContinue |
-        Where-Object { $_.Subject -eq $Subject -or $_.FriendlyName -eq "Net Flow Sideload Signing" } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-
-    # LocalMachine\TrustedPeople (and legacy Root cleanup if friendly name matches)
-    $hasMachineCerts = Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue |
-        Where-Object { $_.Subject -eq $Subject -or $_.FriendlyName -eq "Net Flow Sideload Signing" }
-    $hasLegacyRoot = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-        Where-Object { $_.Subject -eq $Subject -and $_.FriendlyName -eq "Net Flow Sideload Signing" }
-
-    if ($hasMachineCerts -or $hasLegacyRoot) {
-        try {
-            if ($hasMachineCerts) { $hasMachineCerts | Remove-Item -Force -ErrorAction Stop }
-            if ($hasLegacyRoot) { $hasLegacyRoot | Remove-Item -Force -ErrorAction SilentlyContinue }
-            Write-Host "Certificate removed from LocalMachine\TrustedPeople." -ForegroundColor Green
-        } catch {
-            Write-Host "Prompting for elevation to remove certificate from LocalMachine stores..." -ForegroundColor Cyan
-            $cmd = "Get-ChildItem Cert:\LocalMachine\TrustedPeople, Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Where-Object { `$_.Subject -eq '$Subject' -or `$_.FriendlyName -eq 'Net Flow Sideload Signing' } | Remove-Item -Force"
-            Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
-        }
-    }
-
-    Write-Host "Net Flow signing certificates removed." -ForegroundColor Green
+    Write-Host "Removing installer-managed signing certificates..." -ForegroundColor Yellow
+    Remove-TrackedCertThumbprints -Thumbprints $thumbprints
+    Remove-Item -LiteralPath $InstallerStatePath -Force -ErrorAction SilentlyContinue
+    Write-Host "Installer-managed signing certificates removed." -ForegroundColor Green
 }
 
 function Uninstall-Package {
@@ -462,14 +611,28 @@ function Uninstall-Package {
     if ($appx) {
         Write-Host "Removing Net Flow widget package ($($appx.PackageFullName)) from Windows..." -ForegroundColor Yellow
         Remove-AppxPackage -Package $appx.PackageFullName -ErrorAction SilentlyContinue
-        Write-Host "Net Flow widget uninstalled successfully." -ForegroundColor Green
-    } else {
+        Write-Host "Net Flow widget package uninstalled successfully." -ForegroundColor Green
+    }
+    else {
         Write-Host "Package '$identityName' is not currently installed." -ForegroundColor Yellow
     }
 
     Remove-SideloadCert
 
+    if ($PurgeData) {
+        $appDataNetFlow = Join-Path $env:LOCALAPPDATA "NetFlow"
+        if (Test-Path $appDataNetFlow) {
+            Write-Host "Purging application data and history ($appDataNetFlow)..." -ForegroundColor Yellow
+            Remove-Item -LiteralPath $appDataNetFlow -Recurse -Force -ErrorAction Stop
+            Write-Host "Net Flow application data purged." -ForegroundColor Green
+        }
+    }
+    else { Write-Host "Application data was preserved. Use -PurgeData with -Uninstall to remove it." -ForegroundColor Gray }
+
     Restart-WidgetBoard
+
+    Write-Host ""
+    Write-Host "Net Flow uninstallation complete." -ForegroundColor Green
 }
 
 function Restart-WidgetBoard {
@@ -482,6 +645,12 @@ function Restart-WidgetBoard {
 }
 
 # Main Execution Dispatch
+if ($PurgeData -and -not $Uninstall) { throw "-PurgeData can only be used together with -Uninstall." }
+if ($MsixPath -and $Rebuild) { throw "Use either -MsixPath or -Rebuild; the options are mutually exclusive." }
+$exclusiveModes = @($Uninstall, $RemoveCert, $Status, $RestartWidgets) | Where-Object { $_ }
+if ($exclusiveModes.Count -gt 1) { throw "Choose only one of -Uninstall, -RemoveCert, -Status, or -RestartWidgets." }
+if ($exclusiveModes.Count -gt 0 -and ($Install -or $Rebuild -or $MsixPath)) { throw "Install options cannot be combined with status, uninstall, certificate removal, or widget restart." }
+
 if ($Status) {
     Get-Status
 }
@@ -495,9 +664,42 @@ elseif ($RemoveCert) {
 elseif ($RestartWidgets) {
     Restart-WidgetBoard
 }
-else {
-    # Default behavior: Install existing package (or rebuild if -Rebuild specified or missing)
+elseif ($Install -or $Rebuild -or $MsixPath) {
     Install-Package
     Write-Host ""
     Get-Status
+}
+else {
+    # Direct running without explicit flags
+    $identityName = Get-PackageIdentity
+    $appx = Get-AppxPackage -Name $identityName -ErrorAction SilentlyContinue
+
+    if ($appx) {
+        Show-Header
+        Write-Host "Net Flow is currently installed: $($appx.PackageFullName)" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "What would you like to do?" -ForegroundColor Yellow
+        Write-Host "  [U] Uninstall Net Flow (remove package and installer-managed certificates; keep data)"
+        Write-Host "  [R] Reinstall / Update Net Flow"
+        Write-Host "  [C] Cancel / Exit"
+        Write-Host ""
+        $choice = Read-Host "Select an option [U/R/C] (Default: C)"
+        if ($choice.Trim().ToUpper() -eq "U") {
+            Uninstall-Package
+        }
+        elseif ($choice.Trim().ToUpper() -eq "R") {
+            Install-Package
+            Write-Host ""
+            Get-Status
+        }
+        else {
+            Write-Host "Operation cancelled." -ForegroundColor Gray
+        }
+    }
+    else {
+        # Not currently installed, proceed with default installation
+        Install-Package
+        Write-Host ""
+        Get-Status
+    }
 }

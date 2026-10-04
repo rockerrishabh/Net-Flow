@@ -8,8 +8,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
 };
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows::Win32::System::Threading::{
-    GetProcessIoCounters, IO_COUNTERS, OpenProcess, PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 
 /// Process telemetry and connection metrics for an active network consumer.
@@ -621,13 +620,13 @@ fn extract_native_icon_data_uri(path: &str) -> Option<String> {
     }
 }
 
-/// Reads process binary path, executable name, and cumulative I/O transfer counters via Win32 APIs.
-pub fn get_process_info_and_io(pid: u32) -> Option<(String, String, u64, u64)> {
+/// Reads the process binary path and executable name via Win32 APIs.
+fn get_process_info(pid: u32) -> Option<(String, String)> {
     if pid == 0 {
         return None;
     }
     if pid == 4 {
-        return Some(("System".to_string(), "System".to_string(), 0, 0));
+        return Some(("System".to_string(), "System".to_string()));
     }
 
     unsafe {
@@ -640,8 +639,6 @@ pub fn get_process_info_and_io(pid: u32) -> Option<(String, String, u64, u64)> {
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut size,
         );
-        let mut io = IO_COUNTERS::default();
-        let io_res = GetProcessIoCounters(handle, &mut io);
         let _ = CloseHandle(handle);
 
         if res.is_ok() && size > 0 {
@@ -651,12 +648,7 @@ pub fn get_process_info_and_io(pid: u32) -> Option<(String, String, u64, u64)> {
                 .next_back()
                 .unwrap_or(&full_path)
                 .to_string();
-            let (read_bytes, write_bytes) = if io_res.is_ok() {
-                (io.ReadTransferCount, io.WriteTransferCount)
-            } else {
-                (0, 0)
-            };
-            Some((full_path, exe_name, read_bytes, write_bytes))
+            Some((full_path, exe_name))
         } else {
             None
         }
@@ -840,63 +832,24 @@ pub fn query_socket_pids() -> (HashMap<u32, usize>, usize) {
     (pid_counts, total_connections)
 }
 
-/// Tracks per-process I/O transfer deltas to compute instantaneous transfer rates.
+/// Tracks active socket owners. Windows does not expose reliable per-process byte
+/// counters through the APIs used here, so bandwidth is estimated from socket counts.
 #[derive(Debug, Default, Clone)]
-pub struct ProcessTracker {
-    prev_io: HashMap<u32, (u64, u64)>, // pid -> (read_transfer_count, write_transfer_count)
-    prev_time: Option<std::time::Instant>,
-}
+pub struct ProcessTracker;
 
 impl ProcessTracker {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
-    pub fn reset(&mut self) {
-        self.prev_io.clear();
-        self.prev_time = None;
-    }
-
-    /// Samples current open socket connections and correlates with process I/O rates.
-    pub fn sample(&mut self, now: std::time::Instant) -> (Vec<ActiveAppInfo>, usize) {
-        let elapsed_secs = match self.prev_time {
-            Some(prev) => {
-                let duration = now.saturating_duration_since(prev).as_secs_f64();
-                if duration > 0.0 { duration } else { 0.0 }
-            }
-            None => 0.0,
-        };
-        self.prev_time = Some(now);
-
+    /// Samples open socket connections and groups them by owning application.
+    pub fn sample(&mut self, _now: std::time::Instant) -> (Vec<ActiveAppInfo>, usize) {
         let (pid_conns, total_connections) = query_socket_pids();
 
-        let mut new_io_map = HashMap::new();
         let mut app_map: HashMap<String, ActiveAppInfo> = HashMap::new();
 
         for (pid, conns) in pid_conns {
-            if let Some((full_path, exe_name, curr_read, curr_write)) = get_process_info_and_io(pid)
-            {
-                let (delta_read, delta_write) = match self.prev_io.get(&pid) {
-                    Some(&(prev_read, prev_write)) => (
-                        curr_read.saturating_sub(prev_read),
-                        curr_write.saturating_sub(prev_write),
-                    ),
-                    None => (0, 0),
-                };
-
-                new_io_map.insert(pid, (curr_read, curr_write));
-
-                let rx_bps = if elapsed_secs > 0.0 {
-                    delta_read as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-                let tx_bps = if elapsed_secs > 0.0 {
-                    delta_write as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
-
+            if let Some((full_path, exe_name)) = get_process_info(pid) {
                 let (app_name, icon) = map_process_to_app(&exe_name);
                 let native_icon = get_process_native_icon(&full_path);
                 let entry = app_map
@@ -914,12 +867,8 @@ impl ProcessTracker {
                     entry.icon_data_uri = native_icon;
                 }
                 entry.connection_count += conns;
-                entry.rx_bps += rx_bps;
-                entry.tx_bps += tx_bps;
             }
         }
-
-        self.prev_io = new_io_map;
 
         let mut apps: Vec<ActiveAppInfo> = app_map.into_values().collect();
         apps.sort_by(compare_active_apps);
@@ -974,12 +923,28 @@ fn is_system_app(app: &ActiveAppInfo) -> bool {
         || lower_name.contains("host process")
 }
 
-/// Reconciles process-level I/O counters against physical network adapter throughput.
-///
-/// On Windows, `GetProcessIoCounters` lumps disk reads/writes and named pipes in with socket I/O.
-/// Furthermore, download managers writing incoming stream chunks to disk trigger `WriteFile` (disk write),
-/// while socket reads often bypass process `ReadTransferCount`.
-/// This reconciles directionality and clamps total app bandwidth to the actual physical wire speed.
+/// Distributes total network throughput across active socket owners by open socket
+/// count. These are estimates because Windows' process I/O counters also include disk
+/// and named-pipe activity and are not suitable as per-process network byte counters.
+pub fn estimate_app_bandwidth_by_sockets(
+    active_apps: &mut [ActiveAppInfo],
+    net_rx_bps: f64,
+    net_tx_bps: f64,
+) {
+    let total_connections: usize = active_apps.iter().map(|app| app.connection_count).sum();
+    for app in active_apps.iter_mut() {
+        let share = if total_connections > 0 {
+            app.connection_count as f64 / total_connections as f64
+        } else {
+            0.0
+        };
+        app.rx_bps = net_rx_bps.max(0.0) * share;
+        app.tx_bps = net_tx_bps.max(0.0) * share;
+    }
+}
+
+/// Legacy reconciler retained for compatibility with callers that already supply
+/// process-level rate hints. New telemetry paths should use socket-count estimates.
 pub fn reconcile_app_bandwidth(
     active_apps: &mut [ActiveAppInfo],
     net_rx_bps: f64,

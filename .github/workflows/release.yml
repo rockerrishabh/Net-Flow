@@ -56,23 +56,27 @@ jobs:
         id: get_version
         shell: pwsh
         run: |
+          $cargoContent = Get-Content "Cargo.toml" -Raw
+          if ($cargoContent -notmatch '(?m)^version\s*=\s*"([^"+]+)"') {
+            throw "Workspace package version was not found in Cargo.toml."
+          }
+          $cargoVersion = $matches[1]
+          $cargoSemver = ($cargoVersion -split '\+')[0]
+          $cargoPackageVersion = if ($cargoSemver.Split('.').Count -eq 3) { "$cargoSemver.0" } else { $cargoSemver }
+
           $inputTag = "${{ github.event.inputs.tag_name }}".Trim()
           $tag = if ($inputTag) { $inputTag } else { $env:GITHUB_REF_NAME }
 
           if ($tag -match '^v?(\d+\.\d+\.\d+(\.\d+)?)$') {
-            $ver = $matches[1]
-            if ($ver.Split('.').Count -eq 3) { $ver = "$ver.0" }
-            $tagName = if ($tag.StartsWith('v')) { $tag } else { "v$($matches[1])" }
-          } else {
-            $cargoContent = Get-Content "Cargo.toml" -Raw
-            if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
-              $sem = $matches[1]
-              $ver = if ($sem.Split('.').Count -eq 3) { "$sem.0" } else { $sem }
-              $tagName = "v$sem"
-            } else {
-              $ver = "0.1.0.0"
-              $tagName = "v0.1.0"
+            $tagVersion = $matches[1]
+            $ver = if ($tagVersion.Split('.').Count -eq 3) { "$tagVersion.0" } else { $tagVersion }
+            $tagName = if ($tag.StartsWith('v')) { $tag } else { "v$tagVersion" }
+            if ($ver -ne $cargoPackageVersion) {
+              throw "Release tag '$tagName' does not match Cargo.toml version '$cargoVersion'."
             }
+          } else {
+            $ver = $cargoPackageVersion
+            $tagName = "v$cargoSemver"
           }
           Write-Host "Package Version: $ver"
           Write-Host "Release Tag    : $tagName"
@@ -571,8 +575,11 @@ jobs:
                 }
 
                 $updatedPayload = $subObj | ConvertTo-Json -Depth 100 -Compress
+                $tmpPayload = Join-Path $env:RUNNER_TEMP "submission_update.json"
+                [System.IO.File]::WriteAllText($tmpPayload, $updatedPayload, [System.Text.Encoding]::UTF8)
                 Write-Host "Updating submission metadata with Store description & What's New notes..."
-                msstore submission update "$env:STORE_PRODUCT_ID" $updatedPayload
+                Get-Content $tmpPayload -Raw | msstore submission update "$env:STORE_PRODUCT_ID"
+                Remove-Item $tmpPayload -Force -ErrorAction SilentlyContinue
                 Write-Host "Submission metadata successfully updated!"
               } else {
                 Write-Warning "No listings property found in submission JSON. Skipping metadata update."

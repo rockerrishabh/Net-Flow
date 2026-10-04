@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-10-04
+
+### General Availability (GA)
+
+This milestone marks the production General Availability of Net Flow, focusing on steady-state zero-allocation performance, continuous virtual-clock endurance hardening, and multi-day telemetry accuracy.
+
+### Performance
+
+- **Zero Heap Allocation Steady-State Sparkline Pipeline**:
+  - Replaced heap-allocated `Vec<(f32, f32)>` with fixed-size stack/struct storage for the 120 samples in the 30-second, 250 ms flyout window, plus an explicit logical sample count in `FlyoutSnapshot`.
+  - Replaced dynamic heap-allocated `Vec<POINT>` buffers in the native Win32 GDI companion flyout (`WM_PAINT`) with fixed buffers sized to that same 120-sample window, rendering download and upload polylines directly from populated prefix slices.
+  - Rewrote background snapshot sparkline extraction in `TrayWorker` to sample directly from rolling history slices in-place with peak normalization without any intermediate vector materialization.
+  - Added dedicated allocation-regression integration test (`tests/allocation_tests.rs`) with custom `#[global_allocator]` measuring zero heap allocations during steady-state rendering across 1,000 iterations.
+  - Streamlined core chart rendering in `crates/core/src/chart.rs` with `windowed_mapped` eliminating intermediate vector allocations prior to spline smoothing.
+
+### Reliability & Hardening
+
+- **72-Hour Accelerated Virtual-Clock Continuous Telemetry Stress Suite**:
+  - Implemented 259,200 continuous virtual-clock samples at 1 Hz verifying long-term runtime stability and zero memory growth.
+  - Continuous periodic assertions ensuring rolling buffer capacities (`history.len() <= HISTORY_CAPACITY`) are bounded at all times.
+  - Strict byte conservation verification: `session_rx == Σ accepted RX deltas` and `session_tx == Σ accepted TX deltas` validated across all 259,200 iterations down to the exact byte.
+- **Counter Rollover & Discontinuity Discrimination Matrix**:
+  - Hardened `counter_delta` to explicitly distinguish legitimate 32-bit and 64-bit modular wraparound from counter resets to zero, driver restarts, or sleep/wake discontinuities.
+  - Rollover logic calculates modular delta when `prev` was adjacent to `u32::MAX` or `u64::MAX` within a realistic single-tick rate threshold (`MAX_ROLLOVER_DELTA = 500 MB`).
+  - Interface resets to zero attribute 0 bytes, re-anchor baseline immediately, and prevent false multi-gigabyte spikes.
+- **120-Day Accounting Retention Simulation**:
+  - Accelerated calendar simulation spanning 120 days verifying daily usage accumulation across days 1–90 and strict 90-entry retention enforcement across days 91–120.
+  - Verified exact oldest-day eviction, midnight date rollovers, and strictly sorted ascending date indices with zero duplicates.
+- **Pathological ICMP Quality Telemetry Hardening**:
+  - Comprehensive test suite exercising pathological probe sequences (intermittent drops, 100% loss, 100% success, single success with 19 timeouts, extreme 10s latency spikes, and constant ping).
+  - Explicit assertions guaranteeing all jitter and variance metrics are finite (guarding against `NaN`, `+inf`, `-inf`), packet loss is clamped to [0, 100]%, and rolling buffers never exceed 20 samples.
+
 ## [0.9.0] - 2026-10-03
 
 ### Added
@@ -36,7 +68,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.0] - 2026-10-03
 
-
 ### Added
 
 - **Native Win32 Tray Flyout Companion (<5 MB RAM)**:
@@ -52,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Branded header with active medium and link summary badge (e.g. Ethernet / Wi-Fi).
     - Large download and upload metric cards with distinct emerald and blue accents.
     - Latency, jitter, packet loss percentage, and health status pill with colored indicators.
-    - Live 30-sample GDI sparkline line chart visualizing download and upload traffic rails.
+    - Live 30-second GDI sparkline line chart visualizing download and upload traffic rails.
     - Session bandwidth totals with compact duration formatting.
     - Data budget quota status and proportional progress bar with threshold color coding.
     - Top 3 active network-consuming applications with live download/upload throughput attribution.
@@ -313,7 +344,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Official URLs**:
   - Updated official product homepage to `https://netflow.rockerrishabh.me`.
   - Configured dedicated privacy policy route at `https://netflow.rockerrishabh.me/privacy`.
-
 
 ---
 

@@ -7,7 +7,7 @@ Completely free of Electron, WebView2, and heavy background runtimes, Net Flow o
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 • NATIVE WIN32 TASKBAR FLYOUT COMPANION (<5 MB RAM)
-  Click the notification area icon for an instantaneous, double-buffered GDI dashboard. View live upload and download throughput, real-time ping and jitter, mini traffic sparklines, monthly data budget progress, top bandwidth-consuming apps, and quick actions with zero lag and no framework overhead.
+  Click the notification area icon for an instantaneous, double-buffered GDI dashboard. View live upload and download throughput, real-time ping and jitter, mini traffic sparklines, monthly data budget progress, socket-based app traffic estimates, and quick actions with zero lag and no framework overhead.
 
 • NATIVE WINDOWS 11 WIDGET INTEGRATION
   Seamlessly integrates into the Windows 11 Widgets Board (Win + W). Choose between Small, Medium, or Large adaptive cards tailored to your desktop workflow.
@@ -21,14 +21,14 @@ Completely free of Electron, WebView2, and heavy background runtimes, Net Flow o
 • WI-FI 7, 6E, 6 & PHYSICAL LINK INSIGHTS
   Inspect deep wireless and wired physical link metrics directly from your taskbar. Automatically identifies Wi-Fi standards (Wi-Fi 7 / 802.11be, Wi-Fi 6E on 6 GHz, Wi-Fi 6 / 802.11ax, Wi-Fi 5 / 802.11ac), frequency band (2.4 GHz, 5 GHz, 6 GHz), channel width, exact signal strength (RSSI in dBm), Multi-Link Operation (MLO) status, and negotiated Ethernet link speeds (up to 10 Gbps).
 
-• PER-APPLICATION BANDWIDTH ATTRIBUTION
-  Identify exactly which applications are consuming your network bandwidth in real-time. Features live throughput ranking, socket connection counting, and process icon resolution.
+• PER-APPLICATION TRAFFIC ESTIMATES
+  See active socket-owning applications, their connection counts, and an estimated share of adapter throughput. Rates are apportioned by open socket count rather than measured with per-process packet counters.
 
 • CANONICAL DIAGNOSTICS EXPORT (CSV & JSON)
-  Export comprehensive diagnostic reports containing adapter configurations, active session statistics, ICMP latency samples, and 90-day daily usage logs. Export in one click from the flyout or tray context menu, or use the headless CLI (`net-flow.exe --export <csv|json>`) for automated workflows and scripting.
+  Export comprehensive diagnostic reports containing adapter configurations, active session statistics, ICMP latency samples, and 90-day daily usage logs. Export in one click from the flyout or tray context menu, or use the headless CLI (net-flow.exe --export csv or json) for automated workflows and scripting.
 
 • MIRRORED DUAL-STREAM WAVEFORMS
-  Visualizes simultaneous download and upload traffic with peak-preserving Catmull-Rom spline smoothing, dynamic scale headroom, and glowing pulse indicators. Choose between Area (waveform fill), Line (minimalist strokes), or Bar (discrete columns). Automatically adapts to Windows Dark and Light modes.
+  Visualizes simultaneous download and upload traffic with peak-preserving Catmull-Rom spline smoothing, dynamic scale headroom, and glowing pulse indicators. Choose between Area (waveform fill) or Bar (discrete columns). Automatically adapts to Windows Dark and Light modes.
 
 • INDEPENDENT BANDWIDTH THRESHOLD ALERTS
   Set independent download and upload thresholds. Receive native Windows toast notifications whenever sustained bandwidth crosses your configured limits.
@@ -43,8 +43,8 @@ Completely free of Electron, WebView2, and heavy background runtimes, Net Flow o
 🔒 PRIVACY BY DESIGN
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-• 100% Local & Offline: Zero analytics, zero cloud tracking, zero external telemetry servers, and no user accounts required.
-• All statistics are queried directly from local Windows APIs (IP Helper, WLAN Native API, and ICMP echo) and never leave your machine.
+• Local processing: No analytics, cloud tracking, external telemetry servers, or user accounts.
+• Bandwidth statistics and diagnostics are processed locally. The optional latency monitor sends ICMP echo probes to your gateway or the public Cloudflare resolver; it does not upload diagnostic reports or application data.
 • Wi-Fi Network Name Note: Windows requires the location capability solely to query the connected Wi-Fi SSID (network name) to display your connection status. Your geographic location is never accessed, tracked, or saved.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

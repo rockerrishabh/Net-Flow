@@ -26,9 +26,9 @@ pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 pub const DOWNLOAD_COLOR: Rgba = Rgba(56, 217, 240, 255);
 /// Upload curve color for Dark theme (warm amber).
 pub const UPLOAD_COLOR: Rgba = Rgba(255, 176, 32, 255);
-/// Minimum vertical scale floor in bytes/sec (50 KB/s).
-/// Prevents small background network noise (e.g. 500 B/s) from stretching across the full chart height.
-pub const MIN_CHART_SCALE_BPS: f64 = 50_000.0;
+/// Minimum vertical scale floor in bytes/sec (10 KiB/s).
+/// Keeps idle noise from filling the chart while making ordinary low-rate traffic visible.
+pub const MIN_CHART_SCALE_BPS: f64 = 10_240.0;
 /// Subdued center dividing line separating download and upload regions in Dark theme.
 const AXIS_COLOR: Rgba = Rgba(150, 160, 176, 56);
 
@@ -206,11 +206,10 @@ impl Palette {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GraphStyle {
-    /// Mirrored Catmull-Rom spline with gradient area fill fading to baseline.
+    /// Mirrored smoothed waveform with gradient area fill fading to baseline.
     #[default]
     Area,
-    /// Continuous spline curve with bolder stroke and reduced-opacity gradient fill.
-    /// Visually distinct from Area with a thicker, more industrial aesthetic.
+    /// Mirrored discrete columns with reduced opacity.
     Bar,
 }
 
@@ -467,16 +466,62 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(png_bytes)
 }
 
-/// Takes the latest `sample_count` points, front-padding with zeroes when the
-/// widget first starts up so the curve scrolls in smoothly from the right.
-fn windowed(values: &[f64], sample_count: usize) -> Vec<f64> {
+/// Extracts the latest `sample_count` points directly from history with mapping function,
+/// front-padding with zeroes without intermediate vector materialization.
+fn windowed_mapped<F>(history: &[HistorySample], sample_count: usize, mut f: F) -> Vec<f64>
+where
+    F: FnMut(&HistorySample) -> f64,
+{
     let total = sample_count.max(2);
     let mut out = vec![0.0f64; total];
-    let take = values.len().min(total);
-    let src = &values[values.len() - take..];
+    let take = history.len().min(total);
+    let src = &history[history.len() - take..];
     let offset = total - take;
-    out[offset..].copy_from_slice(src);
+    for (i, sample) in src.iter().enumerate() {
+        out[offset + i] = f(sample);
+    }
     out
+}
+
+/// Number of samples in the tray flyout's fixed 30-second waveform window.
+pub const FLYOUT_SPARKLINE_SAMPLES: usize = 30 * 1000 / crate::SAMPLING_INTERVAL_MS as usize;
+
+/// Updates a fixed-size normalized flyout waveform without allocating.
+///
+/// New traffic raises the scale immediately. After a peak leaves the visible window,
+/// the scale decays by 8% per second so the chart expands smoothly again.
+pub fn update_flyout_sparkline(
+    history: &[HistorySample],
+    output: &mut [(f32, f32); FLYOUT_SPARKLINE_SAMPLES],
+    smoothed_peak: &mut f32,
+    elapsed_scale_secs: f32,
+) {
+    let sample_count = history.len().min(FLYOUT_SPARKLINE_SAMPLES);
+    let start_idx = history.len() - sample_count;
+    let visible = &history[start_idx..];
+
+    let mut current_peak = 1024.0_f32;
+    for sample in visible {
+        current_peak = current_peak
+            .max(sample.rx_bps as f32)
+            .max(sample.tx_bps as f32);
+    }
+
+    if current_peak >= *smoothed_peak {
+        *smoothed_peak = current_peak;
+    } else {
+        let decay = 0.92_f32.powf(elapsed_scale_secs.max(0.0));
+        *smoothed_peak = (current_peak + (*smoothed_peak - current_peak) * decay).max(current_peak);
+    }
+
+    output.fill((0.0, 0.0));
+    let pad_count = FLYOUT_SPARKLINE_SAMPLES - sample_count;
+    for (i, sample) in visible.iter().enumerate() {
+        output[pad_count + i] = (
+            (sample.rx_bps as f32 / *smoothed_peak).clamp(0.0, 1.0),
+            (sample.tx_bps as f32 / *smoothed_peak).clamp(0.0, 1.0),
+        );
+    }
 }
 
 fn interpolate_at(values: &[f64], t: f64) -> f64 {
@@ -500,7 +545,7 @@ fn interpolate_at(values: &[f64], t: f64) -> f64 {
     v.max(0.0)
 }
 
-/// Renders a single direction track with Catmull-Rom spline, gradient area fill, and pulse indicator.
+/// Renders a single direction track with smoothed linear interpolation, gradient fill, and pulse.
 #[allow(clippy::too_many_arguments)]
 fn draw_area_track(
     canvas: &mut Canvas,
@@ -788,10 +833,10 @@ pub fn render_unified_dual_chart_png_ss(
     }
     let ss = supersample.max(1);
 
-    let rx_all: Vec<f64> = history.iter().map(|s| s.rx_bps as f64).collect();
-    let tx_all: Vec<f64> = history.iter().map(|s| s.tx_bps as f64).collect();
-    let rx = apply_fluid_wave_smoothing(&windowed(&rx_all, sample_count));
-    let tx = apply_fluid_wave_smoothing(&windowed(&tx_all, sample_count));
+    let rx_window = windowed_mapped(history, sample_count, |s| s.rx_bps as f64);
+    let tx_window = windowed_mapped(history, sample_count, |s| s.tx_bps as f64);
+    let rx = apply_fluid_wave_smoothing(&rx_window);
+    let tx = apply_fluid_wave_smoothing(&tx_window);
 
     // One shared scale keeps the mirrored halves honest: an upload spike only
     // looks as tall as a download spike when it actually is one.
@@ -855,15 +900,12 @@ pub fn render_chart_png(
         return Err("zero-sized chart".to_string());
     }
     let ss = 3u32;
-    let raw: Vec<f64> = history
-        .iter()
-        .map(|s| match track {
-            Track::Download => s.rx_bps as f64,
-            Track::Upload => s.tx_bps as f64,
-        })
-        .collect();
+    let raw = windowed_mapped(history, sample_count, |s| match track {
+        Track::Download => s.rx_bps as f64,
+        Track::Upload => s.tx_bps as f64,
+    });
 
-    let values = apply_fluid_wave_smoothing(&windowed(&raw, sample_count));
+    let values = apply_fluid_wave_smoothing(&raw);
     let scale = values
         .iter()
         .cloned()
@@ -980,7 +1022,7 @@ pub fn render_unified_chart_data_uri(
     let is_idle = history.is_empty()
         || history[history.len() - window_samples..]
             .iter()
-            .all(|s| s.rx_bps == 0 && s.tx_bps == 0 && s.latency_ms.is_none());
+            .all(|s| s.rx_bps == 0 && s.tx_bps == 0);
 
     if is_idle {
         return render_idle_unified_chart_data_uri(size, chart_window, theme, style);
@@ -1116,7 +1158,7 @@ pub fn apply_fluid_wave_smoothing(raw_values: &[f64]) -> Vec<f64> {
     smoothed
 }
 
-/// Generates an interpolated Catmull-Rom point sequence from discrete coordinates.
+/// Generates a linearly interpolated point sequence from discrete coordinates.
 pub fn smooth_flowing_curve(points: &[(f64, f64)], subdivisions: usize) -> Vec<(f64, f64)> {
     if points.len() < 2 || subdivisions <= 1 {
         return points.to_vec();
@@ -1288,10 +1330,20 @@ mod tests {
 
     #[test]
     fn windowing_pads_short_history_at_the_front() {
-        let padded = windowed(&[5.0, 6.0], 6);
+        let samples = [
+            HistorySample::from_bps(5, 50, 250_000_000),
+            HistorySample::from_bps(6, 60, 250_000_000),
+        ];
+        let padded = windowed_mapped(&samples, 6, |sample| sample.rx_bps as f64);
         assert_eq!(padded, vec![0.0, 0.0, 0.0, 0.0, 5.0, 6.0]);
         // And trims when history is longer than the window.
-        let trimmed = windowed(&[1.0, 2.0, 3.0, 4.0], 2);
+        let samples = [
+            HistorySample::from_bps(1, 10, 250_000_000),
+            HistorySample::from_bps(2, 20, 250_000_000),
+            HistorySample::from_bps(3, 30, 250_000_000),
+            HistorySample::from_bps(4, 40, 250_000_000),
+        ];
+        let trimmed = windowed_mapped(&samples, 2, |sample| sample.rx_bps as f64);
         assert_eq!(trimmed, vec![3.0, 4.0]);
     }
 

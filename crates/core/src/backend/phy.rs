@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use super::types::{
     EthernetLinkMetrics, InterfaceMedium, PhysicalLinkInfo, WifiPhyMetrics,
-    signal_quality_to_rssi_dbm, wifi_band, wifi_generation_with_band,
+    signal_quality_to_rssi_dbm, wifi_band, wifi_channel_number, wifi_generation_with_band,
 };
 use super::wchar_to_string;
 
@@ -94,6 +94,24 @@ pub(crate) const WLAN_INTF_OPCODE_CURRENT_CONNECTION: u32 = 7;
 pub(crate) const WLAN_INTF_OPCODE_CHANNEL_NUMBER: u32 = 8;
 pub(crate) const WLAN_INTF_OPCODE_REALTIME_CONNECTION_QUALITY: u32 = 19;
 
+pub(crate) fn luid_for_wifi_guid(guid_bytes: &[u8; 16]) -> Option<u64> {
+    use windows::Win32::NetworkManagement::{
+        IpHelper::ConvertInterfaceGuidToLuid, Ndis::NET_LUID_LH,
+    };
+
+    let guid = windows::core::GUID::from_values(
+        u32::from_le_bytes(guid_bytes[0..4].try_into().ok()?),
+        u16::from_le_bytes(guid_bytes[4..6].try_into().ok()?),
+        u16::from_le_bytes(guid_bytes[6..8].try_into().ok()?),
+        guid_bytes[8..16].try_into().ok()?,
+    );
+    let mut luid = NET_LUID_LH { Value: 0 };
+    if unsafe { ConvertInterfaceGuidToLuid(&guid, &mut luid) }.0 != 0 {
+        return None;
+    }
+    Some(unsafe { luid.Value })
+}
+
 #[link(name = "wlanapi")]
 unsafe extern "system" {
     pub(crate) fn WlanOpenHandle(
@@ -124,6 +142,10 @@ unsafe extern "system" {
 /// Uses `WLAN_REALTIME_CONNECTION_QUALITY` as the primary rate, quality, and MLO source
 /// without requiring Windows location permissions, with graceful fallback to connection attributes.
 pub fn query_active_wifi_metrics() -> Option<WifiPhyMetrics> {
+    query_active_wifi_metrics_for_luid(None)
+}
+
+pub fn query_active_wifi_metrics_for_luid(target_luid: Option<u64>) -> Option<WifiPhyMetrics> {
     unsafe {
         let mut negotiated = 0u32;
         let mut handle = 0isize;
@@ -146,7 +168,11 @@ pub fn query_active_wifi_metrics() -> Option<WifiPhyMetrics> {
                 std::slice::from_raw_parts((*list_ptr).InterfaceInfo.as_ptr(), count as usize);
             for iface in interfaces {
                 // wlan_interface_state_connected = 1
-                if iface.isState == 1 {
+                if iface.isState == 1
+                    && target_luid.is_none_or(|target| {
+                        luid_for_wifi_guid(&iface.InterfaceGuid) == Some(target)
+                    })
+                {
                     let mut data_size = 0u32;
                     let mut data_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
 
@@ -247,7 +273,7 @@ pub fn query_active_wifi_metrics() -> Option<WifiPhyMetrics> {
                             ssid,
                             generation: wifi_gen,
                             band,
-                            channel: if freq_mhz > 0 { Some(freq_mhz) } else { None },
+                            channel: wifi_channel_number(freq_mhz),
                             signal_quality_pct: quality_pct,
                             rssi_dbm,
                             tx_rate_mbps: tx_mbps,
@@ -322,24 +348,29 @@ pub fn query_active_wifi_metrics() -> Option<WifiPhyMetrics> {
     }
 }
 
-static WIFI_PHY_CACHE: std::sync::Mutex<(Option<WifiPhyMetrics>, Option<Instant>)> =
-    std::sync::Mutex::new((None, None));
+static WIFI_PHY_CACHE: std::sync::Mutex<(Option<u64>, Option<WifiPhyMetrics>, Option<Instant>)> =
+    std::sync::Mutex::new((None, None, None));
 
 /// Cached Wi-Fi PHY metrics lookup with a 2-second TTL to avoid spamming WlanAPI on every 500ms tick.
 pub fn query_cached_wifi_phy() -> Option<WifiPhyMetrics> {
+    query_cached_wifi_phy_for_luid(None)
+}
+
+pub fn query_cached_wifi_phy_for_luid(target_luid: Option<u64>) -> Option<WifiPhyMetrics> {
     const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = Instant::now();
     if let Ok(mut cache) = WIFI_PHY_CACHE.lock() {
-        if let (Some(phy), Some(last_query)) = &*cache
-            && now.duration_since(*last_query) < CACHE_TTL
+        if cache.0 == target_luid
+            && let Some(last_query) = cache.2
+            && now.duration_since(last_query) < CACHE_TTL
         {
-            return Some(phy.clone());
+            return cache.1.clone();
         }
-        let fresh = query_active_wifi_metrics();
-        *cache = (fresh.clone(), Some(now));
+        let fresh = query_active_wifi_metrics_for_luid(target_luid);
+        *cache = (target_luid, fresh.clone(), Some(now));
         fresh
     } else {
-        query_active_wifi_metrics()
+        query_active_wifi_metrics_for_luid(target_luid)
     }
 }
 
@@ -350,6 +381,12 @@ pub fn query_cached_wifi_ssid() -> Option<String> {
 
 /// Query active Ethernet connection link speed using IP Helper MIB_IF_ROW2.
 pub fn query_active_ethernet_metrics() -> Option<EthernetLinkMetrics> {
+    query_active_ethernet_metrics_for_luid(None)
+}
+
+pub fn query_active_ethernet_metrics_for_luid(
+    target_luid: Option<u64>,
+) -> Option<EthernetLinkMetrics> {
     use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 
     unsafe {
@@ -364,7 +401,10 @@ pub fn query_active_ethernet_metrics() -> Option<EthernetLinkMetrics> {
 
         for row in rows {
             // IF_TYPE_ETHERNET_CSMACD = 6, IF_TYPE_GIGABITETHERNET = 117, IF_TYPE_FASTETHER = 62, IfOperStatusUp = 1
-            if (row.Type == 6 || row.Type == 117 || row.Type == 62) && row.OperStatus.0 == 1 {
+            if (row.Type == 6 || row.Type == 117 || row.Type == 62)
+                && row.OperStatus.0 == 1
+                && target_luid.is_none_or(|target| row.InterfaceLuid.Value == target)
+            {
                 let tx_bps = row.TransmitLinkSpeed;
                 let rx_bps = row.ReceiveLinkSpeed;
                 let desc = wchar_to_string(&row.Description);
@@ -393,10 +433,19 @@ pub fn query_active_ethernet_metrics() -> Option<EthernetLinkMetrics> {
 
 /// Resolves physical layer link information according to active medium.
 pub fn query_physical_link_info(primary_medium: InterfaceMedium) -> Option<PhysicalLinkInfo> {
+    query_physical_link_info_for_luid(primary_medium, None)
+}
+
+pub fn query_physical_link_info_for_luid(
+    primary_medium: InterfaceMedium,
+    primary_luid: Option<u64>,
+) -> Option<PhysicalLinkInfo> {
     match primary_medium {
-        InterfaceMedium::Wifi => query_cached_wifi_phy().map(PhysicalLinkInfo::Wifi),
+        InterfaceMedium::Wifi => {
+            query_cached_wifi_phy_for_luid(primary_luid).map(PhysicalLinkInfo::Wifi)
+        }
         InterfaceMedium::Ethernet => {
-            query_active_ethernet_metrics().map(PhysicalLinkInfo::Ethernet)
+            query_active_ethernet_metrics_for_luid(primary_luid).map(PhysicalLinkInfo::Ethernet)
         }
         _ => None,
     }

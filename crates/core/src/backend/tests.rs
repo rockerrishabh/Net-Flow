@@ -1045,6 +1045,13 @@ fn test_wifi_band_resolution() {
     assert_eq!(wifi_band(0, Some(6)), WifiBand::Band24Ghz);
     assert_eq!(wifi_band(0, Some(36)), WifiBand::Band5Ghz);
     assert_eq!(wifi_band(0, None), WifiBand::Unknown);
+    assert_eq!(wifi_channel_number(2412), Some(1));
+    assert_eq!(wifi_channel_number(2484), Some(14));
+    assert_eq!(wifi_channel_number(5180), Some(36));
+    assert_eq!(wifi_channel_number(5935), Some(2));
+    assert_eq!(wifi_channel_number(5955), Some(1));
+    assert_eq!(wifi_channel_number(7115), Some(233));
+    assert_eq!(wifi_channel_number(6000), None);
     assert_eq!(WifiBand::Band24Ghz.as_str(), "2.4 GHz");
     assert_eq!(WifiBand::Band5Ghz.as_str(), "5 GHz");
     assert_eq!(WifiBand::Band6Ghz.as_str(), "6 GHz");
@@ -1319,4 +1326,371 @@ fn test_packet_loss_tracker_latencies_and_jitter() {
 
     let jitter = crate::export::calculate_mean_absolute_rtt_difference(&lats);
     assert_eq!(jitter, 4.0);
+}
+
+#[test]
+fn test_counter_rollover_and_discontinuity_matrix() {
+    // 1. Normal increasing counter
+    assert_eq!(counter_delta(100, 250), Some(150));
+    assert_eq!(counter_delta(1_000_000, 1_050_000), Some(50_000));
+
+    // 2. Identical reading (zero delta)
+    assert_eq!(counter_delta(250, 250), Some(0));
+
+    // 3. Legitimate 32-bit counter rollover
+    let u32_max = u32::MAX as u64;
+    assert_eq!(counter_delta(u32_max - 1000, 500), Some(1501));
+    assert_eq!(counter_delta(u32_max, 0), Some(1));
+    assert_eq!(counter_delta(u32_max - 50_000, 50_000), Some(100_001));
+
+    // 4. Legitimate 64-bit counter rollover
+    assert_eq!(counter_delta(u64::MAX - 2000, 1000), Some(3001));
+    assert_eq!(counter_delta(u64::MAX, 0), Some(1));
+
+    // 5. Counter reset to zero (e.g. adapter reset/driver reload)
+    // Must return None so 0 bytes are credited instead of a fake multi-gigabyte spike!
+    assert_eq!(counter_delta(500_000_000, 0), None);
+    assert_eq!(counter_delta(10_000_000_000, 0), None);
+
+    // 6. Interface restart / arbitrary negative jump
+    assert_eq!(counter_delta(8_000_000, 100_000), None);
+    assert_eq!(counter_delta(2_000_000_000, 500), None);
+
+    // 7. Rollover delta exceeding plausible rate threshold (> 500 MB in 1 tick)
+    assert_eq!(counter_delta(u32_max - 600_000_000, 500), None);
+}
+
+#[test]
+fn test_72h_continuous_telemetry_stress() {
+    let mut backend = NetworkBackend::new();
+    let start_time = Instant::now();
+
+    let mut expected_rx = 0u64;
+    let mut expected_tx = 0u64;
+
+    let mut iface_rx = 1_000_000u64;
+    let mut iface_tx = 500_000u64;
+
+    let total_ticks: usize = 259_200; // 72 hours at 1 Hz (72 * 3600)
+
+    // Baseline sample at t = 0
+    let ifaces = vec![mock_iface(
+        1,
+        InterfaceCategory::Physical,
+        InterfaceMedium::Ethernet,
+        1,
+        iface_rx,
+        iface_tx,
+    )];
+    backend.sample_from_interfaces(&ifaces, start_time);
+
+    for tick in 1..=total_ticks {
+        let t = start_time + Duration::from_secs(tick as u64);
+
+        if tick == 50_000 {
+            // Scenario 1: Legitimate 32-bit counter rollover
+            let prev_rx = u32::MAX as u64 - 10_000;
+            let curr_rx = 5_000;
+            let wrap_delta_rx = (u32::MAX as u64 - prev_rx) + curr_rx + 1; // 15,001 bytes
+
+            let delta_tx = 5_000u64;
+            iface_tx += delta_tx;
+
+            let ifaces = vec![mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                curr_rx,
+                iface_tx,
+            )];
+            backend.prev_counters.get_mut(&1).unwrap().rx_bytes = prev_rx;
+
+            backend.sample_from_interfaces(&ifaces, t);
+            expected_rx += wrap_delta_rx;
+            expected_tx += delta_tx;
+            iface_rx = curr_rx;
+        } else if tick == 100_000 {
+            // Scenario 2: Legitimate 64-bit counter rollover
+            let prev_rx = u64::MAX - 20_000;
+            let curr_rx = 10_000;
+            let wrap_delta_rx = (u64::MAX - prev_rx) + curr_rx + 1; // 30,001 bytes
+
+            let delta_tx = 5_000u64;
+            iface_tx += delta_tx;
+
+            let ifaces = vec![mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                curr_rx,
+                iface_tx,
+            )];
+            backend.prev_counters.get_mut(&1).unwrap().rx_bytes = prev_rx;
+
+            backend.sample_from_interfaces(&ifaces, t);
+            expected_rx += wrap_delta_rx;
+            expected_tx += delta_tx;
+            iface_rx = curr_rx;
+        } else if tick == 150_000 {
+            // Scenario 3: Counter reset to zero (e.g. driver reload)
+            iface_rx = 0;
+            iface_tx = 0;
+            let ifaces = vec![mock_iface(
+                1,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                iface_rx,
+                iface_tx,
+            )];
+            backend.sample_from_interfaces(&ifaces, t);
+            // expected totals unchanged, new baseline established
+        } else if tick == 200_000 {
+            // Scenario 4: Interface replacement (LUID 1 removed, LUID 2 added)
+            let ifaces = vec![mock_iface(
+                2,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                1_000_000,
+                1_000_000,
+            )];
+            backend.sample_from_interfaces(&ifaces, t);
+            iface_rx = 1_000_000;
+            iface_tx = 1_000_000;
+        } else if tick == 220_000 {
+            // Scenario 5: Temporary invalid reading (0) on LUID 2
+            let ifaces = vec![mock_iface(
+                2,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                0,
+                0,
+            )];
+            backend.sample_from_interfaces(&ifaces, t);
+            iface_rx = 0;
+            iface_tx = 0;
+        } else {
+            // Normal steady traffic
+            let delta_rx = 10_000u64;
+            let delta_tx = 5_000u64;
+            iface_rx += delta_rx;
+            iface_tx += delta_tx;
+
+            let active_luid = if tick >= 200_000 { 2 } else { 1 };
+            let ifaces = vec![mock_iface(
+                active_luid,
+                InterfaceCategory::Physical,
+                InterfaceMedium::Ethernet,
+                1,
+                iface_rx,
+                iface_tx,
+            )];
+            backend.sample_from_interfaces(&ifaces, t);
+            expected_rx += delta_rx;
+            expected_tx += delta_tx;
+        }
+
+        // Periodic invariant assertion every 1,000 samples
+        if tick % 1_000 == 0 {
+            assert!(
+                backend.history.len() <= HISTORY_CAPACITY,
+                "history capacity invariant violated at tick {}",
+                tick
+            );
+            assert_eq!(
+                backend.session_rx, expected_rx,
+                "session_rx invariant violation at tick {}",
+                tick
+            );
+            assert_eq!(
+                backend.session_tx, expected_tx,
+                "session_tx invariant violation at tick {}",
+                tick
+            );
+        }
+    }
+
+    // Final steady-state assertions
+    assert_eq!(backend.session_rx, expected_rx);
+    assert_eq!(backend.session_tx, expected_tx);
+    assert!(backend.history.len() <= HISTORY_CAPACITY);
+}
+
+#[test]
+fn test_120_day_accounting_retention_simulation() {
+    let mut store = crate::daily_usage::DailyUsageStore::new();
+
+    let mut dates = Vec::new();
+    let month_days = [(1, 31), (2, 28), (3, 31), (4, 30)];
+    for (m, max_d) in month_days {
+        for d in 1..=max_d {
+            dates.push(format!("2026-{:02}-{:02}", m, d));
+        }
+    }
+    assert_eq!(dates.len(), 120);
+
+    for (day_idx, date) in dates.iter().enumerate() {
+        let day_num = day_idx + 1;
+
+        // Multiple intra-day deltas simulating morning, afternoon, evening
+        store.record_usage_delta(date, 10_000_000, 5_000_000);
+        store.record_usage_delta(date, 30_000_000, 15_000_000);
+        store.record_usage_delta(date, 20_000_000, 10_000_000);
+
+        if day_num <= 90 {
+            assert_eq!(store.entries.len(), day_num);
+        } else {
+            // Retention boundary invariant: strictly capped at 90
+            assert_eq!(store.entries.len(), crate::daily_usage::MAX_DAILY_ENTRIES);
+            assert_eq!(store.entries.len(), 90);
+
+            // Oldest day from (day_num - 90) must be the first entry
+            let expected_oldest = &dates[day_num - 90];
+            assert_eq!(&store.entries[0].date, expected_oldest);
+
+            // Evicted dates must no longer be found
+            let evicted_date = &dates[day_num - 91];
+            assert!(store.get_entry(evicted_date).is_none());
+        }
+
+        // Verify current date has exact combined totals
+        let entry = store
+            .get_entry(date)
+            .expect("current date must exist in store");
+        assert_eq!(entry.rx_bytes, 60_000_000);
+        assert_eq!(entry.tx_bytes, 30_000_000);
+
+        // Verify strict ascending chronological ordering and uniqueness
+        for window in store.entries.windows(2) {
+            assert!(
+                window[0].date < window[1].date,
+                "Dates must be strictly ascending: {} vs {}",
+                window[0].date,
+                window[1].date
+            );
+        }
+    }
+
+    assert_eq!(store.entries.len(), 90);
+    assert_eq!(store.entries.last().unwrap().date, "2026-04-30");
+}
+
+#[test]
+fn test_icmp_pathological_sequences_finite_and_bounded() {
+    // Sequence 1: Mixed dropouts and spikes
+    let mut tracker = PacketLossTracker::default();
+    let events = [
+        ProbeResult::Success {
+            latency: Duration::from_millis(10),
+        },
+        ProbeResult::Success {
+            latency: Duration::from_millis(15),
+        },
+        ProbeResult::Timeout,
+        ProbeResult::Success {
+            latency: Duration::from_millis(20),
+        },
+        ProbeResult::Timeout,
+        ProbeResult::Timeout,
+        ProbeResult::Success {
+            latency: Duration::from_millis(25),
+        },
+    ];
+    for ev in events {
+        tracker.record(ev);
+    }
+    let (loss, lost, total, health) = tracker.evaluate();
+    assert_eq!(total, 7);
+    assert_eq!(lost, 3);
+    assert_eq!(loss, Some(43)); // 3/7 ~ 43%
+    assert_eq!(health, LatencyHealth::Degraded);
+
+    let lats = tracker.latencies_ms();
+    assert_eq!(lats.len(), 4);
+    let jitter = crate::export::calculate_mean_absolute_rtt_difference(&lats);
+    assert!(!jitter.is_nan() && !jitter.is_infinite());
+    assert!(jitter >= 0.0);
+
+    // Sequence 2: 100% all success
+    let mut all_ok = PacketLossTracker::default();
+    for _ in 0..20 {
+        all_ok.record(ProbeResult::Success {
+            latency: Duration::from_millis(20),
+        });
+    }
+    let (loss_ok, _, _, health_ok) = all_ok.evaluate();
+    assert_eq!(loss_ok, Some(0));
+    assert_eq!(health_ok, LatencyHealth::Healthy);
+    let jitter_ok = crate::export::calculate_mean_absolute_rtt_difference(&all_ok.latencies_ms());
+    assert_eq!(jitter_ok, 0.0);
+
+    // Sequence 3: 100% all timeout
+    let mut all_timeout = PacketLossTracker::default();
+    for _ in 0..20 {
+        all_timeout.record(ProbeResult::Timeout);
+    }
+    let (loss_to, _, _, health_to) = all_timeout.evaluate();
+    assert_eq!(loss_to, Some(100));
+    assert_eq!(health_to, LatencyHealth::Timeout);
+    assert!(all_timeout.latencies_ms().is_empty());
+    let jitter_to =
+        crate::export::calculate_mean_absolute_rtt_difference(&all_timeout.latencies_ms());
+    assert_eq!(jitter_to, 0.0);
+    assert!(!jitter_to.is_nan());
+
+    // Sequence 4: Single success surrounded by timeouts
+    let mut single_ok = PacketLossTracker::default();
+    for _ in 0..10 {
+        single_ok.record(ProbeResult::Timeout);
+    }
+    single_ok.record(ProbeResult::Success {
+        latency: Duration::from_millis(50),
+    });
+    for _ in 0..9 {
+        single_ok.record(ProbeResult::Timeout);
+    }
+    let (loss_single, lost_single, total_single, health_single) = single_ok.evaluate();
+    assert_eq!(total_single, 20);
+    assert_eq!(lost_single, 19);
+    assert_eq!(loss_single, Some(95));
+    assert_eq!(health_single, LatencyHealth::Degraded);
+    assert_eq!(single_ok.latencies_ms().len(), 1);
+    let jitter_single =
+        crate::export::calculate_mean_absolute_rtt_difference(&single_ok.latencies_ms());
+    assert_eq!(jitter_single, 0.0);
+    assert!(!jitter_single.is_nan() && !jitter_single.is_infinite());
+
+    // Sequence 5: Massive latency spike
+    let mut spike = PacketLossTracker::default();
+    for _ in 0..10 {
+        spike.record(ProbeResult::Success {
+            latency: Duration::from_millis(5),
+        });
+    }
+    spike.record(ProbeResult::Success {
+        latency: Duration::from_millis(10_000),
+    });
+    for _ in 0..9 {
+        spike.record(ProbeResult::Success {
+            latency: Duration::from_millis(5),
+        });
+    }
+    let lats_spike = spike.latencies_ms();
+    let jitter_spike = crate::export::calculate_mean_absolute_rtt_difference(&lats_spike);
+    assert!(jitter_spike > 0.0);
+    assert!(!jitter_spike.is_nan() && !jitter_spike.is_infinite());
+
+    // Sequence 6: Rolling buffer never exceeds 20 samples
+    let mut bounded = PacketLossTracker::default();
+    for _ in 0..100 {
+        bounded.record(ProbeResult::Success {
+            latency: Duration::from_millis(10),
+        });
+    }
+    assert_eq!(bounded.count, 20);
+    assert_eq!(bounded.latencies_ms().len(), 20);
 }

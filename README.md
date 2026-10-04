@@ -9,9 +9,9 @@
 _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and near-zero resource footprint._
 
 [![CI](https://img.shields.io/badge/CI-Passing-brightgreen?logo=github-actions&logoColor=white)](https://github.com/rockerrishabh/net-flow/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-0.9.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue?logo=windows&logoColor=white)](CHANGELOG.md)
 [![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-9PCR54NGJ94J-0078D4?logo=microsoftstore&logoColor=white)](https://apps.microsoft.com/detail/9PCR54NGJ94J?mode=direct&cid=github_shield)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20(x64%20%2F%20ARM64)-0078D4?logo=windows11&logoColor=white)](https://www.microsoft.com/windows)
+[![Platform](<https://img.shields.io/badge/Platform-Windows%2011%20(x64%20%2F%20ARM64)-0078D4?logo=windows11&logoColor=white>)](https://www.microsoft.com/windows)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#-license)
 
@@ -32,7 +32,7 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 
 ## ✨ Highlights
 
-- **📋 Diagnostic Telemetry & Export Engine**: Generate comprehensive, reproducible network diagnostic reports via canonical **JSON** (`schema_version = 1`) and the specialized **CSV Dialect** (`netflow-diagnostics-v1`). Exports multi-adapter IP/MAC/gateway/DNS configuration, deep Wi-Fi RF telemetry, dual-stack ICMP quality with exact mean absolute RTT difference jitter, active process socket attribution, and a continuous 90-day zero-filled historical daily usage series.
+- **📋 Diagnostic Telemetry & Export Engine**: Generate reproducible network diagnostic reports via canonical **JSON** (`schema_version = 1`) and the specialized **CSV Dialect** (`netflow-diagnostics-v1`). Exports multi-adapter IP/MAC/gateway/DNS configuration, deep Wi-Fi RF telemetry, dual-stack ICMP quality, socket-count-based app traffic estimates (marked as estimates in JSON), and a continuous 90-day zero-filled historical daily usage series.
 - **🖥️ Headless CLI & Stdout Automation**: Headless document extraction via `net-flow.exe --export <csv|json> [path]`. Piping to stdout (`-`) guarantees pristine data streams with all error logs and diagnostics directed strictly to stderr for seamless pipe composition (`net-flow.exe --export json - | jq .`).
 - **🪟 Native Win32 Tray Flyout Companion (<5 MB RAM)**: Ultra-lightweight popup companion summoned instantly by left-clicking the notification area icon (`WM_LBUTTONUP`). Powered by pure GDI double-buffering with zero XAML/WinUI runtime overhead, displaying live metric cards, sparklines, latency diagnostics, quota gauges, and a balanced 3-button action bar (`[Export]`, `[Reset]`, `[Close]`).
 - **🦾 Windows on ARM64 Tier-1 Support**: Native binary compilation for `aarch64-pc-windows-msvc` alongside `x86_64`, delivering fluid performance and extreme battery efficiency on Snapdragon X Elite and Copilot+ PCs.
@@ -44,17 +44,17 @@ _Built in pure Rust for maximum performance, buttery-smooth fluid waveforms, and
 - **🛜 Deep Wi-Fi PHY & Physical Link Telemetry**: Real-time physical layer metrics using Windows Native Wi-Fi API (`WLAN_REALTIME_CONNECTION_QUALITY`) without requiring location permissions: detects Wi-Fi 7 / 6 / 5 generations, frequency bands (2.4 / 5 / 6 GHz), RSSI dBm, negotiated rates, Multi-Link Operation (MLO), and Ethernet link speeds.
 - **🛡️ Persistent Background System Tray Host**: Decoupled notification-area host (`net-flow.exe --tray`) started automatically at login via Windows `<uap5:StartupTask>`, featuring quick session resets, startup toggling, and fast latency target cycling.
 - **📈 Mirrored Dual-Stream Waveforms**: An in-memory supersampled sparkline rendering download traffic above the baseline and upload traffic below on a shared scale with glowing pulse nodes and peak-preserving Catmull-Rom smoothing.
-- **🌓 System Theme-Aware Palettes**: Automatic Windows Dark/Light mode tracking via `AppsUseLightTheme` registry integration, rendering vibrant dark palettes or high-contrast light palettes with in-card overrides.
+- **🌓 System Theme-Aware Palettes**: Automatically follows the Windows Widgets Board surface theme, rendering dark or light palettes without a manual in-card selector.
 - **📊 Modern Graph Rendering Styles**: Choose between smooth **Area** (Catmull-Rom spline fills) or discrete industrial **Bar** (quantized histogram columns).
 - **🚀 Instant Auto-Start on Boot**: Native packaged Win32 `<uap5:StartupTask>` launches the persistent host upon Windows login with zero configuration.
 - **🌊 50 KB/s Scale Floor & Headroom**: A vertical scale floor keeps sub-kilobyte background network noise proportional, while 18% vertical headroom cushions traffic spikes from card boundaries.
 - **⚡ Ultra-Low Resource Usage**: Uses native Windows `IP Helper` (`GetIfTable2`) APIs and asynchronous Rust for near-zero CPU (< 0.1%) and negligible RAM footprint (< 15 MB).
 - **🛜 Smart Active Adapter Detection**: Auto-detects the primary active network adapter with contextual badges (Wi-Fi with friendly SSID, Ethernet, Cellular, VPN).
-- **📱 Per-App Bandwidth Attribution**: Tracks active applications consuming network bandwidth with compact rate formatting (`↓ 11.1 ↑ 9.1 KB/s (37)`) and generous 22-character name budgets.
+- **📱 Estimated Per-App Traffic**: Shows active socket-owning applications and estimates their share of adapter throughput by open socket count. Rates are estimates, not per-process packet counters.
 - **📊 Authoritative Session Usage Tracking**: Monitors cumulative upload/download data transferred and active session duration with atomic disk persistence and race-free multi-process synchronization.
 - **🔔 Asymmetric Bandwidth Usage Alerts**: Independent download and upload state machines fire Windows toasts only when sustained above independent thresholds, with rate-limiting cooldown timers.
 - **🖥️ System Tray Icon**: A rich notification-area icon with live transfer rate and latency tooltips, widgets board launcher, startup toggles, and session reset.
-- **⚙️ Native Widget Customization**: Seamlessly customize speed units, timeframe windows, theme modes, graph styles, and alert thresholds via Windows 11 Widget Board's native flyout.
+- **⚙️ Native Widget Customization**: Customize speed units, timeframe windows, selected adapter, graph style, independent download/upload alerts and cooldowns, and data budget thresholds via the Windows 11 Widget Board settings card. Colors follow the Widgets Board theme automatically.
 
 ---
 
@@ -69,9 +69,9 @@ Net Flow v0.8.0 introduces an ultra-lightweight companion flyout summoned instan
 - **📊 Live Dashboard Components**:
   - **Metric Cards**: Prominent download (emerald) and upload (blue) current rate displays.
   - **Latency Diagnostics**: Real-time ping latency, jitter spread, packet loss %, and semantic health status pill.
-  - **Dual Sparkline Waveform**: 30-sample rolling timeline visualizing download and upload rails.
+  - **Dual Sparkline Waveform**: 30-second rolling timeline visualizing download and upload rails.
   - **Data Quota Gauge**: Color-coded progress bar tracking current monthly allowance and billing cycle.
-  - **Top Network Consumers**: Live process attribution displaying the top 3 active bandwidth-consuming applications.
+  - **Estimated App Traffic**: Displays active socket-owning applications and estimates their share of adapter throughput from open socket counts.
   - **Quick Controls**: Interactive "Reset Session" and "Close" buttons with mouse hover tracking and click hit-testing.
 
 ---
@@ -96,14 +96,16 @@ Net Flow is available directly through the Microsoft Store with seamless backgro
 
 Download the matching archive for your CPU architecture from [GitHub Releases](https://github.com/rockerrishabh/Net-Flow/releases/latest):
 
-| Architecture | Package Archive | Target Devices |
-| :--- | :--- | :--- |
-| **x64 (Intel / AMD)** | `net-flow-windows-x64.zip` | 64-bit Windows 11 PCs |
+| Architecture                      | Package Archive              | Target Devices                    |
+| :-------------------------------- | :--------------------------- | :-------------------------------- |
+| **x64 (Intel / AMD)**             | `net-flow-windows-x64.zip`   | 64-bit Windows 11 PCs             |
 | **ARM64 (Qualcomm / Snapdragon)** | `net-flow-windows-arm64.zip` | Snapdragon X Elite / Copilot+ PCs |
 
 1. Extract the downloaded zip archive.
 2. Run `.\install.ps1` in PowerShell (or right-click `install.ps1` → **Run with PowerShell**).
 3. The installer trusts the package signing certificate in **Local Computer → Trusted People**, registers the MSIX package into Windows 11, and refreshes the Widgets Board.
+
+The sideload archive contains the app layout rather than a prebuilt MSIX. Installing from it requires the Windows SDK tools `MakeAppx` and `SignTool`; the installer builds and signs the MSIX locally. `MakePri` is also required when rebuilding from source without an existing `resources.pri`. The Microsoft Store installation does not need these tools.
 
 ### 3. Developer Source Build & Sideloading
 
@@ -123,17 +125,19 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Rebuild
 
 #### Installer Options (`scripts/install.ps1`)
 
-| Parameter | Description |
-| :--- | :--- |
-| *(default)* | Installs existing valid MSIX package if present; packages if missing. |
-| `-Rebuild` | Forces clean Cargo compilation (`cargo build --release`), repacks MSIX, and signs with a local certificate. |
-| `-MsixPath <path>` | Installs an explicitly specified external `.msix` package. |
-| `-Status` | Displays current installation, binary, manifest, and background process status. |
-| `-Uninstall` | Safely unregisters the widget package (`NetFlow.Widget`) and sweeps dev certificates. |
-| `-RestartWidgets` | Best-effort refresh of Windows 11 Widgets Board host processes. |
+| Parameter          | Description                                                                                                 |
+| :----------------- | :---------------------------------------------------------------------------------------------------------- |
+| _(default)_        | Installs if missing; if already installed, prompts to **[U]ninstall**, **[R]einstall / Update**, or cancel (Enter cancels). |
+| `-Install`         | Installs/updates package directly without prompting even if already installed.                              |
+| `-Rebuild`         | Rebuilds with Cargo, packages for the executable architecture, and signs with a local certificate. |
+| `-MsixPath <path>` | Installs an explicitly specified external `.msix` package.                                                  |
+| `-Status`          | Displays current installation, binary, manifest, and background process status.                             |
+| `-Uninstall`       | Unregisters the widget package and removes only certificates this installer added. Preserves app data and local package files. |
+| `-PurgeData`       | Used with `-Uninstall` to also delete `%LOCALAPPDATA%\NetFlow` app data and history. |
+| `-RestartWidgets`  | Best-effort refresh of Windows 11 Widgets Board host processes.                                             |
 
 > [!NOTE]
-> Local MSIX sideloading requires **Developer Mode** enabled in Windows Settings (*Settings → System → For developers → Developer Mode*) and trusts the self-signed package in `Local Computer\TrustedPeople`.
+> Local MSIX sideloading requires **Developer Mode** enabled in Windows Settings (_Settings → System → For developers → Developer Mode_) and trusts the package signer in `Local Computer\TrustedPeople`. The installer checks the package identity, publisher, and signature before adding trust. Uninstall preserves application data by default; use `-Uninstall -PurgeData` to remove it.
 
 ---
 
@@ -141,20 +145,20 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Rebuild
 
 Net Flow is engineered from the ground up for zero distraction, extreme reliability, and minimal system impact:
 
-| Metric / Component | Implementation | Impact |
-| :--- | :--- | :--- |
-| **Release Binary Size** | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`) | **Compact standalone executable** (LTO stripped) |
-| **Tray Flyout Working Set** | Pure Win32 GDI double-buffering (zero XAML/WinUI runtime overhead) | **< 4 MB RAM** companion window |
-| **Platform Target Support** | Dual native Tier-1 targets (`x86_64-pc-windows-msvc` & `aarch64-pc-windows-msvc`) | **Native x64 and ARM64** execution |
-| **Active CPU Utilization** | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing | **< 0.1% CPU** during active monitoring |
-| **Idle CPU Overhead** | Precomputed `OnceLock` idle chart cache bypassing rasterizer | **0.024% of 1 core** (55x speedup; 120 µs idle bypass) |
-| **Memory Footprint** | Bounded ring buffers (240 samples) & in-memory rasterization | **< 15 MB** working set |
-| **Telemetry Cadence** | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication | High-resolution waveforms with zero system scheduler jitter |
-| **Process Attribution** | Decoupled 1.0s process inspection with 256-entry bounded icon cache | Per-app network tracking without UI thread blocking |
-| **Chart Peak Tracking** | Incremental O(1) running maximum tracking | Eliminates O(N) buffer scans on every render tick |
-| **COM Lifetime** | Automatic idle detection with 30s grace period and `CoRevokeClassObject` | **Zero zombie background processes** when unpinned |
-| **Lock Poison-Safety** | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`) | Fault-tolerant under `panic = "abort"` |
-| **Log Management** | Thread-safe 1MB rotating logger in `%TEMP%` | Prevents disk bloat; quiet by default |
+| Metric / Component          | Implementation                                                                    | Impact                                                      |
+| :-------------------------- | :-------------------------------------------------------------------------------- | :---------------------------------------------------------- |
+| **Release Binary Size**     | Link-Time Optimization (`lto = true`, `strip = true`, `codegen-units = 1`)        | **Compact standalone executable** (LTO stripped)            |
+| **Tray Flyout Working Set** | Pure Win32 GDI double-buffering (zero XAML/WinUI runtime overhead)                | **< 4 MB RAM** companion window                             |
+| **Platform Target Support** | Dual native Tier-1 targets (`x86_64-pc-windows-msvc` & `aarch64-pc-windows-msvc`) | **Native x64 and ARM64** execution                          |
+| **Active CPU Utilization**  | Direct Win32 IP Helper polling (`GetIfTable2`) & diffing                          | **< 0.1% CPU** during active monitoring                     |
+| **Idle CPU Overhead**       | Precomputed `OnceLock` idle chart cache bypassing rasterizer                      | **0.024% of 1 core** (55x speedup; 120 µs idle bypass)      |
+| **Memory Footprint**        | Bounded ring buffers (240 samples) & in-memory rasterization                      | **< 15 MB** working set                                     |
+| **Telemetry Cadence**       | Decoupled 250ms (4 Hz) sampling + 500ms (2 Hz) card publication                   | High-resolution waveforms with zero system scheduler jitter |
+| **Process Attribution**     | Decoupled 1.0s process inspection with 256-entry bounded icon cache               | Per-app network tracking without UI thread blocking         |
+| **Chart Peak Tracking**     | Incremental O(1) running maximum tracking                                         | Eliminates O(N) buffer scans on every render tick           |
+| **COM Lifetime**            | Automatic idle detection with 30s grace period and `CoRevokeClassObject`          | **Zero zombie background processes** when unpinned          |
+| **Lock Poison-Safety**      | Poison-recovering extension traits (`lock_safe`, `read_safe`, `write_safe`)       | Fault-tolerant under `panic = "abort"`                      |
+| **Log Management**          | Thread-safe 1MB rotating logger in `%TEMP%`                                       | Prevents disk bloat; quiet by default                       |
 
 ---
 
@@ -170,8 +174,8 @@ When running Net Flow, Windows 11 may show Net Flow under **Settings → Privacy
 
 ### Our Privacy Guarantee
 
-- **Zero Location Tracking**: Net Flow contains **zero GPS code, zero geolocation libraries, and makes zero network requests**.
-- **100% Offline**: Net Flow does not transmit any data over the internet. There are **zero diagnostics, zero analytics, and zero telemetry servers**.
+- **Zero Location Tracking**: Net Flow contains **zero GPS code, zero geolocation libraries, and no location tracking**.
+- **No Telemetry Uploads**: Net Flow does not transmit diagnostics, analytics, or telemetry to servers. Its latency monitor sends ICMP echo probes with a fixed `NetFlow` payload to the configured gateway or public Cloudflare resolver (`1.1.1.1` / `2606:4700:4700::1111`); public endpoints can observe your public IP and probe timing. Optional diagnostic exports can include local adapter addresses, Wi-Fi identifiers, and process names; they are only shared if you choose to share the exported file.
 - **Completely Optional**: If you disable location in Windows Settings, Net Flow continues running with 100% functionality—it simply displays `Wi-Fi` in the header instead of your network name.
 
 📖 For complete details, see our [Privacy Policy (PRIVACY.md)](PRIVACY.md).
@@ -233,10 +237,10 @@ net-flow/
 
 ## 🧪 Testing & Verification
 
-Run all **157 workspace unit tests**:
+Run all **164 workspace unit tests**:
 
 ```powershell
-cargo test --workspace
+cargo test --workspace && cargo test -p net-flow
 ```
 
 Run Clippy with strict zero-warnings enforcement:
@@ -257,8 +261,8 @@ cargo build --release --workspace
 
 Net Flow includes automated GitHub Actions workflows:
 
-1. **`ci.yml`**: Runs on every push and pull request across both `x86_64` and `aarch64` targets. Validates code formatting, executes all **157 automated unit tests**, and verifies MSIX layout packaging.
-2. **`release.yml`**: Triggered on Git tags (e.g. `v0.9.0`) or manual workflow dispatch. Builds optimized binaries for both x64 and ARM64, packages public sideload archives (`net-flow-windows-x64.zip` and `net-flow-windows-arm64.zip`) with SHA256 checksums, bundles both architectures into a unified Microsoft Store package (`NetFlow_Store.msixbundle`), performs pre-submission integrity validation, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** catalog via Partner Center.
+1. **`ci.yml`**: Runs on every push and pull request across both `x86_64` and `aarch64` targets. Validates code formatting, executes all **164 automated unit tests**, and verifies MSIX layout packaging.
+2. **`release.yml`**: Triggered on Git tags (e.g. `v1.0.0`) or manual workflow dispatch. Builds optimized binaries for both x64 and ARM64, packages public sideload archives (`net-flow-windows-x64.zip` and `net-flow-windows-arm64.zip`) with SHA256 checksums, bundles both architectures into a unified Microsoft Store package (`NetFlow_Store.msixbundle`), performs pre-submission integrity validation, and automatically submits/updates the package and "What's new" metadata in the **Microsoft Store** catalog via Partner Center.
 
 ---
 
@@ -266,15 +270,14 @@ Net Flow includes automated GitHub Actions workflows:
 
 Net Flow follows a focused, incremental path towards production-ready General Availability (v1.0.0):
 
-| Milestone | Theme | Key Capabilities | Status |
-| :--- | :--- | :--- | :---: |
-| **v0.5.0** | **Modern Runtime & Polish** | Windows App SDK 2.x, ICMP jitter variance, and expanded tray host controls | ✅ Released |
-| **v0.6.0** | **Network Health Expansion** | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) | ✅ Released |
-| **v0.7.0** | **Data Budgeting & History** | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history | ✅ Released |
-| **v0.8.0** | **Tray Flyout & ARM64 Hardening** | Native Win32 GDI companion flyout (<4 MB RAM), Tier-1 Windows on ARM64, and unified Store msixbundle | ✅ Released (2026-10-03) |
-| **v0.9.0** | **Diagnostic Telemetry & Export Engine** | Canonical JSON & CSV export, headless CLI, multi-adapter diagnostics, exact jitter, and 3-button flyout | ✅ Released (2026-10-03) |
-| **v1.0.0** | **General Availability (GA)** | Multi-language localization (i18n), zero-allocation sparklines, and 72h continuous stress hardening | 🌟 Planned |
-
+| Milestone  | Theme                                    | Key Capabilities                                                                                                |          Status          |
+| :--------- | :--------------------------------------- | :-------------------------------------------------------------------------------------------------------------- | :----------------------: |
+| **v0.5.0** | **Modern Runtime & Polish**              | Windows App SDK 2.x, ICMP jitter variance, and expanded tray host controls                                      |       ✅ Released        |
+| **v0.6.0** | **Network Health Expansion**             | Dual-stack IPv6 ICMP, rolling packet loss % calculation, and deep Wi-Fi PHY metrics (RSSI dBm, band, link rate) |       ✅ Released        |
+| **v0.7.0** | **Data Budgeting & History**             | Monthly data cap allowances, billing cycle rollover, multi-tier toast warnings, and 90-day atomic JSON history  |       ✅ Released        |
+| **v0.8.0** | **Tray Flyout & ARM64 Hardening**        | Native Win32 GDI companion flyout (<4 MB RAM), Tier-1 Windows on ARM64, and unified Store msixbundle            |       ✅ Released        |
+| **v0.9.0** | **Diagnostic Telemetry & Export Engine** | Canonical JSON & CSV export, headless CLI, multi-adapter diagnostics, exact jitter, and 3-button flyout         |       ✅ Released        |
+| **v1.0.0** | **General Availability (GA)**            | Zero-allocation steady-state sparklines, 72h continuous stress hardening, and telemetry reliability             | ✅ Released (2026-10-04) |
 
 ---
 
